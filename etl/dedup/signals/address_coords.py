@@ -60,6 +60,7 @@ __all__ = [
     "haversine_meters",
     "prices_close",
     "sizes_close",
+    "sizes_equal",
 ]
 
 _MAX_DISTANCE_METERS = 15.0
@@ -88,6 +89,26 @@ def sizes_close(a_m2: Decimal | None, b_m2: Decimal | None, tolerance: Decimal) 
         return False
     ratio = abs(a_m2 - b_m2) / max(a_m2, b_m2)
     return ratio <= tolerance
+
+
+def sizes_equal(a_m2: Decimal | None, b_m2: Decimal | None) -> bool:
+    """True when both sizes are present and EXACTLY equal — no tolerance band.
+
+    Issue #602/D-137: the photo_hash exact-photo-match auto-merge path used
+    to corroborate with `sizes_close(..., 5%)`. Replaying candidate rules
+    against 68 hand-reviewed photo_hash pairs (49 merged, 19 rejected) found
+    m2_built is the actual discriminator, not a proximity band — all 49
+    merges had identical m2_built; none of the 19 rejections did. A 5% band
+    is exactly what let a same-building-different-unit false merge through.
+    See D-137 for the full measurement.
+
+    Same missing-value discipline as `sizes_close`/`prices_close`: absence
+    or a non-positive value on either side is never a match, never a
+    permissive default.
+    """
+    if a_m2 is None or b_m2 is None or a_m2 <= 0 or b_m2 <= 0:
+        return False
+    return a_m2 == b_m2
 
 
 def prices_close(a: Decimal | None, b: Decimal | None, tolerance: Decimal) -> bool:

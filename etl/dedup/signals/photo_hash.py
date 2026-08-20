@@ -147,12 +147,12 @@ def _looks_like_photo_url(url: str) -> bool:
 # because this signal used to only ever file a *suggestion* (capped at
 # _MAX_SUGGESTION_CONFIDENCE) — a miss cost one suggestion nobody saw; a
 # false positive cost a human reviewing/confirming a bogus pair. Issue #188
-# (approved once #197 removed same-source pairing — see
-# PHOTO_MERGE_SIZE_RATIO below) now lets a *full* match_ratio == 1.0, below
-# this threshold, auto-merge when corroborated by size/price proximity, so
-# get the threshold right: raising the Hamming cutoff too far would start
-# admitting genuinely different photos into that ratio == 1.0 bucket, which
-# is no longer purely a "human reviews a suggestion" safety net for the
+# (approved once #197 removed same-source pairing — see D-137 below) now
+# lets a *full* match_ratio == 1.0, below this threshold, auto-merge when
+# corroborated by an exact m2_built match and price proximity, so get the
+# threshold right: raising the Hamming cutoff too far would start admitting
+# genuinely different photos into that ratio == 1.0 bucket, which is no
+# longer purely a "human reviews a suggestion" safety net for the
 # exact-match case.
 # See TestWatermarkLimitation in etl/tests/test_dedup_signals_photo_hash.py,
 # which pins this so a future retune has to revisit it consciously.
@@ -160,15 +160,15 @@ _HASH_HAMMING_THRESHOLD = 10  # imagehash default hash_size=8 -> 64-bit hash
 MIN_MATCH_RATIO = Decimal("0.60")
 _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 
-# Issue #188 — approved once issue #197 removed same-source pairing. Before
-# #197, a bank/developer listing several units of one block on *one* portal
-# with one shared photoset could hit match_ratio == 1.0 against a genuinely
-# different flat, which is why photo_hash previously never auto-merged at
-# all. That same-building-different-unit case is a same-source pattern by
-# construction (one portal, one agency's photoset) — #197 stops same-source
-# pairs from ever reaching this signal, so what's left at match_ratio == 1.0
-# between two *different* sources is corroborated by size/price proximity
-# below (and by the issue #186 floor veto in etl.dedup.engine.evaluate_pair)
+# Issue #188/#602, D-137 — approved once issue #197 removed same-source
+# pairing. Before #197, a bank/developer listing several units of one block
+# on *one* portal with one shared photoset could hit match_ratio == 1.0
+# against a genuinely different flat, which is why photo_hash previously
+# never auto-merged at all. That same-building-different-unit case is a
+# same-source pattern by construction (one portal, one agency's photoset) —
+# #197 stops same-source pairs from ever reaching this signal, so what's
+# left at match_ratio == 1.0 between two *different* sources is
+# corroborated by an EXACT m2_built match and price proximity below,
 # rather than by photos alone.
 #
 # The merge decision is keyed on match_ratio itself (== 1.0 exactly), not
@@ -177,24 +177,49 @@ _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 # 1.0 is a clean, non-borderline cut — no calibration needed between
 # "clearly a suggestion" and "clearly a merge".
 #
-# Tolerances measured against the 16 cross-source match_ratio == 1.0 pairs
-# in the live suggestion queue: 13 of 16 already agree exactly on size and
-# price; the 3 that don't (suggestions 197, 235, 412) are the classic
-# built-vs-useful m² discrepancy between portals (6m² apart on ~140-150m²
-# flats -> 6/145=4.14% and 6/154=3.90% of the larger side) and one portal a
-# day stale on price (1.000€ apart on a 170.000€ flat -> 1000/170000=0.59%)
-# — evidence of cross-portal measurement/staleness noise, not different
-# units. 5% size mirrors _MAX_SIZE_RATIO/_CORROBORATION_SIZE_RATIO, the
-# same figure this codebase already uses for the identical "different unit"
-# discriminator in address_coords.py/phone_extract.py/reference_code.py —
-# comfortably above the largest measured gap (4.14%) without loosening past
-# a figure already vetted elsewhere for the same purpose. 2% price is
-# tighter than those signals' 10% fallback (which corroborates in the
-# *absence* of coordinate/photo evidence, a weaker starting point than a
-# full match_ratio == 1.0) — 2% clears the largest measured staleness gap
-# (0.59%) with >3x margin while still rejecting a materially different
-# asking price.
-PHOTO_MERGE_SIZE_RATIO = Decimal("0.05")
+# Issue #602/D-137 (2026-08-20) — supersedes #602's own original proposal
+# (partial ratio >= 0.6, m2 within 5%, price within 5%, a floor-from-text
+# veto, a photo-promiscuity guard) after replaying candidate rules against
+# 68 photo_hash pairs the owner reviewed by hand (49 merged, 19 rejected):
+#
+#   - **match_ratio does not discriminate at all.** The 49 merges averaged
+#     ratio 1.000; the 19 rejections averaged 0.996 (range 0.929-1.000) —
+#     the owner rejected pairs whose photos matched 100%. A rule that leans
+#     on photo ratio alone (the #602 >= 0.6 proposal) merges things the
+#     owner says are different: the promotion/same-development pattern he
+#     predicted from the start. So this signal keeps requiring the FULL
+#     ratio == 1.0 that issue #188 already required — never lowered to 0.6.
+#   - **m2_built is the actual discriminator, not a proximity band.** ALL
+#     49 merges had identical m2_built; NONE of the 19 rejections did. The
+#     previous 5% size band (see the now-superseded PHOTO_MERGE_SIZE_RATIO
+#     comment this replaces) is exactly what a same-building-different-unit
+#     false merge slips through on — a 6m² gap on a ~145m² flat is 4.14%,
+#     comfortably inside a 5% band. `etl.dedup.engine.evaluate_pair` now
+#     requires `address_coords.sizes_equal` (exact equality, no tolerance)
+#     instead of `sizes_close` — a strictly narrower gate. The pre-existing
+#     issue #186 floor-conflict veto no longer gates this merge decision
+#     either (still computed and surfaced in `detail` for a human reviewing
+#     a *suggestion*): it's no longer load-bearing once m2_built must be
+#     exact, and #602's own broader floor-from-text extractor was never
+#     built — this rule doesn't need it. `structured_fields_conflict`
+#     (D-117, property_type/rooms) and the D-116 reference-code veto are
+#     unaffected — see evaluate_pair's own docstring and D-117/D-116.
+#   - **Price band: 2%, not 5% (also measured clean).** Conditioned on
+#     ratio == 1.0 + m2_built identical, EVERY price band the owner's
+#     history was replayed against contradicted zero of the 19 rejections —
+#     exact price (29/29 merges matched), <=1% (31/31), <=2% (31/31), <=3%
+#     (35/35), <=5% (47/49). 2% is chosen deliberately over the also-clean
+#     3%/5% bands: 19 rejections is thin evidence for an irreversible
+#     operation (a wrong auto-merge fuses two real properties, corrupting
+#     their score/feedback history), and the owner named 1-2% himself when
+#     discussing this. `PHOTO_MERGE_PRICE_RATIO` stays a single named
+#     constant (this project's convention for every dedup threshold — none
+#     of MIN_MATCH_RATIO/address_coords._MAX_SIZE_RATIO/etc. are wired to
+#     config/schema.yaml) so widening it later, on more labeled evidence, is
+#     a one-line change to a documented constant — a data decision, not a
+#     rediscovery of this reasoning.
+#
+# See D-137 for the full replay methodology and evidence table.
 PHOTO_MERGE_PRICE_RATIO = Decimal("0.02")
 PHOTO_MERGE_CONFIDENCE = Decimal("0.900")
 

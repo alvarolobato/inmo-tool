@@ -4631,14 +4631,26 @@ class TestStructuredFieldsNeverVetoesStrongerSignals:
 
 
 class TestPhotoHashAutoMerge:
-    """Issue #188 (approved once #197 removed same-source pairing):
-    match_ratio == 1.0 + size/price tolerance + no floor conflict
-    auto-merges; anything short of that stays a suggestion. Exercised via
-    engine.evaluate_pair directly with a pre-populated _PhotoHashCache
-    (real synthetic ImageHash values, distance controlled by construction)
-    rather than through engine.run(), so no network fetch is ever
-    attempted — same no-network split test_dedup_signals_photo_hash.py's
-    own tests use.
+    """Issue #602/D-137 (2026-08-20, supersedes issue #188's original
+    5%-size/2%-price tolerances): auto-merge requires ALL THREE —
+    match_ratio == 1.0 (not >= 0.6), m2_built EXACTLY equal (not within
+    5%), and price within 2%. Anything short of that stays a suggestion.
+
+    D-137 replaced the size tolerance after replaying candidate rules
+    against 68 photo_hash pairs the owner hand-reviewed (49 merged, 19
+    rejected): match_ratio does not discriminate his merges from his
+    rejections at all (both cluster near 1.0), but m2_built exact-equality
+    does (49/49 merges identical, 0/19 rejections identical). The
+    pre-existing issue #186 floor-conflict veto no longer gates this
+    decision either (see TestFloorConflictNoLongerGatesAutoMerge below) —
+    it's surfaced in `detail` for human review but is no longer
+    load-bearing once size must match exactly.
+
+    Exercised via engine.evaluate_pair directly with a pre-populated
+    _PhotoHashCache (real synthetic ImageHash values, distance controlled
+    by construction) rather than through engine.run(), so no network fetch
+    is ever attempted — same no-network split
+    test_dedup_signals_photo_hash.py's own tests use.
     """
 
     _IDENTICAL_HEX = "ffff0000ffff0000"
@@ -4664,32 +4676,32 @@ class TestPhotoHashAutoMerge:
         ]
         return cache
 
-    def test_suggestion_197_shape_auto_merges(self):
-        """The owner's own measured example: milanuncios 139m²/503.000€ vs
-        fotocasa 145m²/503.000€ — 4.14% size gap (built-vs-useful m²
-        across portals), identical price. Inside tolerance."""
+    def test_all_three_conditions_hold_auto_merges(self):
+        """The clean case: ratio 1.0, m2_built exactly equal, price
+        identical — D-137's own "matches the owner's merge pattern"
+        shape."""
         a = _record(
             1,
             100,
             source="milanuncios",
-            m2_built=Decimal(139),
-            current_price=Decimal(503000),
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
         )
         b = _record(
             2,
             200,
             source="fotocasa",
-            m2_built=Decimal(145),
-            current_price=Decimal(503000),
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
         )
         evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "merge"
         assert evaluation.confidence == Decimal("0.900")
 
-    def test_suggestion_412_shape_price_gap_within_tolerance_auto_merges(self):
-        """58m² both sides, 170.000€ vs 169.000€ — 0.59% price gap (one
-        portal a day stale). Inside the 2% price tolerance."""
+    def test_price_gap_within_2pct_auto_merges(self):
+        """58m² both sides (exact), 170.000€ vs 169.000€ — 0.59% price gap
+        (one portal a day stale). Inside the 2% price tolerance."""
         a = _record(
             1,
             100,
@@ -4703,94 +4715,15 @@ class TestPhotoHashAutoMerge:
         evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "merge"
 
-    def test_size_gap_beyond_tolerance_stays_a_suggestion(self):
-        a = _record(
-            1,
-            100,
-            source="milanuncios",
-            m2_built=Decimal(100),
-            current_price=Decimal(200000),
-        )
-        b = _record(
-            2,
-            200,
-            source="fotocasa",
-            m2_built=Decimal(120),
-            current_price=Decimal(200000),
-        )  # 16.7% apart — well past the 5% size tolerance
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
-        assert evaluation.basis == "photo_hash"
-        assert evaluation.decision == "suggest"
-
-    def test_price_gap_beyond_tolerance_stays_a_suggestion(self):
-        a = _record(
-            1,
-            100,
-            source="milanuncios",
-            m2_built=Decimal(70),
-            current_price=Decimal(200000),
-        )
-        b = _record(
-            2,
-            200,
-            source="fotocasa",
-            m2_built=Decimal(70),
-            current_price=Decimal(230000),
-        )  # 13% apart — well past the 2% price tolerance
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
-        assert evaluation.decision == "suggest"
-
-    def test_conflicting_floor_vetoes_the_auto_merge(self):
-        """Suggestion 197's exact structural shape: identical photos and
-        price, 6m² apart (within tolerance), floors "10º" vs "A partir de
-        la 15ª planta" — the floor veto must win even though photo/size/
-        price all clear the auto-merge bar."""
-        a = _record(
-            1,
-            100,
-            source="milanuncios",
-            m2_built=Decimal(139),
-            current_price=Decimal(503000),
-            floor="10º",
-        )
-        b = _record(
-            2,
-            200,
-            source="fotocasa",
-            m2_built=Decimal(145),
-            current_price=Decimal(503000),
-            floor="A partir de la 15ª planta",
-        )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
-        assert evaluation.basis == "photo_hash"
-        assert evaluation.decision == "suggest"
-        assert evaluation.detail["floor_conflict"] is True
-
-    def test_agreeing_floor_does_not_block_the_auto_merge(self):
-        a = _record(
-            1,
-            100,
-            source="milanuncios",
-            m2_built=Decimal(139),
-            current_price=Decimal(503000),
-            floor="3º",
-        )
-        b = _record(
-            2,
-            200,
-            source="fotocasa",
-            m2_built=Decimal(145),
-            current_price=Decimal(503000),
-            floor="3ª planta",
-        )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
-        assert evaluation.decision == "merge"
+    # --- Guard 1: match_ratio must be exactly 1.0 -------------------------
 
     def test_partial_photo_overlap_never_auto_merges_even_with_matching_size_price(
         self,
     ):
         """match_ratio < 1.0 (not a full match) must never auto-merge
         regardless of size/price agreement — only an exact overlap does.
+        Proves guard 1 alone: m2_built and price both satisfy their own
+        gates here, so ratio is the only thing that can be blocking this.
         Hex values chosen so the Hamming distance between any two distinct
         ones exceeds photo_hash._HASH_HAMMING_THRESHOLD (10): h1-h2=32,
         h1-h4=32, h2-h4=32 (verified independently), so hashes_a's h3
@@ -4832,6 +4765,324 @@ class TestPhotoHashAutoMerge:
         assert evaluation.basis == "photo_hash"
         assert evaluation.detail["match_ratio"] == pytest.approx(2 / 3, abs=0.001)
         assert evaluation.decision == "suggest"
+
+    # --- Guard 2: m2_built must be EXACTLY equal ---------------------------
+
+    def test_near_miss_74_vs_77_m2_does_not_auto_merge(self):
+        """The explicit D-137 near-miss: 74 vs 77 m² is a 3.9% gap — it
+        would have cleared the OLD 5% tolerance (and #602's own original
+        5% proposal) but must NOT auto-merge under the new exact-equality
+        rule. Ratio and price both satisfy their own gates, isolating
+        guard 2."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(77),
+            current_price=Decimal(250000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+
+    def test_size_gap_stays_a_suggestion(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(100),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(120),
+            current_price=Decimal(200000),
+        )  # 16.7% apart
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+
+    def test_missing_m2_built_on_either_side_never_auto_merges(self):
+        """Missing values are not matches (never a permissive default) —
+        a NULL m2_built on either side must stay a suggestion even with
+        ratio 1.0 and identical price."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=None,
+            current_price=Decimal(250000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+
+    # --- Guard 3: price must be within 2% -----------------------------------
+
+    def test_price_gap_beyond_2pct_stays_a_suggestion(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(230000),
+        )  # 13% apart — well past the 2% price tolerance
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "suggest"
+
+    def test_missing_price_on_either_side_never_auto_merges(self):
+        """Missing values are not matches — a NULL current_price on either
+        side must stay a suggestion even with ratio 1.0 and identical
+        m2_built."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(74),
+            current_price=None,
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+
+
+class TestFloorConflictNoLongerGatesAutoMerge:
+    """Issue #602/D-137: the issue #186 floor-conflict veto used to gate
+    the photo_hash exact-match auto-merge (`not floor_conflict` was a 4th
+    required condition). D-137 dropped it from the gate — replaying the
+    owner's 68 hand-reviewed pairs found m2_built exact-equality alone
+    already separates every merge from every rejection; floor was never
+    exercised in that measurement. `floor_conflict` is still computed and
+    surfaced in `detail` for a human reviewing a `suggest` verdict — this
+    just proves it no longer blocks the merge decision.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_conflicting_floor_still_auto_merges_when_all_three_conditions_hold(self):
+        """Same structural shape as the old suggestion-197 floor test
+        (floors "10º" vs "A partir de la 15ª planta"), but with m2_built
+        made EXACTLY equal (both 74) so the other two D-137 conditions are
+        satisfied — proves the floor conflict alone no longer blocks the
+        merge. `detail["floor_conflict"]` must still be True: it's
+        preserved for suggestion-review transparency even on a pair that
+        auto-merges."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+            floor="10º",
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+            floor="A partir de la 15ª planta",
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
+        assert evaluation.detail["floor_conflict"] is True
+
+    def test_agreeing_floor_does_not_block_the_auto_merge(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+            floor="3º",
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+            floor="3ª planta",
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "merge"
+        assert "floor_conflict" not in evaluation.detail
+
+
+class TestOwnerDecisionHistoryReplay:
+    """Issue #602/D-137: the rule this class pins is the one derived from
+    replaying candidate rules against 68 photo_hash pairs the owner
+    hand-reviewed on 2026-08-19 (49 merged, 19 rejected) — see D-137 for
+    the full evidence table. This is the test that proves the RULE, not a
+    synthetic happy path: one fixture shaped like his merge pattern, one
+    shaped like his reject pattern (same match_ratio, differing m2_built —
+    the actual finding, since photo ratio alone did NOT discriminate his
+    real decisions), and the explicit 74-vs-77 m² near-miss the rule must
+    still refuse.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_shape_matching_owner_merge_pattern_auto_merges(self):
+        """His 49 merges: ratio ~1.0, m2_built identical on both sides."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(90),
+            current_price=Decimal(310000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(90),
+            current_price=Decimal(310000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "merge"
+
+    def test_shape_matching_owner_reject_pattern_stays_a_suggestion(self):
+        """His 19 rejections: ratio still near/at 1.0 (photo ratio alone
+        never discriminated his decisions — the whole finding behind
+        D-137) but m2_built differs, same as none of his rejections had
+        identical m2_built."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(90),
+            current_price=Decimal(310000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(96),
+            current_price=Decimal(310000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "suggest"
+
+    def test_near_miss_74_vs_77_m2_matches_no_owner_merge(self):
+        """The explicit near-miss the task calls out: 74 vs 77 m² (3.9%
+        apart) must not auto-merge — it would have cleared the OLD 5%
+        tolerance this rule replaced."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(74),
+            current_price=Decimal(250000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(77),
+            current_price=Decimal(250000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "suggest"
+
+
+class TestPhotoHashAutoMergeVisibility:
+    """Issue #602/D-137's "auto-merges must be visible" requirement:
+    recorded in `property_merge_log` with the basis, and countable in the
+    run summary (`DedupRunResult.photo_hash_auto_merged`) without a SQL
+    query. End-to-end via `engine.run()` against a real DB with seeded
+    `photo_hashes` rows (issue #221's persistent store) rather than a
+    pre-populated in-memory cache — the same pattern
+    TestPurgePendingFuzzy._seed_stored_hash uses — so this exercises the
+    real fetch/hash-cache path, not just evaluate_pair in isolation.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _seed_stored_hash(self, conn, url: str, hex_digest: str, source: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                "VALUES (%s, %s, TRUE, %s)",
+                (url, hex_digest, source),
+            )
+        conn.commit()
+
+    def test_auto_merge_recorded_in_property_merge_log_and_run_summary(self, dedup_db):
+        photo_a = "https://cdn.milanuncios.com/visibility-a.jpg"
+        photo_b = "https://cdn.fotocasa.es/visibility-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "milanuncios")
+        self._seed_stored_hash(dedup_db, photo_b, self._IDENTICAL_HEX, "fotocasa")
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "photo-hash-visibility",
+            m2_built_a=Decimal(74),
+            m2_built_b=Decimal(74),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 1
+        assert result.photo_hash_auto_merged == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == "photo_hash"
 
 
 class TestPhotoHashMatchedPairsThreading:

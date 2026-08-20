@@ -99,6 +99,16 @@ class DedupRunResult:
     merged: int = 0
     suggested: int = 0
     conflicts: int = 0
+    # Issue #602, D-137: how many of `merged` above fired on the photo_hash
+    # exact-match auto-merge path specifically (basis == "photo_hash") —
+    # counted separately so an operator can see how many corroborated
+    # photo-hash auto-merges happened this run without a SQL query against
+    # property_merge_log, per D-137's "auto-merges must be visible"
+    # requirement. Incremented at both sites `merged` itself is (`_run`'s
+    # main loop and `_reevaluate_pending_suggestion`) — a merge is still a
+    # merge regardless of which path triggered it, same precedent as
+    # `reevaluated_merged` above.
+    photo_hash_auto_merged: int = 0
     # Issue #197: candidate pairs skipped at pair-generation because both
     # listings share a `source` — never handed to evaluate_pair at all, so
     # this is *not* counted in pairs_compared above. "Same-source" pairs
@@ -466,6 +476,15 @@ def evaluate_pair(
     call site (still deliberately kept, not retired — see D-117's own
     file) and `structured_fields_conflict` is currently unreferenced from
     `evaluate_pair`'s pipeline entirely.
+
+    Issue #602/D-137 (2026-08-20): the photo_hash exact-match auto-merge
+    below no longer gates on the issue #186 floor-conflict veto — see the
+    inline comment at that branch and `photo_hash.PHOTO_MERGE_PRICE_RATIO`'s
+    module comment for the full replay-against-real-decisions evidence.
+    D-116/D-117/`property_merge_veto` are unaffected: D-116 still vetoes
+    above (unconditionally, before photo_hash is ever reached), D-117 was
+    never wired in here to begin with, and `_run`'s pairwise loop still
+    skips a vetoed property pair before `evaluate_pair` is ever called.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:
@@ -505,12 +524,17 @@ def evaluate_pair(
         # direct evidence of "different unit, same building" — the owner's
         # own example (suggestion 197: floors "10º" vs "A partir de la 15ª
         # planta", identical photos and price, 6m² apart) came through this
-        # exact signal. Computed once, used two ways below: it vetoes the
-        # issue #188 auto-merge outright, and — even when it doesn't (ratio
-        # < 1.0, or size/price don't corroborate) — it's still surfaced in
-        # `detail` so a human reviewing the suggestion sees the
-        # discriminating data point rather than an unexplained
-        # perfect-looking match.
+        # exact signal. Still computed and surfaced in `detail` so a human
+        # reviewing a `suggest` verdict sees the discriminating data point
+        # rather than an unexplained near-perfect match — but issue #602/
+        # D-137 (2026-08-20) stopped this from gating the merge decision
+        # below: replaying candidate rules against 68 hand-reviewed
+        # photo_hash pairs found `m2_built` exact-equality alone already
+        # separates every one of the owner's 49 merges from his 19
+        # rejections (see photo_hash.PHOTO_MERGE_PRICE_RATIO's module
+        # comment for the full evidence table) — floor conflict was never
+        # exercised in that measurement and is no longer load-bearing once
+        # size must match exactly rather than within 5%.
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
@@ -546,21 +570,21 @@ def evaluate_pair(
                 for m in matches
             ]
 
-        # Issue #188 (approved once #197 removed same-source pairing — see
-        # photo_hash.PHOTO_MERGE_SIZE_RATIO's module-level comment for the
-        # full reasoning and the measured tolerances): a *full* photo
-        # overlap between two different sources (guaranteed here — #197
-        # never hands evaluate_pair a same-source pair in the first place),
-        # corroborated by size/price proximity and not vetoed by a
-        # conflicting floor, auto-merges rather than sitting in the review
-        # queue as a suggestion.
+        # Issue #188/#602, D-137 (approved once #197 removed same-source
+        # pairing — see photo_hash.PHOTO_MERGE_PRICE_RATIO's module-level
+        # comment for the full reasoning and the measured tolerances): a
+        # *full* photo overlap between two different sources (guaranteed
+        # here — #197 never hands evaluate_pair a same-source pair in the
+        # first place), corroborated by an EXACT m2_built match and price
+        # proximity, auto-merges rather than sitting in the review queue as
+        # a suggestion. `sizes_equal` (exact equality), not `sizes_close`
+        # (a tolerance band) — D-137 measured m2_built as the real
+        # discriminator between the owner's real merge/reject decisions,
+        # and a 5% band is exactly what let a false merge through before.
         exact_match = Decimal(str(round(ratio, 3))) == Decimal("1.000")
         if (
             exact_match
-            and not floor_conflict
-            and address_coords.sizes_close(
-                a.m2_built, b.m2_built, photo_hash.PHOTO_MERGE_SIZE_RATIO
-            )
+            and address_coords.sizes_equal(a.m2_built, b.m2_built)
             and address_coords.prices_close(
                 a.current_price, b.current_price, photo_hash.PHOTO_MERGE_PRICE_RATIO
             )
@@ -1056,6 +1080,8 @@ def _reevaluate_pending_suggestion(
     conn.commit()
     result.reevaluated_merged += 1
     result.merged += 1
+    if evaluation.basis == "photo_hash":
+        result.photo_hash_auto_merged += 1
     if had_conflict:
         result.conflicts += 1
     return survivor_id, losing_id
@@ -1383,6 +1409,8 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                         )
                         continue
                     result.merged += 1
+                    if evaluation.basis == "photo_hash":
+                        result.photo_hash_auto_merged += 1
                     if had_conflict:
                         result.conflicts += 1
                     listings = [
