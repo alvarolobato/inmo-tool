@@ -150,6 +150,42 @@
     return { url, portal, key: D.matchKey(url) };
   }
 
+  // ── 0. Block/challenge detection (issue #634) ─────────────────────────────
+  //
+  // Runs on EVERY render of a page on one of this extension's matched hosts —
+  // home, search/listing, or detail — independent of validation mode, the
+  // detail auto-capture switch, and whether any batch/auto run is even
+  // active. Detection itself is a small, portal-agnostic marker library in
+  // detect.js (self.InmoDetect.detectBlockSignals); this is just the "when to
+  // check, who to tell" wiring. A match is reported to the background worker,
+  // which records the episode, alerts at most once per episode, pauses
+  // whatever capture run is active (D-043/D-112's pending queue survives —
+  // see background.js's handleBlockDetected), and reports it to the
+  // dashboard. An unrecognised page — including a genuinely empty search or a
+  // 404/removed listing — never reaches the sendMessage below:
+  // detectBlockSignals returns blocked:false for it by construction (see its
+  // own module comment + the false-positive tests).
+  let lastBlockCheckHref = null;
+  function checkForBlock() {
+    try {
+      const url = window.location.href;
+      if (lastBlockCheckHref === url) return; // already checked this exact URL
+      lastBlockCheckHref = url;
+      const portal = D.supportedPortalForUrl(url);
+      if (!portal) return; // not one of our portals — nothing to report
+      const verdict = D.detectBlockSignals(document, portal);
+      if (verdict.blocked) {
+        chrome.runtime.sendMessage({
+          type: "BLOCK_DETECTED",
+          portal,
+          signature: verdict.signature,
+        });
+      }
+    } catch {
+      /* detection must never break the page or capture */
+    }
+  }
+
   function showToast(text) {
     try {
       const el = document.createElement("div");
@@ -236,6 +272,26 @@
       // Re-check we're still on the same detail page and haven't fired.
       const now = currentDetail();
       if (!now || now.key !== info.key) return;
+      // Last-moment block guard (issue #634): a challenge that appeared AFTER
+      // this detail page's initial render (e.g. a late JS-injected
+      // interstitial) would otherwise get captured as if it were the real
+      // listing. Re-check right before snapshotting the DOM; on a match,
+      // report it and leave the guard key un-claimed instead of firing — a
+      // challenge page must never be ingested as listing data, and a later
+      // retry (once the block clears) can still claim this key.
+      const blockVerdict = D.detectBlockSignals(document, info.portal);
+      if (blockVerdict.blocked) {
+        try {
+          chrome.runtime.sendMessage({
+            type: "BLOCK_DETECTED",
+            portal: info.portal,
+            signature: blockVerdict.signature,
+          });
+        } catch {
+          /* best-effort */
+        }
+        return;
+      }
       if (guard.claim(info.key)) fireCapture(info);
     };
 
@@ -500,6 +556,7 @@
       // A new URL is a fresh listing decision: drop any stale banner and re-arm.
       listingHandled = false;
       removeBanner();
+      checkForBlock();
       startAutoCaptureLoop();
       startListingLoop();
       startObserveLoop();
@@ -654,6 +711,10 @@
   }
 
   (async () => {
+    // Block detection (issue #634) runs FIRST and unconditionally — a
+    // challenge takes priority over every other decision on this page, and
+    // must not wait on the validation-mode round trip below.
+    checkForBlock();
     // Resolve validation mode first so the loops below see the right verdict.
     await initValidationMode();
     // The banner + app-signal auto-start are ALWAYS available (the banner is a

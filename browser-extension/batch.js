@@ -146,7 +146,7 @@
    * below) of WHY there's nothing to capture, so the popup can explain a 0/0
    * instead of showing a bare, confusing one.
    */
-  function makeBatchState(urls, concurrency, emptyReason) {
+  function makeBatchState(urls, concurrency, emptyReason, portal) {
     var list = Array.isArray(urls)
       ? urls.filter(function (u) {
           return typeof u === "string" && u.length > 0;
@@ -159,6 +159,12 @@
       }),
       concurrency: clampConcurrency(concurrency),
       status: list.length > 0 ? STATUSES.RUNNING : STATUSES.DONE,
+      // Which portal this run's URLs belong to (issue #634 review "cross-
+      // portal collateral") — null when unknown/mixed (e.g. an Auto drain
+      // with no portal restriction can span several portals at once; a
+      // block detected elsewhere must NOT pause a run it can't attribute).
+      // A single manual/auto-per-portal run always sets this.
+      portal: typeof portal === "string" && portal ? portal : null,
     };
     if (list.length === 0 && typeof emptyReason === "string") {
       state.emptyReason = emptyReason;
@@ -947,6 +953,123 @@
     return discovered ? EMPTY_REASON.ALREADY_CAPTURED : EMPTY_REASON.NO_RESULTS;
   }
 
+  // ── Block/challenge episodes (issue #634, hardened per review B4) ──────────
+  //
+  // Pure state machine over a per-portal map, persisted by background.js in
+  // chrome.storage.session under a new BLOCK_STATE_KEY:
+  //   { <portal>: { active: true, signature: <id>, detectedAt: <ms>,
+  //                 reported: <bool> } }
+  // An absent key = never blocked / cleared. `recordBlock` is IDEMPOTENT while
+  // a portal's episode is active AND not yet expired — a second (or
+  // twentieth) detection for the SAME still-active episode does not create a
+  // new one, which is what makes "one alert per episode, not per tab"
+  // provable from this function alone: background.js notifies iff
+  // `isNewEpisode` comes back true.
+  //
+  // An episode ends via `clearBlock` (background.js calls it after a REAL
+  // successful capture on that portal — a challenge marker's absence on one
+  // render is not proof of recovery; a genuine capture succeeding is), OR by
+  // simply going stale past BLOCK_EPISODE_TTL_MS. Review B4 found that
+  // clear-only-via-capture can wedge forever: a block detected mid-enumeration
+  // can leave a PAUSED batch with zero slots (nothing left to resume/capture),
+  // so no EXTRACT success can ever fire and the episode — and therefore
+  // isPortalBlocked() for that portal, and Auto for it — would stay dead
+  // silently, with no expiry and no re-alert. The TTL bounds that: an expired
+  // entry reads as "not blocked" everywhere (isPortalBlocked/blockEntry), so
+  // Auto naturally retries after the cooldown; if the portal is still
+  // challenging it, the very next detection is a bona fide NEW episode
+  // (recordBlock overwrites the stale entry) and alerts again — "no expiry,
+  // no re-alert" becomes "re-alert every TTL at worst", never silence.
+  var BLOCK_EPISODE_TTL_MS = 2 * 60 * 60 * 1000; // 2h — see D-142 for the tradeoff
+
+  function isEpisodeExpired(entry, now) {
+    var t = typeof now === "number" ? now : Date.now();
+    return t - entry.detectedAt >= BLOCK_EPISODE_TTL_MS;
+  }
+
+  /** The raw stored entry for `portal`, active or not, regardless of TTL. */
+  function rawBlockEntry(state, portal) {
+    if (!state || !portal) return null;
+    var entry = state[portal];
+    return entry && entry.active === true ? entry : null;
+  }
+
+  /** True while `portal` has an active, NON-EXPIRED block episode. Pure. */
+  function isPortalBlocked(state, portal, now) {
+    var entry = rawBlockEntry(state, portal);
+    if (!entry) return false;
+    return !isEpisodeExpired(entry, now);
+  }
+
+  /** The active, non-expired episode for `portal`, or null. Pure. */
+  function blockEntry(state, portal, now) {
+    var entry = rawBlockEntry(state, portal);
+    if (!entry || isEpisodeExpired(entry, now)) return null;
+    return entry;
+  }
+
+  /**
+   * Record a detected block for `portal`. Returns `{ state, isNewEpisode }`:
+   *   - already active AND non-expired for this portal → SAME episode, state
+   *     unchanged (detectedAt/signature/reported are NOT overwritten — they
+   *     describe when the episode STARTED and whether it's been reported),
+   *     `isNewEpisode: false` (no re-notify).
+   *   - not active, previously cleared, or EXPIRED → a NEW episode,
+   *     `isNewEpisode: true` (background.js notifies exactly once for this),
+   *     `reported: false` (background.js's report POST flips it once it
+   *     actually lands — see markBlockReported).
+   * Pure; `now` is injectable for deterministic tests.
+   */
+  function recordBlock(state, portal, signature, now) {
+    var base = state && typeof state === "object" ? state : {};
+    if (!portal || typeof portal !== "string") {
+      return { state: base, isNewEpisode: false };
+    }
+    if (isPortalBlocked(base, portal, now)) {
+      return { state: base, isNewEpisode: false };
+    }
+    var next = Object.assign({}, base);
+    next[portal] = {
+      active: true,
+      signature: typeof signature === "string" && signature ? signature : "unknown",
+      detectedAt: typeof now === "number" ? now : Date.now(),
+      reported: false,
+    };
+    return { state: next, isNewEpisode: true };
+  }
+
+  /**
+   * Resolve `portal`'s episode (a real capture succeeded there). Returns
+   * `{ state, wasActive }` — `wasActive` tells the caller whether there was
+   * anything to clear (so it can skip a needless storage write). Operates on
+   * the RAW entry (ignores TTL) so a genuine capture also cleans up an
+   * already-expired-but-not-yet-removed entry. Pure.
+   */
+  function clearBlock(state, portal) {
+    var base = state && typeof state === "object" ? state : {};
+    if (!portal || !rawBlockEntry(base, portal)) {
+      return { state: base, wasActive: false };
+    }
+    var next = Object.assign({}, base);
+    delete next[portal];
+    return { state: next, wasActive: true };
+  }
+
+  /**
+   * Mark `portal`'s current episode as successfully reported to the
+   * dashboard (issue #634 review "a dropped report is lost permanently" —
+   * background.js retries the POST on a later detection while `reported` is
+   * still false, without re-notifying locally). No-op (returns `state`
+   * unchanged) if there's no active entry or it's already marked. Pure.
+   */
+  function markBlockReported(state, portal) {
+    var entry = rawBlockEntry(state, portal);
+    if (!entry || entry.reported === true) return state;
+    var next = Object.assign({}, state);
+    next[portal] = Object.assign({}, entry, { reported: true });
+    return next;
+  }
+
   var api = {
     STATUSES: STATUSES,
     AUTO_STATUS: AUTO_STATUS,
@@ -1011,6 +1134,13 @@
     shouldRecoverStrandedEnumeration: shouldRecoverStrandedEnumeration,
     EMPTY_REASON: EMPTY_REASON,
     classifyEmptyCapture: classifyEmptyCapture,
+    // Block/challenge episodes (issue #634)
+    BLOCK_EPISODE_TTL_MS: BLOCK_EPISODE_TTL_MS,
+    isPortalBlocked: isPortalBlocked,
+    blockEntry: blockEntry,
+    recordBlock: recordBlock,
+    clearBlock: clearBlock,
+    markBlockReported: markBlockReported,
   };
 
   if (typeof self !== "undefined") {

@@ -48,10 +48,12 @@ interface PopupModule {
     enabled?: boolean;
     nextCheckAt?: number | null;
     lastBatchAt?: number | null;
+    blocked?: { portal: string; signature: string; detectedAt: number } | null;
   } | null) => void;
   renderAutoStatus: (auto: unknown) => void;
   formatClockTime: (ms: unknown) => string | null;
   formatElapsed: (fromMs: unknown) => string | null;
+  blockSignatureLabelEs: (signature: unknown) => string;
 }
 
 function loadPopup(): PopupModule {
@@ -167,5 +169,66 @@ describe("formatClockTime / formatElapsed — the armed line's pure formatters",
     expect(formatElapsed(now - 5 * 60_000)).toBe("hace 5 min");
     expect(formatElapsed(now - 3 * 3_600_000)).toBe("hace 3 h");
     expect(formatElapsed(null)).toBeNull();
+  });
+});
+
+describe("renderAutoArmedStatus — blocked state takes priority (issue #634 / D-134)", () => {
+  it("a blocked episode overrides the ON line — 'armed' must never lie about a paused run", () => {
+    const { renderAutoArmedStatus } = loadPopup();
+    const el = document.querySelector("#auto-armed-status")!;
+
+    renderAutoArmedStatus({
+      enabled: true,
+      nextCheckAt: Date.now() + 60_000,
+      lastBatchAt: Date.now(),
+      blocked: { portal: "idealista", signature: "captcha_wall", detectedAt: Date.now() },
+    });
+
+    // The exact assertion that fails red if the blocked branch is dropped:
+    // without it this would render the normal "Auto: ON — próxima
+    // comprobación…" line instead.
+    expect(el.textContent).toContain("BLOQUEADO");
+    expect(el.textContent).toContain("idealista");
+    expect(el.textContent).toContain("muro CAPTCHA");
+    expect(el.textContent).not.toContain("próxima comprobación");
+    expect(el.classList.contains("blocked")).toBe(true);
+  });
+
+  it("a blocked episode overrides even the OFF line — Auto disabled but a manual/batch run is still paused-blocked", () => {
+    const { renderAutoArmedStatus } = loadPopup();
+    const el = document.querySelector("#auto-armed-status")!;
+
+    renderAutoArmedStatus({
+      enabled: false,
+      blocked: { portal: "aliseda", signature: "geetest_challenge", detectedAt: Date.now() },
+    });
+
+    expect(el.textContent).toContain("BLOQUEADO");
+    expect(el.textContent).not.toBe("Auto: OFF");
+  });
+
+  it("no blocked episode falls through to the normal ON/OFF rendering and clears the CSS hook", () => {
+    const { renderAutoArmedStatus } = loadPopup();
+    const el = document.querySelector("#auto-armed-status")!;
+
+    renderAutoArmedStatus({
+      enabled: true,
+      blocked: {
+        portal: "idealista",
+        signature: "captcha_wall",
+        detectedAt: Date.now(),
+      },
+    });
+    expect(el.classList.contains("blocked")).toBe(true);
+
+    renderAutoArmedStatus({ enabled: false, blocked: null });
+    expect(el.textContent).toBe("Auto: OFF");
+    expect(el.classList.contains("blocked")).toBe(false);
+  });
+
+  it("an unrecognised signature id still renders something (falls back to the raw id)", () => {
+    const { blockSignatureLabelEs } = loadPopup();
+    expect(blockSignatureLabelEs("some_future_signature")).toBe("some_future_signature");
+    expect(blockSignatureLabelEs("captcha_wall")).toBe("muro CAPTCHA");
   });
 });
