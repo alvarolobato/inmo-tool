@@ -20,10 +20,24 @@ function PropertyRef({
   profileId,
 }: PromotionCandidate["properties"][number]) {
   const label = address?.trim() ? address : `Inmueble #${id}`;
+  // #606: these pills sit in a `flexWrap: "wrap"` row (their container,
+  // below), but `whiteSpace: "nowrap"` fixes each pill's own width at its
+  // full text's min-content size — a real listing address is easily long
+  // enough on its own to exceed a 390px viewport, and a nowrap item can't
+  // shrink below that regardless of how much the row wraps around it.
+  // `maxWidth` + ellipsis caps each pill without touching the nowrap/pill
+  // look; `min(240px, 60vw)` degrades with the viewport the same way
+  // ProfileSwitcher's cap (#574) does.
+  const capStyle: React.CSSProperties = {
+    maxWidth: "min(240px, 60vw)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  };
   if (profileId !== null) {
     return (
       <Link
         href={`/profiles/${profileId}/properties/${id}`}
+        title={label}
         style={{
           fontSize: 12,
           color: "var(--accent)",
@@ -32,6 +46,8 @@ function PropertyRef({
           borderRadius: 6,
           background: "var(--accent-soft)",
           whiteSpace: "nowrap",
+          display: "inline-block",
+          ...capStyle,
         }}
       >
         {label}
@@ -47,6 +63,8 @@ function PropertyRef({
         borderRadius: 6,
         background: "var(--bg-2)",
         whiteSpace: "nowrap",
+        display: "inline-block",
+        ...capStyle,
       }}
       title="Sin perfil asociado todavía — no hay enlace directo"
     >

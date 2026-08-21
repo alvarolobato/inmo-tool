@@ -280,6 +280,13 @@ export function ConversationsTable({
             display: "flex",
             alignItems: "center",
             gap: 8,
+            // #573: this row was nowrap (default) with "Cancelar" pushed
+            // fully right by marginLeft: "auto" — on a phone, with the two
+            // bulk-action buttons' full labels, that pushed Cancelar off
+            // the viewport with no way to reach it. wrap lets it drop to
+            // its own line instead; no flex:1 child here so this doesn't
+            // hit D-124's "flex:1 basis-0 never wraps" trap.
+            flexWrap: "wrap",
             marginBottom: 8,
             fontSize: 13,
           }}
@@ -349,17 +356,35 @@ export function ConversationsTable({
           }}
           data-testid="conversations-table"
         >
+          {/* #573/#606-adjacent: `tableLayout: fixed` sizes columns purely
+              from these <col> widths, summing to 976px — far past a 390px
+              viewport, which collapsed Título (the only column that
+              matters) to near-zero before you scrolled. Below `md` the six
+              secondary columns are dropped from layout entirely (`hidden
+              md:table-column` on the <col> — a fixed-layout table's <col>
+              honors `display: none` and stops claiming width, distinct
+              from hiding just the <td>), so Título gets the freed space;
+              at `md:` and up every <col> renders exactly as before. */}
           <colgroup>
             <col style={{ width: 36 }} />           {/* checkbox */}
             <col />                                  {/* title — takes all remaining space */}
-            <col style={{ width: 90 }} />            {/* tipo/mode */}
-            <col style={{ width: 160 }} />           {/* contexto */}
-            <col style={{ width: 150 }} />           {/* última actividad */}
-            <col style={{ width: 155 }} />           {/* creada — needs room for "14/05/2026, 06:40" */}
-            <col style={{ width: 75 }} />            {/* duración */}
-            <col style={{ width: 145 }} />           {/* actividad */}
-            <col style={{ width: 75 }} />            {/* tokens */}
-            <col style={{ width: 90 }} />            {/* acciones */}
+            <col className="hidden md:table-column" style={{ width: 90 }} />            {/* tipo/mode */}
+            <col className="hidden md:table-column" style={{ width: 160 }} />           {/* contexto */}
+            {/* última actividad also drops below `md` — with it kept,
+                Título's freed share only reaches ~18% of a 390px viewport
+                (checkbox 36 + this 150 + acciones 116 = 302 of ~366px
+                available); dropping it too gets Título comfortably past
+                the issue's own "≥40% width" guidance. */}
+            <col className="hidden md:table-column" style={{ width: 150 }} />           {/* última actividad */}
+            <col className="hidden md:table-column" style={{ width: 155 }} />           {/* creada — needs room for "14/05/2026, 06:40" */}
+            <col className="hidden md:table-column" style={{ width: 75 }} />            {/* duración */}
+            <col className="hidden md:table-column" style={{ width: 145 }} />           {/* actividad */}
+            <col className="hidden md:table-column" style={{ width: 75 }} />            {/* tokens */}
+            {/* #573: widened 90 → 116 so the two now-44px-tap-target action
+                buttons (was 22×26) plus this cell's own 8px/10px padding
+                actually fit without relying on the cell's overflow:
+                visible to bail it out. */}
+            <col style={{ width: 116 }} />           {/* acciones */}
           </colgroup>
           <thead>
             <tr>
@@ -375,13 +400,13 @@ export function ConversationsTable({
                 />
               </th>
               <th style={thStyle}>Título</th>
-              <th style={thStyle}>Tipo</th>
-              <th style={thStyle}>Contexto</th>
-              <th style={thStyle}>{sortBtn("last_interaction_at", "Última actividad")}</th>
-              <th style={thStyle}>{sortBtn("created_at", "Creada")}</th>
-              <th style={thStyle}>Duración</th>
-              <th style={thStyle}>Actividad</th>
-              <th style={thStyle}>Tokens</th>
+              <th className="hidden md:table-cell" style={thStyle}>Tipo</th>
+              <th className="hidden md:table-cell" style={thStyle}>Contexto</th>
+              <th className="hidden md:table-cell" style={thStyle}>{sortBtn("last_interaction_at", "Última actividad")}</th>
+              <th className="hidden md:table-cell" style={thStyle}>{sortBtn("created_at", "Creada")}</th>
+              <th className="hidden md:table-cell" style={thStyle}>Duración</th>
+              <th className="hidden md:table-cell" style={thStyle}>Actividad</th>
+              <th className="hidden md:table-cell" style={thStyle}>Tokens</th>
               <th style={{ ...thStyle, textAlign: "right" }}>Acciones</th>
             </tr>
           </thead>
@@ -498,7 +523,7 @@ export function ConversationsTable({
                   </td>
 
                   {/* Tipo — mode pill */}
-                  <td style={{ ...tdTrunc }}>
+                  <td className="hidden md:table-cell" style={{ ...tdTrunc }}>
                     <span
                       className={`${modeStyle.bg} ${modeStyle.fg}`}
                       style={{
@@ -517,7 +542,7 @@ export function ConversationsTable({
                   </td>
 
                   {/* Contexto */}
-                  <td style={{ ...tdTrunc }} data-testid={`context-cell-${row.id}`}>
+                  <td className="hidden md:table-cell" style={{ ...tdTrunc }} data-testid={`context-cell-${row.id}`}>
                     {row.context_kind === "dashboard" ? (
                       row.context_dashboard_name != null ? (
                         <a
@@ -552,12 +577,13 @@ export function ConversationsTable({
                   </td>
 
                   {/* Última actividad */}
-                  <td style={{ ...tdTrunc, fontWeight: 500 }}>
+                  <td className="hidden md:table-cell" style={{ ...tdTrunc, fontWeight: 500 }}>
                     {relativeTime(row.last_interaction_at)}
                   </td>
 
                   {/* Creada */}
                   <td
+                    className="hidden md:table-cell"
                     style={{
                       ...tdTrunc,
                       color: "var(--fg-muted)",
@@ -569,12 +595,12 @@ export function ConversationsTable({
                   </td>
 
                   {/* Duración */}
-                  <td style={{ ...tdTrunc, color: "var(--fg-muted)" }}>
+                  <td className="hidden md:table-cell" style={{ ...tdTrunc, color: "var(--fg-muted)" }}>
                     {formatDuration(row.duration_seconds)}
                   </td>
 
                   {/* Actividad */}
-                  <td style={{ ...tdTrunc, color: "var(--fg-muted)" }}>
+                  <td className="hidden md:table-cell" style={{ ...tdTrunc, color: "var(--fg-muted)" }}>
                     {row.message_count} msg
                     {row.tool_calls_count > 0 &&
                       ` · ${row.tool_calls_count} herr`}
@@ -583,6 +609,7 @@ export function ConversationsTable({
 
                   {/* Tokens */}
                   <td
+                    className="hidden md:table-cell"
                     style={{
                       ...tdTrunc,
                       color: "var(--fg-muted)",

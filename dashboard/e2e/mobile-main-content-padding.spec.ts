@@ -138,14 +138,20 @@ async function assertNoHorizontalOverflow(page: Page, route: string): Promise<vo
 // this must not be a captura-only fix). Each renders 200 with no seed data
 // (verified against a live dev server before writing this list).
 //
-// `/etl` is deliberately excluded here (#599 review S2): once measured with
-// a real settle (see `assertNoHorizontalOverflow`'s header) it overflows
-// with an 812px-wide `<table>` inside a scroll container at 390px — a
-// PRE-EXISTING bug (reproduces identically on unmodified `main`, and a
-// padding *reduction* cannot have introduced it), not something this PR's
-// change touches. Filed as issue #606, along with the same finding on
-// `/etl/captura` and `/admin/clasificacion`, rather than silently absorbed
-// into this net.
+// `/etl` and `/etl/captura` are deliberately excluded here (#599 review S2,
+// then #606): once measured with a real settle (see
+// `assertNoHorizontalOverflow`'s header) `/etl` overflows with an
+// 812px-wide `<table>` inside a scroll container at 390px — a PRE-EXISTING
+// bug (reproduces identically on unmodified `main`), not something this
+// PR's change touches. Both routes were about to become moot rather than
+// worth fixing: #642 P1 merges `/etl/connectors` and `/etl/captura` into
+// `/admin/fuentes`, and `/etl` itself (Monitor) is slated for deletion in
+// #642 P2 — fixing a table on a page mid-deletion elsewhere would only
+// create a merge conflict with that work. `/admin/clasificacion` (#606's
+// third target, and the one NOT going away) got its own fix — its overflow
+// was individual `<a>`/`<span>` property-reference pills with no width cap,
+// not a table — and its own seeded regression test:
+// `mobile-clasificacion.spec.ts`.
 const MAIN_ROUTES = ["/", "/profiles", "/captura", "/admin", "/glossary", "/inicio", "/conversations"];
 
 test.describe("phone width (iPhone 13 emulation)", () => {

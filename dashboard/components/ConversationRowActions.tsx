@@ -13,6 +13,10 @@ export function ConversationRowActions({
   const router = useRouter();
   const isGlobal = conversation.context_kind === "global";
 
+  // #573 (repo-wide tap-target convention, see #656): these were 22×26px —
+  // well under the 44px floor — an icon-only button doesn't get a pass just
+  // because it's visually small; minWidth/minHeight give it a real hit area
+  // while padding/fontSize keep the glyph itself unchanged.
   const btnStyle: React.CSSProperties = {
     background: "none",
     border: "none",
@@ -23,9 +27,12 @@ export function ConversationRowActions({
     fontSize: 14,
     display: "inline-flex",
     alignItems: "center",
+    justifyContent: "center",
     gap: 3,
     fontFamily: "inherit",
     whiteSpace: "nowrap",
+    minWidth: 44,
+    minHeight: 44,
   };
 
   const disabledStyle: React.CSSProperties = {
