@@ -1269,13 +1269,45 @@ async function captureDiagnosticFromTab(tab) {
   return res;
 }
 
+/** Shorten a URL for the confirm() dialog — enough to recognise the page
+ * (origin + path), never so long the dialog truncates the important half. */
+function diagnosticConfirmUrl(rawUrl) {
+  const url = String(rawUrl || '');
+  if (url.length <= 120) return url;
+  return url.slice(0, 117) + '…';
+}
+
 $('#diagnostic-btn').addEventListener('click', async () => {
   const btn = $('#diagnostic-btn');
+  // This button is deliberately UNGATED by host (issue #671: a page the
+  // extension refuses to classify is exactly when a diagnostic is needed),
+  // which means one misclick with a bank, webmail or any other authenticated
+  // tab focused would upload that page's fully-rendered DOM — session-
+  // specific content and all — to the dashboard. So the URL about to be sent
+  // is named in a confirm() BEFORE anything is read from the tab (PR #675
+  // review S2). The delete button on /admin/diagnostics already confirms a
+  // far smaller action; sending a whole authenticated page must not be the
+  // one destructive-by-accident path with no prompt.
+  let tab;
+  try {
+    tab = await activeTabOrNull();
+  } catch {
+    tab = null;
+  }
+  if (!tab || !tab.id) {
+    setDiagnosticStatus('No se pudo acceder a la pestaña actual.', 'error');
+    return;
+  }
+  const confirmed = window.confirm(
+    'Se enviará el HTML completo de esta página al panel de diagnóstico:\n\n' +
+      diagnosticConfirmUrl(tab.url) +
+      '\n\nIncluye todo lo que la página muestra ahora mismo, incluida ' +
+      'cualquier información de tu sesión. ¿Continuar?',
+  );
+  if (!confirmed) return;
   btn.disabled = true;
   setDiagnosticStatus('Capturando diagnóstico…');
   try {
-    const tab = await activeTabOrNull();
-    if (!tab || !tab.id) throw new Error('No se pudo acceder a la pestaña actual.');
     const captured = await captureDiagnosticFromTab(tab);
     const res = await chrome.runtime.sendMessage({
       type: 'SEND_DIAGNOSTIC',
@@ -1291,62 +1323,6 @@ $('#diagnostic-btn').addEventListener('click', async () => {
     setDiagnosticStatus('Diagnóstico enviado ✓', 'success');
   } catch (err) {
     setDiagnosticStatus(err.message || 'No se pudo enviar el diagnóstico.', 'error');
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-// "Grabar red y recargar" (issue #671 follow-up): the owner explicitly asked
-// for XHR/fetch capture too, because a DOM snapshot can never contain data
-// that only arrives by network call after render (Hipoges' Angular shell,
-// idealista's lazy photo gallery). The reload this requires is EXPLICIT and
-// owner-initiated — never silent — hence the confirm() naming it plainly.
-$('#network-record-btn').addEventListener('click', async () => {
-  const confirmed = window.confirm(
-    'Esto recargará la pestaña activa para instalar el grabador de red antes de que ' +
-      'la página arranque (necesario para ver las llamadas de Angular/React). ' +
-      'Después de que la página cargue, vuelve a abrir el popup y pulsa ' +
-      '"Forzar captura + diagnóstico" para enviar lo grabado.',
-  );
-  if (!confirmed) return;
-  const btn = $('#network-record-btn');
-  btn.disabled = true;
-  setDiagnosticStatus('Solicitando permiso…');
-  try {
-    const tab = await activeTabOrNull();
-    if (!tab || !tab.id || !tab.url) throw new Error('No se pudo acceder a la pestaña actual.');
-    if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) {
-      throw new Error('Esta pestaña no es una página http(s).');
-    }
-    const origin = new URL(tab.url).origin;
-    // MUST be requested from the popup itself (a real user-activation
-    // signal) — chrome.permissions.request from the service worker has none
-    // and would silently fail. Uses the SAME optional_host_permissions
-    // (http(s)://*/*) options.js already relies on for the API-URL origin.
-    let granted = false;
-    try {
-      granted = await chrome.permissions.request({ origins: [origin + '/*'] });
-    } catch {
-      granted = false;
-    }
-    if (!granted) {
-      throw new Error('Permiso denegado para este origen — no se ha activado la grabación.');
-    }
-    const res = await chrome.runtime.sendMessage({
-      type: 'ARM_NETWORK_RECORDING',
-      tabId: tab.id,
-      origin,
-    });
-    if (!res || !res.success) {
-      throw new Error((res && res.error && res.error.message) || 'No se pudo activar la grabación de red.');
-    }
-    await chrome.tabs.reload(tab.id);
-    setDiagnosticStatus(
-      'Grabando red… espera a que cargue y pulsa "Forzar captura + diagnóstico".',
-      'success',
-    );
-  } catch (err) {
-    setDiagnosticStatus(err.message || 'No se pudo activar la grabación de red.', 'error');
   } finally {
     btn.disabled = false;
   }

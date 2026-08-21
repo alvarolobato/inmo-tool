@@ -3195,8 +3195,10 @@ CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
 -- record for this table). It ALWAYS keeps the HTML, regardless of connector
 -- calibration state or #670's `etl.retain_capture_html_for` config (which
 -- only governs `extension_capture.html`, a completely different column on a
--- completely different table). Pruning is manual, via the /admin/diagnostics
--- surface's delete button — no automatic expiry.
+-- completely different table). Retention is nonetheless BOUNDED: see
+-- purge_extension_diagnostics() below. Per-row manual deletion (the
+-- /admin/diagnostics surface's delete button) remains the way to drop one
+-- diagnostic on purpose; the purge function is the floor under the rest.
 --
 -- `detection` mirrors browser-extension/diagnostic.js's buildDiagnosticBlock
 -- output verbatim (detailPortal/listingPortal/pageRole, the isRenderReady
@@ -3230,6 +3232,49 @@ CREATE TABLE IF NOT EXISTS extension_diagnostic (
 
 CREATE INDEX IF NOT EXISTS idx_extension_diagnostic_created_at
     ON extension_diagnostic (created_at DESC);
+
+-- Bounded retention for the diagnostic channel (PR #675 review, S4).
+--
+-- Every row here is a whole third-party page (~350 KB) captured from the
+-- owner's own browser, and a rendered listing page routinely carries owner
+-- names, phone numbers and contact-form markup. Storing that indefinitely
+-- with no expiry — "pruning is manual" — makes an unbounded personal-data
+-- store out of a debugging aid, which is the opposite of issue #1 §15's
+-- GDPR-minimisation stance and of the retention posture the same schema
+-- already takes for owner_identity.
+--
+-- Shaped exactly like purge_stale_owner_identities() (this file, above):
+-- same `retention_days INT DEFAULT` signature, same RETURNS INT count of
+-- what it removed, same plpgsql CTE, so the two are called and reasoned
+-- about identically. The one deliberate difference is DELETE rather than
+-- column-nulling: an owner_identity row survives its purge because
+-- listing_owner_identity still references it, whereas nothing anywhere
+-- references an extension_diagnostic row (that is the entire premise of the
+-- table — see the comment above), so there is nothing left to keep once its
+-- payload is gone.
+--
+-- 30 days, not owner_identity's 90: a diagnostic exists to unblock ONE
+-- investigation that is, in practice, in progress the same week. It is also
+-- ~350 KB against owner_identity's few hundred bytes. Anything worth keeping
+-- past a month belongs in a scrubbed fixture, not in this table.
+--
+-- Like purge_stale_owner_identities, this ships the MECHANISM only —
+-- scheduling the call is the orchestrator's business, and no caller is wired
+-- up yet.
+CREATE OR REPLACE FUNCTION purge_extension_diagnostics(retention_days INT DEFAULT 30)
+RETURNS INT AS $$
+DECLARE
+    purged_count INT;
+BEGIN
+    WITH purged AS (
+        DELETE FROM extension_diagnostic
+        WHERE created_at < NOW() - make_interval(days => retention_days)
+        RETURNING id
+    )
+    SELECT count(*)::INT INTO purged_count FROM purged;
+    RETURN purged_count;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)

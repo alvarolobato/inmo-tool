@@ -36,8 +36,14 @@ export function DeleteDiagnosticButton({ id }: { id: number }) {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {/* `.diag-action` owns padding + the phone-only 44px minimum (D-124);
+          `padding` is deliberately absent from this inline style object,
+          because an inline declaration outranks the class and would silently
+          defeat the breakpoint (D-121 rung 1). Same class as the row's two
+          anchors, so all three controls grow together. */}
       <button
         type="button"
+        className="diag-action"
         data-testid={`delete-diagnostic-${id}`}
         onClick={onDelete}
         disabled={busy}
@@ -48,7 +54,6 @@ export function DeleteDiagnosticButton({ id }: { id: number }) {
           background: "transparent",
           border: "1px solid var(--warn, #f59e0b)",
           borderRadius: 6,
-          padding: "4px 12px",
           cursor: busy ? "default" : "pointer",
           opacity: busy ? 0.6 : 1,
           whiteSpace: "nowrap",

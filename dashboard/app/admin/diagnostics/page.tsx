@@ -42,12 +42,31 @@ function Chip({ label, tone }: { label: string; tone: "ok" | "warn" | "neutral" 
 }
 
 /**
+ * The `isRenderReady` chip's text. `reason` is what makes a negative verdict
+ * actionable ("no matching selector" vs. "body text below threshold"), and a
+ * POSITIVE verdict's `selector` is what explained the Hipoges empty shell
+ * (the generic `main` fallback alone satisfying the check) — so neither is
+ * dropped. PR #675 review, B3.
+ */
+function renderReadyLabel(d: DiagnosticSummary): string {
+  if (d.renderReady === null) return "isRenderReady: ?";
+  if (d.renderReady) {
+    const selector = d.renderReadySelector ?? "?";
+    return d.renderReadyReason
+      ? `isRenderReady ✓ (${selector}) · ${d.renderReadyReason}`
+      : `isRenderReady ✓ (${selector})`;
+  }
+  return d.renderReadyReason ? `isRenderReady ✗ · ${d.renderReadyReason}` : "isRenderReady ✗";
+}
+
+/**
  * One diagnostic's summary row — the fields called out in issue #671's "what
  * it should send": portal detection, the shared isRenderReady verdict + WHICH
  * selector satisfied it, harvest counts, the D-142 block verdict, and whether
- * auto-capture would have fired. The full HTML/network payload lives behind
- * "Ver HTML" (a download, never rendered inline — see the API route's own
- * docstring for why) rather than on this list.
+ * auto-capture would have fired. The raw HTML lives behind "Ver HTML" (a
+ * download, never rendered inline — see the API route's own docstring for
+ * why); every remaining stored field lives behind "Ver JSON"
+ * (`?format=json`), so nothing in the payload needs SQL to reach.
  */
 function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
   return (
@@ -83,8 +102,9 @@ function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
             {d.extensionVersion ? ` · v${d.extensionVersion}` : ""}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
           <a
+            className="diag-action"
             href={`/api/admin/diagnostics/${d.id}`}
             style={{
               fontSize: 12,
@@ -92,12 +112,32 @@ function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
               color: "var(--fg-muted)",
               border: "1px solid var(--border)",
               borderRadius: 6,
-              padding: "4px 12px",
               textDecoration: "none",
               whiteSpace: "nowrap",
             }}
           >
             Ver HTML
+          </a>
+          {/* The full stored payload minus `html` — every detection/network
+              field, not just the handful summarised on this row. Issue #671's
+              "he should not need SQL" applies to the WHOLE payload, and this
+              row can only ever show a summary. */}
+          <a
+            className="diag-action"
+            href={`/api/admin/diagnostics/${d.id}?format=json`}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--fg-muted)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Ver JSON
           </a>
           <DeleteDiagnosticButton id={d.id} />
         </div>
@@ -109,16 +149,25 @@ function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
         {!d.detailPortal && !d.listingPortal && (
           <Chip label={d.pageRole ? `otro · ${d.pageRole}` : "no soportada"} tone="neutral" />
         )}
-        <Chip
-          label={
-            d.renderReady === null
-              ? "isRenderReady: ?"
-              : d.renderReady
-                ? `isRenderReady ✓ (${d.renderReadySelector ?? "?"})`
-                : "isRenderReady ✗"
-          }
-          tone={d.renderReady ? "ok" : "warn"}
-        />
+        {/* The `ready === false` branch used to drop BOTH the selector and the
+            reason — i.e. it went silent in exactly the captured-too-early case
+            this feature exists to diagnose. Now the reason rides along either
+            way (PR #675 review, B3). */}
+        <Chip label={renderReadyLabel(d)} tone={d.renderReady ? "ok" : "warn"} />
+        {d.renderReadyBodyTextLength != null && (
+          <Chip label={`texto: ${d.renderReadyBodyTextLength} car.`} tone="neutral" />
+        )}
+        {/* The "0 of 17": anchors present on the page vs. detail URLs the
+            harvest actually got out of them. A wide gap IS the Hipoges
+            empty-shell signature. */}
+        {(d.anchorCount != null || d.extractDetailUrlsCount != null) && (
+          <Chip
+            label={`harvest: ${d.extractDetailUrlsCount ?? "?"} de ${d.anchorCount ?? "?"} enlaces`}
+            tone={
+              d.extractDetailUrlsCount === 0 && (d.anchorCount ?? 0) > 0 ? "warn" : "neutral"
+            }
+          />
+        )}
         {d.blocked && <Chip label={`bloqueada · ${d.blockSignature ?? "?"}`} tone="warn" />}
         {d.autoCaptureWouldFire !== null && (
           <Chip

@@ -224,6 +224,22 @@ describe("recordNetworkEntry", () => {
 });
 
 describe("disarmNetworkRecording", () => {
+  // ┌─────────────────────────────────────────────────────────────────────┐
+  // │ THIS ASSERTION IS BACKWARDS AND MUST BE INVERTED — see issue #684.  │
+  // └─────────────────────────────────────────────────────────────────────┘
+  // It documents the CURRENT behaviour of parked, unreachable code, not a
+  // property worth having. `networkBuffers` is an in-memory Map in an MV3
+  // service worker that Chrome evicts after ~30s idle, so on the documented
+  // happy path (arm, reload, page settles, worker dies) disarm returns null
+  // here BEFORE unregistering — leaving the MAIN-world fetch/XHR wrapper
+  // registered on every tab of that origin, indefinitely and across browser
+  // restarts. The buffer's presence and the registration's presence are
+  // independent facts; conflating them is the B1 defect that stopped the
+  // network-capture half shipping in PR #675.
+  //
+  // When #684 rebuilds the lifecycle, disarm must ALWAYS attempt
+  // `unregisterContentScripts`, and this test becomes its opposite:
+  // "unregisters even when nothing was buffered for the tab".
   it("returns null when nothing was armed for the tab — safe to call unconditionally", async () => {
     const chrome = makeChromeMock({ hasPermission: true });
     const bg = loadBackground(chrome, makeFetchMock());

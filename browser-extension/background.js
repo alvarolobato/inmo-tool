@@ -2825,17 +2825,29 @@ async function handleCheckStatus(captureId) {
 // content-script.js's CAPTURE_DIAGNOSTIC handler degrades every field to
 // null/false for a page detect.js doesn't recognise, by construction.
 //
-// Network capture (opt-in, owner-initiated reload) is a small state machine
-// layered on top:
-//   armNetworkRecording   — register the MAIN-world recorder + ISOLATED relay
-//                            for one origin, scoped to one tab.
-//   recordNetworkEntry    — buffer a redacted entry relayed from that tab.
-//   disarmNetworkRecording— unregister + return the buffered (capped) entries.
-// The buffer is in-memory only (lost on a service-worker eviction — an
-// acceptable limitation for a manual, short-lived diagnostic session); the
-// ARMED bookkeeping is persisted to chrome.storage.session so a restart can
-// still tell "was I supposed to be recording tab N" rather than leaving an
-// orphaned recorder with no record of it existing.
+// ┌───────────────────────────────────────────────────────────────────────┐
+// │ NETWORK CAPTURE IS PARKED — DO NOT WIRE A UI ENTRY POINT TO IT (#684) │
+// └───────────────────────────────────────────────────────────────────────┘
+// The functions below (armNetworkRecording / recordNetworkEntry /
+// disarmNetworkRecording) and their ARM_NETWORK_RECORDING /
+// STOP_NETWORK_RECORDING / NETWORK_ENTRY handlers are RETAINED but
+// UNREACHABLE: the popup's "Grabar red y recargar" button was removed before
+// #675 merged, so nothing in the shipped extension can arm a recording, and
+// `disarmNetworkRecording` therefore always returns null (SEND_DIAGNOSTIC
+// posts `network: null`).
+//
+// They are parked rather than deleted because the pure redaction module
+// (network-recorder.js) and its tests are sound and worth rebuilding on. The
+// LIFECYCLE is not:
+//   - `disarmNetworkRecording` bails on `!networkBuffers.has(tabId)` BEFORE
+//     unregistering, and that Map dies with the MV3 service worker (~30s
+//     idle) — so on the happy path the recorder is never torn down;
+//   - `registerContentScripts` omits `persistAcrossSessions:false` (defaults
+//     to TRUE) and no onStartup/respawn sweep clears `inmo-diag-*`;
+//   - `matches` is origin-scoped, so every tab on the origin is wrapped.
+// Full analysis, redaction audit and exit criteria: issue #684. Read it
+// before touching any of this — the existing background test currently
+// ASSERTS the broken disarm behaviour and has to be inverted first.
 
 const networkBuffers = new Map(); // tabId -> raw entry[] (pre-cap)
 

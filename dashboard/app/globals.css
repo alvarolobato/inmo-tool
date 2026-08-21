@@ -1292,3 +1292,41 @@ body {
     padding-right: var(--pad-x, 12px);
   }
 }
+
+/* ============================================================
+   /admin/diagnostics row actions — 44px tap target on phone
+   (PR #675 review, D-124)
+   ============================================================
+   "Ver HTML" / "Ver JSON" (anchors) and "Borrar" (a button in
+   DeleteDiagnosticButton.tsx) measured ~25px tall against D-124's 44px
+   requirement. The pattern was copied from
+   app/admin/clasificacion/DismissButton.tsx, so it is pre-existing rather
+   than new — but D-124's own evidence line is exactly this control, so it
+   gets fixed here rather than inherited forward.
+
+   D-121 rung 1: `padding: "4px 12px"` is a static literal with no
+   prop/state dependency, so it leaves the inline `style` objects entirely
+   and lives here — an inline declaration would beat this class on
+   specificity and silently defeat the breakpoint. Desktop keeps exactly
+   the previous 4px/12px; only the phone query grows the box.
+
+   `display: inline-flex` is declared in the BASE rule, not only under the
+   media query, and none of these elements sets `display` inline (D-120:
+   the collision is per-property and inline always wins) — centring has to
+   hold at both widths anyway, since min-height without it would leave the
+   label top-aligned in a 44px box. */
+.diag-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 12px;
+}
+
+@media (max-width: 767px) {
+  .diag-action {
+    min-height: 44px;
+    min-width: 44px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}

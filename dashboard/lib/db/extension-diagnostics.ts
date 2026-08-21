@@ -14,6 +14,7 @@
 
 import { query } from "@/lib/db";
 import { sql } from "@/lib/db-write";
+import { stripNulBytesDeep } from "@/lib/strip-nul-bytes";
 
 /** Mirrors browser-extension/diagnostic.js buildDiagnosticBlock's output —
  * read here only for the admin list's summary columns; stored as opaque
@@ -88,6 +89,17 @@ export interface DiagnosticSummary {
   pageRole: string | null;
   renderReady: boolean | null;
   renderReadySelector: string | null;
+  // WHY the verdict came out that way, and how much text the page actually
+  // had -- the two fields that explain a `ready === false` (captured too
+  // early) without opening the HTML. PR #675 review, B3.
+  renderReadyReason: string | null;
+  renderReadyBodyTextLength: number | null;
+  // The "0 of 17" numbers: how many anchors the page carried vs. how many
+  // detail URLs the harvest actually extracted from them. This gap IS the
+  // Hipoges empty-shell bug the whole feature exists to make visible
+  // (issue #671), so it belongs on the list, not behind a SQL query.
+  anchorCount: number | null;
+  extractDetailUrlsCount: number | null;
   blocked: boolean | null;
   blockSignature: string | null;
   autoCaptureWouldFire: boolean | null;
@@ -101,9 +113,22 @@ export interface DiagnosticFull extends DiagnosticSummary {
   network: DiagnosticNetworkCapture | null;
 }
 
-/** Insert one diagnostic row. Returns the new row's id. */
+/**
+ * Insert one diagnostic row. Returns the new row's id.
+ *
+ * `detection`/`network` are deep-sanitised HERE rather than at the route, so
+ * the guarantee holds for every caller: a NUL surviving into either block
+ * makes Postgres reject the whole INSERT with "unsupported Unicode escape
+ * sequence" and the owner's diagnostic is lost with a 500 that says nothing
+ * useful. The route's own `stripNulBytes` on `url`/`html`/`title` cannot
+ * cover these -- they are `jsonb`, and `JSON.stringify` escapes a NUL rather
+ * than emitting it raw, so sanitising the serialised text is a no-op (see
+ * `stripNulBytesDeep`'s docstring). PR #675 review, B4.
+ */
 export async function insertDiagnostic(input: InsertDiagnosticInput): Promise<number> {
   const htmlBytes = Buffer.byteLength(input.html, "utf8");
+  const detection = input.detection ? stripNulBytesDeep(input.detection) : null;
+  const network = input.network ? stripNulBytesDeep(input.network) : null;
   const rows = await sql<{ id: number }>(
     `INSERT INTO extension_diagnostic
        (url, html, html_bytes, title, extension_version, detection, network, network_dropped_count)
@@ -115,8 +140,8 @@ export async function insertDiagnostic(input: InsertDiagnosticInput): Promise<nu
       htmlBytes,
       input.title ?? null,
       input.extensionVersion ?? null,
-      input.detection ? JSON.stringify(input.detection) : null,
-      input.network ? JSON.stringify(input.network) : null,
+      detection ? JSON.stringify(detection) : null,
+      network ? JSON.stringify(network) : null,
       input.network ? input.network.droppedCount ?? 0 : null,
     ],
   );
@@ -139,6 +164,10 @@ function rowToSummary(row: unknown[]): DiagnosticSummary {
     pageRole: detection?.detection?.pageRole ?? null,
     renderReady: detection?.renderReady?.ready ?? null,
     renderReadySelector: detection?.renderReady?.selector ?? null,
+    renderReadyReason: detection?.renderReady?.reason ?? null,
+    renderReadyBodyTextLength: detection?.renderReady?.bodyTextLength ?? null,
+    anchorCount: detection?.harvest?.anchorCount ?? null,
+    extractDetailUrlsCount: detection?.harvest?.extractDetailUrlsCount ?? null,
     blocked: detection?.block?.blocked ?? null,
     blockSignature: detection?.block?.signature ?? null,
     autoCaptureWouldFire: detection?.autoCaptureWouldFire ?? null,

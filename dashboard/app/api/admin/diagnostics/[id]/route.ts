@@ -2,14 +2,35 @@
  * GET/DELETE /api/admin/diagnostics/[id] — retrieval + pruning for the
  * "forzar captura + diagnóstico" admin surface (issue #671).
  *
- * GET serves the raw captured HTML as a DOWNLOAD (Content-Disposition:
- * attachment), never rendered inline in the dashboard's own origin — this
- * HTML came from an arbitrary third-party page and may carry live
- * <script> tags; downloading it (opened separately, outside this origin,
- * with no ps_admin cookie) is what keeps a captured page from ever running
- * with the admin session's credentials. This is the "documented one-command
- * export" half of the issue's retrieval requirement; /admin/diagnostics
- * (the list page) is the "small admin surface" half.
+ * GET has two shapes, selected by `?format=`:
+ *
+ *   - default — the raw captured HTML as a DOWNLOAD (Content-Disposition:
+ *     attachment), never rendered inline in the dashboard's own origin. This
+ *     HTML came from an arbitrary third-party page and may carry live
+ *     <script> tags; downloading it (opened separately, outside this origin,
+ *     with no ps_admin cookie) is what keeps a captured page from ever
+ *     running with the admin session's credentials. It is served as
+ *     application/octet-stream + X-Content-Type-Options: nosniff rather than
+ *     text/html: Content-Disposition already forces the download, so this is
+ *     defense in depth (no rendered-inline path exists today and no
+ *     dangerouslySetInnerHTML exists anywhere under app/admin/) — but the one
+ *     header that could ever make a browser choose to render it should not
+ *     say "html". PR #675 review, S3.
+ *
+ *   - `?format=json` — the whole stored row EXCEPT `html`: the full
+ *     `detection` block and the full `network` block, as JSON. Without this
+ *     the list page's ~6 rendered fields were the only non-SQL view of a
+ *     ~13-field payload, and `harvest.extractDetailUrlsCount` (the "0 of 17"
+ *     number that is the entire point of the Hipoges case), `renderReady
+ *     .reason` and `bodyTextLength` were reachable only by hand-written SQL
+ *     — which issue #671 explicitly ruled out ("He should not need SQL").
+ *     `html` stays out on purpose: it is the one field with its own safe
+ *     delivery path above, and inlining a ~350 KB page into a JSON response
+ *     the browser WILL render inline would undo that. PR #675 review, B3.
+ *
+ * Together these are the "documented one-command export" half of the issue's
+ * retrieval requirement; /admin/diagnostics (the list page) is the "small
+ * admin surface" half.
  *
  * DELETE removes one diagnostic outright — the "owner can find and delete
  * what he sent without SQL" exit criterion. No soft-delete: a diagnostic has
@@ -51,11 +72,22 @@ export async function GET(
         { status: 404 },
       );
     }
+    if (request.nextUrl.searchParams.get("format") === "json") {
+      // Everything the row holds except `html` — see this route's docstring.
+      const { html: _html, ...withoutHtml } = diagnostic;
+      return NextResponse.json(withoutHtml, {
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     return new NextResponse(diagnostic.html, {
       status: 200,
       headers: {
-        "Content-Type": "text/html; charset=utf-8",
+        "Content-Type": "application/octet-stream",
         "Content-Disposition": `attachment; filename="diagnostic-${id}.html"`,
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "no-store",
       },
     });

@@ -32,3 +32,50 @@
 export function stripNulBytes(value: string): string {
   return value.includes("\u0000") ? value.replaceAll("\u0000", "\uFFFD") : value;
 }
+
+/**
+ * Deep-strip U+0000 from every string KEY and VALUE of a JSON-shaped value,
+ * returning a structurally identical copy that is safe to `JSON.stringify`
+ * into a `jsonb` column.
+ *
+ * Why this exists separately from `stripNulBytes`: applying that function to
+ * the ALREADY-SERIALISED JSON text does nothing, because `JSON.stringify`
+ * ESCAPES U+0000 rather than emitting it raw. Serialising an object whose
+ * value holds one yields the six ASCII characters of a lowercase-u Unicode
+ * escape inside the JSON text -- no NUL byte anywhere -- so the
+ * `value.includes(...)` guard in `stripNulBytes` finds nothing and returns
+ * the string untouched. Sanitising the serialised JSON is a silent no-op.
+ *
+ * Postgres rejects it all the same, just one layer further in and with a
+ * different error than the `text` case: "unsupported Unicode escape
+ * sequence", detail "...cannot be converted to text". `jsonb` is a parsed,
+ * decoded representation, so every string it holds must be representable as
+ * `text` -- and `text` cannot hold a NUL. (Plain `json` would have accepted
+ * it, storing the escape verbatim; `jsonb` does not.) The substitution
+ * therefore has to happen on the JS values BEFORE serialisation, which is
+ * what this function does.
+ *
+ * Same U+FFFD replacement as `stripNulBytes`, for the same reasons, so a
+ * diagnostic's `detection`/`network` blocks and its `html` agree on what a
+ * NUL became. Found by the PR #675 review (B4): the diagnostic route
+ * sanitised `url`/`html`/`title` but passed `detection`/`network` straight to
+ * `JSON.stringify`, reopening for JSONB exactly the production 500 that
+ * issue #207 / PR #563 closed for `text`.
+ */
+export function stripNulBytesDeep<T>(value: T): T {
+  if (typeof value === "string") {
+    return stripNulBytes(value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => stripNulBytesDeep(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      // Keys need it too -- a `jsonb` object key is `text` like any other.
+      out[stripNulBytes(key)] = stripNulBytesDeep(val);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
