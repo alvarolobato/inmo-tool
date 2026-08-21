@@ -2,16 +2,18 @@
  * Single canonical LLM price table (F-5, docs/roadmap/llm-batching-plan.md Phase 0).
  *
  * Before this file, `lib/llm-usage.ts` (estimates `llm_usage.estimated_cost_usd`
- * for openrouter rows) and `lib/llm-health.ts` (rolls up € for the `/etl/salud`
- * panel) each hard-coded their own model → price map. They had already
+ * for openrouter rows) and `lib/llm-health.ts` (rolls up € for the LLM
+ * cost/coverage panel, now on `/admin/llm` — moved from `/etl/salud` in
+ * #653) each hard-coded their own model → price map. They had already
  * drifted — a per-flow OpenRouter model configured cheap
  * (`dashboard.llm_model_openrouter_<flow>`) could price as Sonnet-tier in one
  * consumer and correctly in the other, with no signal that they disagreed.
  * This is the ONE table both import; a rate correction lands here once.
  *
  * CURRENCY: every value here is a **USD list price** per 1M tokens. The field
- * names say `_eur_` for historical reasons — `llm-health.ts` labels its panel
- * € and has always shown these same numbers without converting. Nothing is
+ * names say `_eur_` for historical reasons — the LLM cost panel
+ * (`components/admin/LlmCostHealthSection.tsx`) labels itself € and has
+ * always shown these same numbers without converting. Nothing is
  * broken by that today (parity is assumed, not computed), but enter new rates
  * in USD: this is the file that is supposed to settle the currency question,
  * and a rate typed in euros here would silently mis-price `estimated_cost_usd`

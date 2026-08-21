@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { safeAdminRedirectTarget, DEFAULT_ADMIN_LANDING } from "@/lib/admin-redirect";
 
+describe("DEFAULT_ADMIN_LANDING", () => {
+  // #653/#636 EC-3: a login with no redirect target must land on the Estado
+  // board, not the old `/admin/slow-queries` (a page that no longer exists).
+  it("is the Estado board root, not a sub-page", () => {
+    expect(DEFAULT_ADMIN_LANDING).toBe("/admin");
+  });
+});
+
 describe("safeAdminRedirectTarget", () => {
   describe("returns the value for safe admin-area paths", () => {
     it.each([
@@ -8,18 +16,24 @@ describe("safeAdminRedirectTarget", () => {
       "/admin/",
       "/admin?foo=1",
       "/admin#top",
-      "/admin/slow-queries",
-      "/admin/tool-calls",
+      "/admin/llm",
       "/admin/usage",
       "/admin/usage?period=7d",
       "/admin/usage#section",
-      "/admin/slow-queries/123",
+      "/admin/llm/123",
       "/etl",
       "/etl/",
       "/etl/42",
       "/etl/42?tab=steps",
     ])("accepts %s", (path) => {
       expect(safeAdminRedirectTarget(path)).toBe(path);
+    });
+
+    // A missing/invalid redirect target now falls back to the Estado board
+    // itself — no more workaround needed for a bare `/admin` value.
+    it("a missing redirect target falls back to /admin (the Estado board)", () => {
+      expect(safeAdminRedirectTarget(null)).toBe("/admin");
+      expect(safeAdminRedirectTarget("/admin")).toBe("/admin");
     });
   });
 
@@ -45,11 +59,11 @@ describe("safeAdminRedirectTarget", () => {
       // Backslash / CRLF / control chars — header injection attempts.
       ["/admin/\\evil.example.com", "embedded backslash"],
       ["/\\evil.example.com", "backslash protocol trick"],
-      ["/admin/slow-queries\r\nSet-Cookie: x=1", "CRLF injection"],
-      ["/admin/\tslow-queries", "tab character"],
-      ["/admin/ slow-queries", "inner space"],
+      ["/admin/llm\r\nSet-Cookie: x=1", "CRLF injection"],
+      ["/admin/\tllm", "tab character"],
+      ["/admin/ llm", "inner space"],
       // Missing leading slash.
-      ["admin/slow-queries", "relative path"],
+      ["admin/llm", "relative path"],
     ])("rejects %s (%s)", (value, _label) => {
       expect(safeAdminRedirectTarget(value as string | null | undefined)).toBe(DEFAULT_ADMIN_LANDING);
     });

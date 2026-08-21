@@ -33,7 +33,7 @@ export interface ScopeQuery {
  * most JavaScript in existence would break, not just this file — and in
  * fact this codebase has ~16 other live call sites using the exact same
  * `` `$${n}` `` idiom (lib/conversations.ts, lib/sql-filters.ts,
- * app/api/admin/interactions/route.ts) that work correctly in production.
+ * lib/db-write.ts) that work correctly in production.
  * The actual defect in the original draft of this file was an ordinary
  * missing-separator bug in hand-written string concatenation (a fragment
  * boundary without the intervening `" * "`/space), unrelated to template

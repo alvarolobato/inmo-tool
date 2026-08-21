@@ -1,6 +1,23 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+/**
+ * "Consultas lentas (pg_stat_statements)" — collapsed disclosure on `/admin/llm`
+ * (issue #653/#636 Fase 0 borrado).
+ *
+ * Previously its own page (`/admin/slow-queries`, client-fetched from
+ * `/api/admin/slow-queries`). Both the page and the API route die: the query
+ * (`fetchSlowQueries()`, `lib/admin-slow-queries.ts` — already written to be
+ * "the shared implementation for GET /api/admin/slow-queries and the admin
+ * HTML page") now runs once, inline, in the `/admin/llm` server component, and
+ * its result is handed down as a prop. No client round-trip, no route to keep
+ * alive just for this one caller.
+ *
+ * Collapsed by default (the LLM page leads with usage + cost; this is a
+ * disclosure for when something needs investigating) — same toggle pattern as
+ * the nested "¿Cómo actuar?" guidance panel.
+ */
+
+import { useState, useMemo, useCallback, useRef } from "react";
 import Prism from "prismjs";
 import "prismjs/components/prism-sql";
 import { formatPgQueryText } from "@/lib/format-pg-query";
@@ -21,7 +38,7 @@ interface SlowQuery {
   origin?: QueryOrigin;
 }
 
-interface SlowQueriesData {
+export interface SlowQueriesData {
   queries: SlowQuery[];
   error?: string;
 }
@@ -92,6 +109,7 @@ function GuidancePanel() {
           alignItems: "center",
           gap: 8,
           width: "100%",
+          minHeight: 44, // tap target — D-124's 44px floor, this panel is strip-reachable
           padding: "10px 14px",
           background: "var(--bg-2)",
           border: "none",
@@ -127,10 +145,9 @@ function GuidancePanel() {
               </a>{" "}
               y usa el endpoint <code>/api/admin/explain</code> para obtener{" "}
               <code>EXPLAIN (ANALYZE, BUFFERS)</code>. Busca{" "}
-              <em>Seq Scan</em> en tablas grandes (
-              <code>ps_stock_tienda</code> ~12 M filas,{" "}
-              <code>ps_lineas_ventas</code> ~1,7 M,{" "}
-              <code>ps_ventas</code> ~911 K).
+              <em>Seq Scan</em> en las tablas grandes de este proyecto (
+              <code>listing</code>, <code>property</code>,{" "}
+              <code>listing_price_history</code>).
             </li>
             <li>
               <strong>Propón un índice</strong> cuando el filtro usa una columna
@@ -139,25 +156,23 @@ function GuidancePanel() {
               aplique en cada ETL rebuild.
             </li>
             <li>
-              <strong>Refactoriza el widget.</strong> Si el origen apunta a un
-              template en <code>dashboard/lib/templates/</code>, revisa el SQL
-              del widget: reduce el rango temporal por defecto, añade más
-              filtros o agrupa con mayor granularidad.
+              <strong>Revisa la consulta origen.</strong> Si el origen apunta a{" "}
+              <code>lib/candidates.ts</code> (el feed de candidatos) u otro
+              módulo en <code>dashboard/lib/</code>: reduce el rango temporal
+              por defecto, añade más filtros o agrupa con mayor granularidad.
             </li>
             <li>
               <strong>Materializa la agregación.</strong> Para agregaciones
-              pesadas que se repiten (stock por tienda, totales de ventas por
-              semana), considera una{" "}
-              <code>CREATE MATERIALIZED VIEW</code> refrescada por el ETL. Ver
-              los módulos de sync en <code>etl/sync/</code> para añadir un paso
-              de refresco.
+              pesadas que se repiten, considera una{" "}
+              <code>CREATE MATERIALIZED VIEW</code> refrescada por el pipeline
+              de materialización (<code>lib/filtering/materialize.ts</code>).
             </li>
             <li>
               <strong>Ajusta el timeout.</strong> Las consultas del dashboard ya
               usan <code>SET LOCAL statement_timeout</code> (ver{" "}
               <code>dashboard/lib/db.ts</code>). Si una consulta siempre supera
-              el timeout, bien la consulta necesita optimización, bien el límite
-              puede ajustarse por widget.
+              el timeout, la consulta necesita optimización o el límite necesita
+              ajustarse en el módulo que la emite.
             </li>
           </ol>
         </div>
@@ -166,30 +181,14 @@ function GuidancePanel() {
   );
 }
 
-export default function AdminSlowQueriesPage() {
-  const [data, setData] = useState<SlowQueriesData | null>(null);
+export function SlowQueriesPanel({ data }: { data: SlowQueriesData }) {
+  const [panelOpen, setPanelOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [sortKey, setSortKey] = useState<SortKey>("mean_exec_time_ms");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [filter, setFilter] = useState("");
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [debouncedFilter, setDebouncedFilter] = useState("");
-
-  useEffect(() => {
-    void fetch("/api/admin/slow-queries")
-      .then((r) => r.json())
-      .then((d) => setData(d as SlowQueriesData))
-      .catch((e) =>
-        setData({ queries: [], error: e instanceof Error ? e.message : "Error" }),
-      );
-  }, []);
-
-  // Cleanup debounce timer on unmount
-  useEffect(() => {
-    return () => {
-      if (filterTimerRef.current !== null) clearTimeout(filterTimerRef.current);
-    };
-  }, []);
 
   // Debounce filter input — 150 ms
   const handleFilterChange = useCallback((value: string) => {
@@ -200,7 +199,6 @@ export default function AdminSlowQueriesPage() {
 
   // Memoised formatted + highlighted SQL per query
   const formattedQueries = useMemo(() => {
-    if (!data) return [];
     return data.queries.map((q) => {
       const formatted = formatPgQueryText(q.query);
       return {
@@ -230,7 +228,6 @@ export default function AdminSlowQueriesPage() {
 
   // Filter + sort (client-side)
   const displayRows = useMemo(() => {
-    if (!data) return [];
     const lf = debouncedFilter.toLowerCase();
     const filtered = data.queries
       .map((q, i) => ({ q, i }))
@@ -245,7 +242,7 @@ export default function AdminSlowQueriesPage() {
     });
   }, [data, debouncedFilter, sortKey, sortDir]);
 
-  const totalCount = data?.queries.length ?? 0;
+  const totalCount = data.queries.length;
   const filteredCount = displayRows.length;
 
   const columns: Array<{ label: string; key?: SortKey; align: "left" | "right" }> = [
@@ -259,42 +256,65 @@ export default function AdminSlowQueriesPage() {
   ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <h1
+    <section
+      data-testid="admin-llm-slow-queries"
+      style={{ borderRadius: 8, border: "1px solid var(--border)", overflow: "hidden" }}
+    >
+      <button
+        type="button"
+        onClick={() => setPanelOpen((v) => !v)}
+        data-testid="slow-queries-disclosure-toggle"
         style={{
-          fontSize: 17,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          minHeight: 44, // tap target — D-124's 44px floor, this panel is strip-reachable
+          padding: "12px 16px",
+          background: "var(--bg-2)",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "var(--font-inter, sans-serif)",
+          fontSize: 14,
           fontWeight: 600,
           color: "var(--fg)",
-          margin: 0,
+          textAlign: "left",
         }}
+        aria-expanded={panelOpen}
       >
+        <span style={{ fontSize: 11, opacity: 0.7 }}>{panelOpen ? "▼" : "▶"}</span>
         Consultas lentas (pg_stat_statements)
-      </h1>
-
-      {/* Guidance panel */}
-      <GuidancePanel />
-
-      {data?.error && (
-        <p
+        <span
           style={{
-            borderRadius: 6,
-            border: "1px solid var(--warn)",
-            background: "var(--warn-bg, rgba(245,158,11,0.08))",
-            padding: "8px 12px",
-            fontSize: 13,
-            color: "var(--warn)",
+            marginLeft: "auto",
+            fontSize: 11,
+            fontWeight: 400,
+            color: "var(--fg-muted)",
           }}
         >
-          {data.error}
-        </p>
-      )}
+          {totalCount} consultas
+        </span>
+      </button>
 
-      {!data && (
-        <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
-      )}
+      {panelOpen && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16 }}>
+          <GuidancePanel />
 
-      {data && (
-        <>
+          {data.error && (
+            <p
+              style={{
+                borderRadius: 6,
+                border: "1px solid var(--warn)",
+                background: "var(--warn-bg, rgba(245,158,11,0.08))",
+                padding: "8px 12px",
+                fontSize: 13,
+                color: "var(--warn)",
+              }}
+            >
+              {data.error}
+            </p>
+          )}
+
           {/* Filter row */}
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
@@ -369,8 +389,11 @@ export default function AdminSlowQueriesPage() {
                           type="button"
                           onClick={() => toggleSort(col.key!)}
                           style={{
-                            display: "block",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: col.align === "right" ? "flex-end" : "flex-start",
                             width: "100%",
+                            minHeight: 44, // tap target — D-124's 44px floor, this panel is strip-reachable
                             padding: "9px 12px",
                             background: "none",
                             border: "none",
@@ -469,12 +492,15 @@ export default function AdminSlowQueriesPage() {
                           type="button"
                           onClick={() => toggleExpand(i)}
                           style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            minHeight: 44, // tap target — D-124's 44px floor, this panel is strip-reachable
                             background: "none",
                             border: "none",
                             cursor: "pointer",
                             fontSize: 11,
                             color: "var(--accent)",
-                            padding: "2px 0",
+                            padding: "2px 8px 2px 0",
                             fontFamily: "inherit",
                           }}
                         >
@@ -524,8 +550,8 @@ export default function AdminSlowQueriesPage() {
               </tbody>
             </table>
           </div>
-        </>
+        </div>
       )}
-    </div>
+    </section>
   );
 }

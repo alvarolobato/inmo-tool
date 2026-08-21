@@ -1,12 +1,12 @@
 /**
- * E2E: "LLM / IA" cost/usage panel on the "Salud de datos" page (issue #324,
- * D-041).
+ * E2E: "LLM / IA" cost/usage panel, now on the consolidated `/admin/llm` page
+ * (issue #324; moved from "Salud de datos" by #653/#636 Fase 0 borrado, D-041).
  *
  * Drives a real Next.js server against a real Postgres, seeding llm_usage /
  * llm_tool_calls / llm_errors rows directly via `pg`, then asserts:
  *
- *   - The LLM/IA section renders (extends the existing data-health page, not a
- *     new page).
+ *   - The LLM/IA section renders on `/admin/llm` (moved verbatim, same
+ *     data-testids, out of "Salud de datos").
  *   - Cost/call summary tiles render (today + 7d), by-flow table and
  *     by-provider cards render with the seeded data.
  *   - A CLI-provider card is labelled €0 (subscription), an openrouter card
@@ -15,8 +15,8 @@
  *   - No error surface (ErrorDisplay / "Detalles técnicos" / "there is no
  *     parameter" / "HTTP 500" / "Error al cargar") — the D-041 bar.
  *
- * Admin-gated (middleware.ts `/etl/:path*` + `/api/etl/:path*`), so the test
- * sets the `ps_admin` cookie the way /admin/login does. Skips cleanly when
+ * Admin-gated (middleware.ts gates every `/admin/*` page), so the test sets
+ * the `ps_admin` cookie the way /admin/login does. Skips cleanly when
  * Postgres is unreachable or ADMIN_API_KEY is unset, matching the other specs.
  */
 import { test, expect } from "@playwright/test";
@@ -114,8 +114,8 @@ test.beforeEach(async ({ page, baseURL }) => {
 test("renders the LLM/IA cost panel with seeded usage (EC + D-041)", async ({
   page,
 }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
+  await page.goto("/admin/llm");
+  await expect(page.getByTestId("admin-llm-page")).toBeVisible();
 
   // The LLM/IA section is present.
   const section = page.getByTestId("llm-health");

@@ -41,7 +41,7 @@ export interface SlowQueriesResponse {
   error?: string;
 }
 
-/** Shared implementation for GET /api/admin/slow-queries and the admin HTML page. */
+/** Shared implementation for the /admin/llm slow-queries disclosure (its own API route, /api/admin/slow-queries, was deleted in #653 — this is now called inline, server-side). */
 export async function fetchSlowQueries(): Promise<SlowQueriesResponse> {
   try {
     const result = await query(SLOW_QUERIES_SQL);

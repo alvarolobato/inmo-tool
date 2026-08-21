@@ -9,11 +9,15 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { buildPgPoolConfig } from "./db-shared";
 
-// ─── llm_interactions types ─────────────────────────────────────────────────
+// ─── Progress-line shape ─────────────────────────────────────────────────────
 
 /**
- * A structured progress line stored in `llm_interactions.lines`.
- * Uses `kind` so callers can format them by type in the UI.
+ * A structured progress line, in the shape `llm_interactions.lines` used to
+ * store before that table (and its write/read helpers, and the admin viewer
+ * at `/admin/interactions`) were deleted in #653 — `llm_interactions` had 0
+ * rows ever in production, and nothing wrote to it. This type survives
+ * because `DashboardGenerateProgressDialog` still formats its own in-memory
+ * progress lines by `kind`, independent of that table.
  */
 export interface InteractionLine {
   /** Logical line type for UI formatting. */
@@ -22,24 +26,6 @@ export interface InteractionLine {
   text: string;
   /** ISO timestamp when the line was emitted. */
   ts: string;
-}
-
-export type InteractionEndpoint = "generate" | "modify" | "analyze";
-
-/** A row from `llm_interactions`, as read back by the admin monitoring routes. */
-export interface InteractionRow {
-  id: string;
-  request_id: string;
-  endpoint: InteractionEndpoint;
-  dashboard_id: number | null;
-  prompt: string;
-  final_output: string | null;
-  lines: InteractionLine[];
-  llm_provider: string | null;
-  llm_driver: string | null;
-  started_at: string;
-  finished_at: string | null;
-  status: "running" | "completed" | "error";
 }
 
 // ─── OTel trace context ──────────────────────────────────────────────────────
@@ -180,79 +166,4 @@ export async function sql<T extends QueryResultRow = QueryResultRow>(
   const pool = getPool();
   const result = await pool.query<T>(text, params);
   return result.rows;
-}
-
-// ─── llm_interactions helpers ────────────────────────────────────────────────
-
-/**
- * Insert a new `llm_interactions` row with status='running' and return its UUID.
- *
- * Fire-and-forget safe: callers should not await this in the hot path if they
- * want to avoid blocking the stream; however the returned promise can be awaited
- * to get the row id for subsequent updates.
- */
-export async function createInteraction(opts: {
-  requestId: string;
-  endpoint: InteractionEndpoint;
-  dashboardId?: number | null;
-  prompt: string;
-  llmProvider?: string | null;
-  llmDriver?: string | null;
-}): Promise<string> {
-  const rows = await sql<{ id: string }>(
-    `INSERT INTO llm_interactions
-       (request_id, endpoint, dashboard_id, prompt, llm_provider, llm_driver, started_at, status)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW(), 'running')
-     RETURNING id`,
-    [
-      opts.requestId,
-      opts.endpoint,
-      opts.dashboardId ?? null,
-      opts.prompt,
-      opts.llmProvider ?? null,
-      opts.llmDriver ?? null,
-    ],
-  );
-  if (!rows[0]) throw new Error("createInteraction: no row returned");
-  return rows[0].id;
-}
-
-/**
- * Append a batch of lines to `llm_interactions.lines` (JSONB concatenation).
- * Throws on DB errors — callers should wrap in try/catch if they want
- * best-effort behavior (the generate route does this already).
- */
-export async function appendInteractionLines(
-  id: string,
-  lines: InteractionLine[],
-): Promise<void> {
-  if (lines.length === 0) return;
-  await sql(
-    `UPDATE llm_interactions
-        SET lines = lines || $2::jsonb
-      WHERE id = $1`,
-    [id, JSON.stringify(lines)],
-  );
-}
-
-/**
- * Mark an interaction as completed or error.
- *
- * Throws on DB errors — callers should `.catch()` and log if they want
- * best-effort behavior (success-path callers should `await` this before
- * returning the HTTP response so status never stays 'running').
- */
-export async function finishInteraction(
-  id: string,
-  status: "completed" | "error",
-  finalOutput?: string | null,
-): Promise<void> {
-  await sql(
-    `UPDATE llm_interactions
-        SET status = $2,
-            finished_at = NOW(),
-            final_output = $3
-      WHERE id = $1`,
-    [id, status, finalOutput ?? null],
-  );
 }
