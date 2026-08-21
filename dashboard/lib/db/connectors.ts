@@ -225,6 +225,9 @@ interface RegistryRow {
   // Issue #586: latest 'done' extension_capture for this connector — the
   // capture-only portals' equivalent of a successful crawl cycle.
   last_capture_done_at: Date | string | null;
+  // Issue #660: corpus size for the profile-form connector picker's
+  // biggest-first ordering.
+  active_listing_count: number | string | null;
 }
 
 interface LastRunRow {
@@ -475,7 +478,13 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               -- reads for the TopBar dot — SAME join, so this page's pill and
               -- the dot can never structurally disagree on a capture-only
               -- portal's freshness (D-125).
-              cap.last_capture_done_at
+              cap.last_capture_done_at,
+              -- Issue #660: corpus size for the profile-form connector
+              -- picker's biggest-first ordering. A tiny per-connector
+              -- aggregate (source cardinality is bounded by the registry
+              -- itself), so a plain LEFT JOIN is cheap enough to run on
+              -- every listConnectors() call.
+              COALESCE(al.active_listing_count, 0) AS active_listing_count
          FROM connector_registry g
          LEFT JOIN connector_config c ON c.connector_name = g.connector_name
          LEFT JOIN connector_freshness_state f ON f.connector_name = g.connector_name
@@ -492,6 +501,12 @@ export async function listConnectors(): Promise<ConnectorView[]> {
             WHERE status = 'done'
             GROUP BY connector_name
          ) cap ON cap.connector_name = g.connector_name
+         LEFT JOIN (
+           SELECT source, COUNT(*) AS active_listing_count
+             FROM listing
+            WHERE status = 'active'
+            GROUP BY source
+         ) al ON al.source = g.connector_name
         ORDER BY g.registered DESC, g.connector_name`,
     ),
     fetchLastRuns(),
@@ -573,6 +588,7 @@ export async function listConnectors(): Promise<ConnectorView[]> {
         nowMs,
       }),
       lastRun: lastRuns.get(row.connector_name) ?? null,
+      activeListingCount: num(row.active_listing_count ?? 0),
     };
   });
 }
@@ -613,6 +629,31 @@ export async function getConnectorRegistryInfo(
     supports_discovery: rows[0].supports_discovery,
     supported_filters: parseSupportedFilters(rows[0].supported_filters),
   };
+}
+
+/**
+ * Which of `names` do NOT match any `connector_registry` row — issue #660's
+ * server-side check for a profile's `scope.connectors` selection. This file
+ * is server-only (imports `pg`) so it can see the live roster;
+ * `profiles-schema.ts`'s client-safe `ConnectorsSchema` only validates shape
+ * (non-empty strings), same split as the connector-filters PUT route's host
+ * check (`hostSuffixForConnector`).
+ *
+ * Checked against EVERY row, not just `registered = true`: a connector the
+ * ETL has since deregistered still left real `listing.source` rows behind,
+ * and a profile restricting to it is a legitimate (if inert-for-crawling)
+ * selection — `registered` governs whether the ETL can run it, not whether
+ * matching against its past data makes sense. Returns `[]` when every name
+ * is known.
+ */
+export async function unknownConnectorNames(names: string[]): Promise<string[]> {
+  if (names.length === 0) return [];
+  const rows = await sql<{ connector_name: string }>(
+    `SELECT connector_name FROM connector_registry WHERE connector_name = ANY($1::text[])`,
+    [names],
+  );
+  const known = new Set(rows.map((r) => r.connector_name));
+  return names.filter((n) => !known.has(n));
 }
 
 /**

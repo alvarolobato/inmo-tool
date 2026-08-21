@@ -40,8 +40,15 @@ class _PreviewConnector(DummyConnector):
         ]
 
 
-def _make_profile(conn, name: str, center: list[float], radius_km: float) -> int:
+def _make_profile(
+    conn, name: str, center: list[float], radius_km: float, connectors=None
+) -> int:
     scope = {"geography": {"type": "radius", "center": center, "radius_km": radius_km}}
+    if connectors is not None:
+        # Issue #660: `connectors` is `"all"` or a non-empty list of names —
+        # omitted entirely means "all" (dashboard's effectiveConnectors
+        # default), which every OTHER test in this file relies on.
+        scope["connectors"] = connectors
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO search_profile (name, scope, thesis_params) "
@@ -154,6 +161,64 @@ class TestPublishSearchPreviews:
             assert _rows_for(pg_conn, pid) == {}, (
                 "archived profile's previews must be pruned"
             )
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, [pid])
+
+    def test_excludes_connector_not_in_the_profiles_selection(self, pg_conn):
+        """Issue #660: a profile whose scope.connectors excludes a connector
+        must get NO preview row for it — the decorative-trap fixture: a
+        second connector the profile DOES select proves the exclusion is
+        real narrowing, not an accidental "nothing published at all"."""
+        _apply_schema(pg_conn)
+        included = _PreviewConnector(name="test-preview-included")
+        excluded = _PreviewConnector(name="test-preview-excluded")
+        pid = _make_profile(
+            pg_conn,
+            "p660-selection",
+            [37.3891, -5.9845],
+            5,
+            connectors=[included.name],
+        )
+        original = list(orchestrator.CONNECTORS)
+        orchestrator.CONNECTORS[:] = [included, excluded]
+        try:
+            orchestrator.publish_search_previews(pg_conn)
+            rows = _rows_for(pg_conn, pid)
+            assert included.name in rows, "selected connector must publish a preview"
+            assert excluded.name not in rows, (
+                "excluded connector must publish NO preview"
+            )
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, [pid])
+
+    def test_prunes_a_previously_published_preview_after_the_selection_narrows(
+        self, pg_conn
+    ):
+        """A connector that WAS included, then gets excluded by a scope edit,
+        must have its stale preview row removed on the next publish."""
+        _apply_schema(pg_conn)
+        a = _PreviewConnector(name="test-preview-narrow-a")
+        b = _PreviewConnector(name="test-preview-narrow-b")
+        pid = _make_profile(
+            pg_conn, "p660-narrow", [37.3891, -5.9845], 5, connectors="all"
+        )
+        original = list(orchestrator.CONNECTORS)
+        orchestrator.CONNECTORS[:] = [a, b]
+        try:
+            orchestrator.publish_search_previews(pg_conn)
+            assert set(_rows_for(pg_conn, pid)) == {a.name, b.name}
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE search_profile SET scope = jsonb_set(scope, '{connectors}', %s::jsonb) WHERE id = %s",
+                    (json.dumps([a.name]), pid),
+                )
+            pg_conn.commit()
+
+            orchestrator.publish_search_previews(pg_conn)
+            assert set(_rows_for(pg_conn, pid)) == {a.name}
         finally:
             orchestrator.CONNECTORS[:] = original
             _cleanup(pg_conn, [pid])

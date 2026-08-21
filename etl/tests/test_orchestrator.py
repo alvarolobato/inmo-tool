@@ -6477,6 +6477,136 @@ class TestScopeProfileAttribution:
         assert base.scope_key(a) == base.scope_key(b)
 
 
+class TestPerProfileConnectorSelection:
+    """Issue #660: `scope.connectors` narrows which connector crawls which
+    profile-derived scope, with attribution trimmed (not just dropped) when
+    a scope is shared by profiles that disagree on this connector.
+    """
+
+    def test_profile_connector_selections_absent_key_means_unrestricted(self):
+        rows = [(1, _radius_geo(40.0, -3.0, 10))]  # no "connectors" key at all
+        selections = orchestrator._profile_connector_selections(_FakeScopeConn(rows))
+        assert selections[1] is None
+
+    def test_profile_connector_selections_explicit_all_means_unrestricted(self):
+        scope = {**_radius_geo(40.0, -3.0, 10), "connectors": "all"}
+        selections = orchestrator._profile_connector_selections(
+            _FakeScopeConn([(1, scope)])
+        )
+        assert selections[1] is None
+
+    def test_profile_connector_selections_real_list_is_a_frozenset(self):
+        scope = {**_radius_geo(40.0, -3.0, 10), "connectors": ["fotocasa", "cimenta2"]}
+        selections = orchestrator._profile_connector_selections(
+            _FakeScopeConn([(1, scope)])
+        )
+        assert selections[1] == frozenset({"fotocasa", "cimenta2"})
+
+    def test_profile_connector_selections_malformed_degrades_to_unrestricted(self):
+        # Not "all", not a list of strings — a corrupted/garbage value must
+        # never silently EXCLUDE the connector from every scope (this is a
+        # crawl-coverage optimisation, not a security boundary — see the
+        # function's own docstring).
+        for bad in ["not-a-list", 42, ["fotocasa", 7], []]:
+            scope = {**_radius_geo(40.0, -3.0, 10), "connectors": bad}
+            selections = orchestrator._profile_connector_selections(
+                _FakeScopeConn([(1, scope)])
+            )
+            assert selections[1] is None, (
+                f"expected unrestricted for connectors={bad!r}"
+            )
+
+    def test_profile_includes_connector(self):
+        assert orchestrator._profile_includes_connector(None, "fotocasa") is True
+        assert (
+            orchestrator._profile_includes_connector(
+                frozenset({"fotocasa"}), "fotocasa"
+            )
+            is True
+        )
+        assert (
+            orchestrator._profile_includes_connector(
+                frozenset({"cimenta2"}), "fotocasa"
+            )
+            is False
+        )
+
+    def test_restrict_scopes_drops_a_scope_every_profile_excludes(self):
+        scope = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1,))
+        restricted = orchestrator._restrict_profile_scopes_to_connector(
+            [scope], "fotocasa", {1: frozenset({"cimenta2"})}
+        )
+        assert restricted == []
+
+    def test_restrict_scopes_keeps_a_scope_every_profile_includes_unchanged(self):
+        scope = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1, 2))
+        restricted = orchestrator._restrict_profile_scopes_to_connector(
+            [scope], "fotocasa", {1: None, 2: frozenset({"fotocasa"})}
+        )
+        assert restricted == [scope]
+        assert restricted[0].profile_ids == (1, 2)
+
+    def test_restrict_scopes_trims_attribution_for_a_partially_excluding_scope(self):
+        # A scope shared by profiles A+B where only A includes this connector
+        # survives with profile_ids trimmed to just A (issue #660's stated
+        # #530-attribution requirement).
+        scope = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1, 2))
+        restricted = orchestrator._restrict_profile_scopes_to_connector(
+            [scope],
+            "fotocasa",
+            {1: frozenset({"fotocasa"}), 2: frozenset({"cimenta2"})},
+        )
+        assert len(restricted) == 1
+        assert restricted[0].profile_ids == (1,)
+        # scope_key identity must be untouched by the trim (D-101/#530: never
+        # part of the identity contract).
+        base = DummyConnector(name="trim-probe")
+        assert base.scope_key(restricted[0]) == base.scope_key(scope)
+
+    def test_restrict_scopes_keeps_an_unattributed_scope_as_is(self):
+        # A hand-built/test ConnectorScope with no profile_ids has nothing to
+        # check against — kept unrestricted rather than dropped.
+        scope = ConnectorScope(center=(40.0, -3.0), radius_km=10)
+        restricted = orchestrator._restrict_profile_scopes_to_connector(
+            [scope], "fotocasa", {}
+        )
+        assert restricted == [scope]
+
+    def test_restrict_scopes_end_to_end_with_the_real_selections_dict(self):
+        # Two profiles share ONE deduped scope (same rounded centre/radius);
+        # profile 7 wants fotocasa, profile 9 explicitly excludes it. fotocasa
+        # must see the scope with only profile 7 attributed; cimenta2 (which
+        # neither profile excludes) must see it with both.
+        rows = [
+            (7, {**_radius_geo(40.4168, -3.7038, 10), "connectors": ["fotocasa"]}),
+            (9, {**_radius_geo(40.4168, -3.7038, 10), "connectors": ["cimenta2"]}),
+        ]
+        profile_scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert len(profile_scopes) == 1
+        assert profile_scopes[0].profile_ids == (7, 9)
+
+        selections = orchestrator._profile_connector_selections(_FakeScopeConn(rows))
+
+        for_fotocasa = orchestrator._restrict_profile_scopes_to_connector(
+            profile_scopes, "fotocasa", selections
+        )
+        assert len(for_fotocasa) == 1
+        assert for_fotocasa[0].profile_ids == (7,)
+
+        for_cimenta2 = orchestrator._restrict_profile_scopes_to_connector(
+            profile_scopes, "cimenta2", selections
+        )
+        assert len(for_cimenta2) == 1
+        assert for_cimenta2[0].profile_ids == (9,)
+
+        for_hipoges = orchestrator._restrict_profile_scopes_to_connector(
+            profile_scopes, "hipoges", selections
+        )
+        assert for_hipoges == [], (
+            "a connector no profile selected must see no scope at all"
+        )
+
+
 class TestActiveProfileScopesEverywhereSentinel:
     """Issue #659/D-147: an `everywhere` geography is a deliberate,
     explicitly-stated sentinel — never a malformed-scope warning. This

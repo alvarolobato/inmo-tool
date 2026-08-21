@@ -2341,6 +2341,102 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
     return list(seen.values())
 
 
+def _profile_connector_selections(conn) -> dict[int, frozenset[str] | None]:
+    """profile_id -> its `scope.connectors` selection (issue #660), for every
+    active profile. `None` means unrestricted ("all", or the key is absent —
+    every profile before this issue, see `dashboard/lib/profiles-schema.ts`'s
+    `effectiveConnectors`) — returned as `None` rather than a "the set of
+    every known connector name" so callers never need a live registry lookup
+    just to answer "does this profile include connector X".
+
+    A malformed value (not "all", not a list of strings) degrades to
+    unrestricted, same "one bad row must not remove real coverage" posture
+    `_active_profile_scopes`/`_scopes_for_connector` already take for a
+    malformed `geography`/`geography_override` — this function feeds a CRAWL
+    optimisation (which connector bothers discovering which scope), not a
+    security or data-visibility boundary, so the safe default on garbage
+    input is "still crawl it", never "silently stop crawling for everyone".
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, scope FROM search_profile WHERE archived_at IS NULL ORDER BY id"
+        )
+        rows = cur.fetchall()
+
+    result: dict[int, frozenset[str] | None] = {}
+    for profile_id, scope_json in rows:
+        connectors = (scope_json or {}).get("connectors", "all")
+        if connectors == "all":
+            result[profile_id] = None
+            continue
+        if (
+            isinstance(connectors, list)
+            and len(connectors) > 0
+            and all(isinstance(c, str) for c in connectors)
+        ):
+            result[profile_id] = frozenset(connectors)
+        else:
+            logger.warning(
+                "search_profile id=%s: scope.connectors malformed (expected "
+                "'all' or a non-empty list of strings, got %r) — treating as "
+                "unrestricted for connector-scope derivation",
+                profile_id,
+                connectors,
+            )
+            result[profile_id] = None
+    return result
+
+
+def _profile_includes_connector(
+    selection: frozenset[str] | None, connector_name: str
+) -> bool:
+    """True when `connector_name` is in a profile's connector selection —
+    `None` (unrestricted) always includes everything."""
+    return selection is None or connector_name in selection
+
+
+def _restrict_profile_scopes_to_connector(
+    scopes: list[ConnectorScope],
+    connector_name: str,
+    profile_connectors: dict[int, frozenset[str] | None],
+) -> list[ConnectorScope]:
+    """Narrow `_active_profile_scopes`' output to the scopes `connector_name`
+    should actually crawl this run (issue #660).
+
+    A scope whose contributing profiles ALL exclude this connector is
+    dropped entirely — crawling it would give the connector data no active
+    profile asked it for. A scope some, but not all, of whose profiles
+    exclude this connector survives with `profile_ids` trimmed to just the
+    including profiles, so issue #530's per-(connector × profile)
+    attribution stays honest: a discovery/error outcome recorded against
+    this scope must never be attributed to a profile that opted this
+    connector out.
+
+    A scope with no `profile_ids` at all (a hand-built/test `ConnectorScope`,
+    or any future non-profile-derived source) has nothing to check against
+    and is kept as-is — this function only ever narrows scopes it can trace
+    back to specific profiles, never scopes it can't attribute.
+    """
+    result: list[ConnectorScope] = []
+    for scope in scopes:
+        if not scope.profile_ids:
+            result.append(scope)
+            continue
+        keeping = tuple(
+            pid
+            for pid in scope.profile_ids
+            if _profile_includes_connector(profile_connectors.get(pid), connector_name)
+        )
+        if not keeping:
+            continue
+        result.append(
+            scope
+            if keeping == scope.profile_ids
+            else dataclasses.replace(scope, profile_ids=keeping)
+        )
+    return result
+
+
 def _active_profiles_with_scope(conn) -> list[tuple[int, ConnectorScope]]:
     """(profile_id, ConnectorScope) for every active profile — for per-profile
     search-preview publishing (issue #478 P4).
@@ -2398,9 +2494,22 @@ def publish_search_previews(conn) -> None:
     """
     profiles = _active_profiles_with_scope(conn)
     active_ids = [pid for pid, _ in profiles]
+    # Issue #660: a profile's connector selection must not publish (or must
+    # stop publishing, once edited) a preview for a connector it excludes —
+    # same "skip excluded (profile × connector) pairs" requirement as the
+    # crawl-scope narrowing above.
+    profile_connectors = _profile_connector_selections(conn)
     with conn.cursor() as cur:
         for profile_id, scope in profiles:
+            selection = profile_connectors.get(profile_id)
+            allowed_names = [
+                connector.name
+                for connector in CONNECTORS
+                if _profile_includes_connector(selection, connector.name)
+            ]
             for connector in CONNECTORS:
+                if connector.name not in allowed_names:
+                    continue
                 try:
                     previews = connector.search_previews(scope)
                 except Exception:
@@ -2427,6 +2536,20 @@ def publish_search_previews(conn) -> None:
                         connector.name,
                         json.dumps([dataclasses.asdict(p) for p in previews]),
                     ),
+                )
+            # Prune any previously-published preview for a connector this
+            # profile no longer selects (a selection narrowed after an
+            # earlier publish) — scoped to this profile so it never touches
+            # another profile's rows.
+            if allowed_names:
+                cur.execute(
+                    "DELETE FROM connector_search_preview WHERE profile_id = %s AND connector <> ALL(%s)",
+                    (profile_id, allowed_names),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM connector_search_preview WHERE profile_id = %s",
+                    (profile_id,),
                 )
         # Prune rows for profiles no longer active. A hard DELETE cascades via
         # the FK, but a soft archive (archived_at = NOW()) does not — so drop
@@ -3288,6 +3411,11 @@ def run_all_connectors(
     # longer mean "skip literally everything" at the whole-run level — it's
     # now evaluated per connector, same place enabled/disabled is.
     profile_scopes = _active_profile_scopes(conn)
+    # Issue #660: per-profile connector selection. A cheap extra read of the
+    # same small table `_active_profile_scopes` just queried — kept separate
+    # rather than folded into that function's own SELECT so its existing,
+    # heavily-unit-tested (fake-cursor) signature/return shape stay untouched.
+    profile_connectors = _profile_connector_selections(conn)
 
     # Issue #436 (D-099): materialise the accepted / 'en seguimiento' property
     # set ONCE for the whole run — a cheap (few-row) query — and share it across
@@ -3303,10 +3431,19 @@ def run_all_connectors(
         )
 
     for connector in connectors_to_run:
+        # Issue #660: drop/trim profile-derived scopes to only the profiles
+        # that actually selected this connector BEFORE _scopes_for_connector
+        # ever sees them — the single point this narrowing happens (a
+        # connector_config.geography_override or a D-101 pinned override
+        # scope is untouched by profile selection; only the profile-derived
+        # default is filtered here).
+        connector_profile_scopes = _restrict_profile_scopes_to_connector(
+            profile_scopes, connector.name, profile_connectors
+        )
         scopes, enabled, min_refetch_override = _scopes_for_connector(
             conn,
             connector.name,
-            profile_scopes,
+            connector_profile_scopes,
             supports_search_override=connector.supports_search_override,
         )
         if not enabled:

@@ -216,4 +216,13 @@ export interface ConnectorView {
   freshness: ConnectorFreshnessState;
 
   lastRun: ConnectorLastRun | null;
+
+  /**
+   * Count of this connector's currently-active `listing` rows (issue #660) —
+   * lets the profile-form connector picker order the list by corpus size
+   * ("big three first, tail scannable below" per the issue) without a
+   * second query. Not connected to any effective-scope computation; a plain
+   * `COUNT(*) FROM listing WHERE source = ... AND status = 'active'`.
+   */
+  activeListingCount: number;
 }

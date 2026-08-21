@@ -12,7 +12,7 @@
  * Node-built-ins-in-browser-bundle break documented in profiles-schema.ts.
  */
 
-import type { Scope } from "@/lib/profiles-schema";
+import { effectiveConnectors, type Scope } from "@/lib/profiles-schema";
 
 export interface ScopeQuery {
   /** SQL boolean expression referencing the `property` table alias `property`. */
@@ -246,8 +246,30 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   // so it's the one place this filter is load-bearing; the price-band
   // subquery below gets the same filter for the same reason, but a
   // profile with no price filter set relies on THIS EXISTS alone.
+  //
+  // `AND listing.source = ANY(...)` — per-profile connector selection (issue
+  // #660, part of #658). Folded into this SAME EXISTS rather than a separate
+  // clause/stage: the single enforcement point every downstream consumer
+  // (feed, counts, scoring, assessment eligibility) inherits automatically
+  // through `matched`, per the design's explicit warning against a second
+  // WHERE drifting from this one. Reads as the funnel's "fuentes" dimension
+  // conceptually (a future zero-candidate diagnostic branch could name it
+  // that way), but there is deliberately no separate SQL clause/stage for it
+  // — "all" (or an absent field) omits the condition entirely, same as
+  // property_types' "all" sentinel (D-013/D-147): never bind an empty/NULL
+  // array, which Postgres would evaluate to zero rows for every property.
+  const connectors = effectiveConnectors(scope);
+  const sourceCondition =
+    connectors === "all"
+      ? ""
+      : (() => {
+          params.push(connectors);
+          return " AND listing.source = ANY(" + ph(params.length) + "::text[])";
+        })();
   conditions.push(
-    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')",
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale'" +
+      sourceCondition +
+      ")",
   );
   stages.push({ key: "geography", whereSql: conditions.join(" AND "), params: [...params] });
 

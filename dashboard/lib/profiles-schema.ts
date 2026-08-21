@@ -106,10 +106,43 @@ const PropertyTypesSchema = z.union([
   z.array(z.enum(PROPERTY_TYPES)).min(1),
 ]);
 
+/**
+ * Per-profile connector selection (issue #660, part of #658's per-profile
+ * connector-selection design). `"all"` (the default — see `effectiveConnectors`
+ * below) means unrestricted, matching every source exactly like today; a
+ * non-empty list means "only these sources" — the profile stops matching a
+ * property whose only active listing comes from an excluded connector.
+ *
+ * Connector NAMES are validated shape-only here (non-empty strings) — this
+ * file is client-safe (no DB import) and can't know the live
+ * `connector_registry` roster. Server-side routes (POST /api/profiles, PATCH
+ * /api/profiles/[id]) validate each name against the registry after this
+ * parse succeeds and 400 on an unknown one (same pattern the
+ * connector-filters PUT route uses for its host check) — see
+ * lib/db/connectors.ts's `validateConnectorNames`.
+ *
+ * Deliberately OPTIONAL, not `.default("all")`: unlike `geography`/
+ * `property_types` (issue #659/D-147), a genuinely-absent `connectors` has no
+ * silent-wrong-answer landmine to guard against — every real consumer reads
+ * it through `effectiveConnectors()` below, which treats `undefined` exactly
+ * like `"all"` (the same "no restriction" behaviour missing rows already
+ * have). Requiring the key would force every one of the ~50 pre-existing
+ * `Scope` object literals across the test suite (all predating this issue) to
+ * spell out `connectors: "all"` for zero behavioural gain — `property_types`/
+ * `geography` never had that retrofit problem because they were required from
+ * the schema's original design, before those fixtures existed. New writes
+ * (ProfileForm) still state it explicitly, per the issue's intent.
+ */
+const ConnectorsSchema = z.union([
+  z.literal("all"),
+  z.array(z.string().min(1)).min(1),
+]);
+
 export const ScopeSchema = z
   .object({
     geography: GeographySchema,
     property_types: PropertyTypesSchema,
+    connectors: ConnectorsSchema.optional(),
     // Filters against property.m2_built specifically (not m2_useful) — built
     // area is published far more consistently across sources than useful
     // area, so it's the more reliable filter target. See data-model.md.
@@ -136,6 +169,40 @@ export const ScopeSchema = z
   );
 
 export type Scope = z.infer<typeof ScopeSchema>;
+
+/**
+ * Normalizes `scope.connectors` to its effective value — `undefined`
+ * (missing key, every profile before issue #660) reads exactly like `"all"`.
+ * The ONE place every consumer (matching, scopesEqual, the ProfileForm
+ * picker, the captura task resolver) should read the field through, so the
+ * "absent means unrestricted" rule is stated once, not re-derived per call
+ * site.
+ */
+export function effectiveConnectors(scope: Pick<Scope, "connectors">): "all" | string[] {
+  return scope.connectors ?? "all";
+}
+
+/**
+ * True when `connectorName` is included in a scope's effective connector
+ * selection — `"all"` (or an absent field, via {@link effectiveConnectors})
+ * always includes everything.
+ */
+export function scopeIncludesConnector(scope: Pick<Scope, "connectors">, connectorName: string): boolean {
+  const selection = effectiveConnectors(scope);
+  return selection === "all" || selection.includes(connectorName);
+}
+
+/**
+ * Human-facing label for a scope's connector selection — "Todas las fuentes"
+ * for the unrestricted default, else a comma-joined list of connector names
+ * (the picker/overview render the human label; this only needs to look
+ * reasonable as a fallback when a display name isn't available).
+ */
+export function formatConnectorsLabel(scope: Pick<Scope, "connectors">): string {
+  const selection = effectiveConnectors(scope);
+  if (selection === "all") return "Todas las fuentes";
+  return selection.join(", ");
+}
 
 /**
  * Human-facing label for a scope's property_types — single source of truth
@@ -225,6 +292,25 @@ export function scopesEqual(a: Scope, b: Scope): boolean {
     if (at.length !== bt.length) return false;
     for (let i = 0; i < at.length; i++) {
       if (at[i] !== bt[i]) return false;
+    }
+  }
+
+  // connectors (issue #660) — compared through effectiveConnectors() so an
+  // absent field and an explicit "all" (semantically identical, per the
+  // helper's own docstring) never register as a scope change. "all" vs. a
+  // real list, and two different lists, DO count as a change: narrowing or
+  // widening which sources a profile matches changes the matched set exactly
+  // like a property_types edit, so D-040's quick refresh must fire.
+  const aConn = effectiveConnectors(a);
+  const bConn = effectiveConnectors(b);
+  if (aConn === "all" || bConn === "all") {
+    if (aConn !== bConn) return false;
+  } else {
+    const ac = [...aConn].sort();
+    const bc = [...bConn].sort();
+    if (ac.length !== bc.length) return false;
+    for (let i = 0; i < ac.length; i++) {
+      if (ac[i] !== bc[i]) return false;
     }
   }
 

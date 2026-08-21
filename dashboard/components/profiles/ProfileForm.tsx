@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import {
   PROPERTY_TYPES,
   PROPERTY_TYPE_LABELS,
+  effectiveConnectors,
   type RadiusGeography,
   type Scope,
   type ThesisParams,
 } from "@/lib/profiles-schema";
 import { LocationPicker } from "./LocationPicker";
+import type { ConnectorView } from "@/lib/connectors-schema";
 
 export interface ProfileFormValues {
   name: string;
@@ -33,6 +35,11 @@ export const DEFAULT_VALUES: ProfileFormValues = {
   scope: {
     geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },
     property_types: ["piso"],
+    // Issue #660: the form always writes `connectors` explicitly (never
+    // relies on the schema's "absent means all" default) — "all" is the
+    // stated starting point, same posture as property_types would be if it
+    // had a sentinel default too.
+    connectors: "all",
     hard_exclusions: {},
   },
   thesis_params: {},
@@ -205,11 +212,86 @@ export function ProfileForm({
     });
   };
 
+  // --- Connector selection (issue #660, part of #658) ---------------------
+  // The picker loads the live connector roster once (name + global on/off +
+  // corpus size, GET /api/etl/connectors — the same admin endpoint the
+  // Conectores page uses, task item 5's stated source). A load failure
+  // degrades to "no picker, still safe": the form keeps whatever selection
+  // it already had (default "all"), it just can't offer per-source
+  // checkboxes until the list loads.
+  const [connectorList, setConnectorList] = useState<ConnectorView[] | null>(null);
+  const [connectorListError, setConnectorListError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/etl/connectors");
+        if (!res.ok) throw new Error(String(res.status));
+        const body = await res.json();
+        if (!cancelled && Array.isArray(body.connectors)) {
+          setConnectorList(body.connectors as ConnectorView[]);
+        }
+      } catch {
+        if (!cancelled) setConnectorListError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Biggest-first (Additional Context: "big three first, tail scannable
+  // below"), registered connectors only — an unregistered/removed
+  // connector isn't a real choice on the form even though a profile that
+  // already selected it degrades sensibly (scope-query.ts's ANY() just
+  // matches nothing for that name).
+  const orderedConnectors = (connectorList ?? [])
+    .filter((c) => c.registered)
+    .slice()
+    .sort((a, b) => b.activeListingCount - a.activeListingCount);
+
+  const effectiveConnectorSelection = effectiveConnectors(values.scope);
+  const isAllConnectors = effectiveConnectorSelection === "all";
+  const [lastConnectorSelection, setLastConnectorSelection] = useState<string[]>(
+    effectiveConnectorSelection !== "all" && effectiveConnectorSelection.length > 0
+      ? effectiveConnectorSelection
+      : orderedConnectors.map((c) => c.name),
+  );
+  useEffect(() => {
+    const eff = effectiveConnectors(values.scope);
+    if (eff !== "all" && eff.length > 0) setLastConnectorSelection(eff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values.scope.connectors]);
+
+  const setAllConnectors = (all: boolean) => {
+    setValues((v) => ({
+      ...v,
+      scope: {
+        ...v.scope,
+        connectors: all ? "all" : lastConnectorSelection,
+      },
+    }));
+  };
+
+  const toggleConnector = (name: string) => {
+    setValues((v) => {
+      const current = effectiveConnectors(v.scope) === "all" ? [] : (v.scope.connectors as string[]);
+      const has = current.includes(name);
+      const connectors = has ? current.filter((n) => n !== name) : [...current, name];
+      return { ...v, scope: { ...v.scope, connectors } };
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     if (values.scope.property_types !== "all" && values.scope.property_types.length === 0) {
       setError("Selecciona al menos un tipo de inmueble, o marca «Todos los tipos».");
+      return;
+    }
+    const connectorSelection = effectiveConnectors(values.scope);
+    if (connectorSelection !== "all" && connectorSelection.length === 0) {
+      setError("Selecciona al menos un conector, o marca «Todas las fuentes».");
       return;
     }
     setSubmitting(true);
@@ -424,6 +506,101 @@ export function ProfileForm({
             </label>
           ))}
         </div>
+      </fieldset>
+
+      {/* Issue #660: per-profile connector selection. "Todas las fuentes"
+          (default, D-055-neutral) matches today's behaviour exactly; ticking
+          off the master toggle reveals one checkbox per REGISTERED
+          connector, biggest corpus first (Additional Context). A connector
+          the owner has turned OFF globally (D-055) stays visible but greyed
+          + badged, never hidden — "why is X empty" needs an answer on
+          screen — but is still selectable-into-a-profile: the effective set
+          is the intersection (selection ∩ globally-active), computed at read
+          time, so nothing here needs to special-case that precedence. */}
+      <fieldset style={fieldsetStyle}>
+        <legend style={legendStyle}>Fuentes</legend>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 13,
+            color: "var(--fg)",
+            marginTop: 6,
+            minHeight: 44,
+          }}
+        >
+          <input
+            type="checkbox"
+            data-testid="scope-all-connectors-toggle"
+            checked={isAllConnectors}
+            disabled={connectorList === null && !isAllConnectors}
+            onChange={(e) => setAllConnectors(e.target.checked)}
+          />
+          Todas las fuentes
+        </label>
+        {!isAllConnectors && connectorList === null && !connectorListError && (
+          <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--fg-muted)" }}>
+            Cargando conectores…
+          </p>
+        )}
+        {!isAllConnectors && connectorListError && (
+          <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--down)" }}>
+            No se pudo cargar la lista de conectores. Inténtalo de nuevo más tarde.
+          </p>
+        )}
+        {!isAllConnectors && orderedConnectors.length > 0 && (
+          <div
+            style={{
+              marginTop: 8,
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+            }}
+          >
+            {orderedConnectors.map((c) => {
+              const globallyActive = c.supports_discovery ? c.enabled : c.capture_enabled;
+              const checked = Array.isArray(values.scope.connectors) && values.scope.connectors.includes(c.name);
+              return (
+                <label
+                  key={c.name}
+                  data-testid={`scope-connector-${c.name}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: 8,
+                    fontSize: 13,
+                    color: "var(--fg)",
+                    minHeight: 44,
+                    padding: "2px 0",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleConnector(c.name)}
+                  />
+                  <span style={{ wordBreak: "break-word" }}>{c.name}</span>
+                  {!globallyActive && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        background: "var(--bg-2)",
+                        color: "var(--fg-muted)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      desactivado globalmente
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        )}
       </fieldset>
 
       {/* Issue #659/#663 (guardrail, not built here): visibility, not a
