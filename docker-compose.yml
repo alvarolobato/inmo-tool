@@ -127,6 +127,14 @@ services:
       # Same shared secret the dashboard validates (`adminApiKeyValid`) —
       # materialize-all is an authenticated write trigger, not a public one.
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # Issue #654 / D-150: this service's `environment:` block is an explicit
+      # allowlist, not a passthrough — a var set in .env but not listed here
+      # never reaches the container, regardless of what config/schema.yaml
+      # declares for it. Add each new env-backed schema key here explicitly
+      # if it's meant to be operator-settable via .env. (The admin config
+      # UI's config.yaml route is NOT gated by this list — see D-151 — and
+      # is the one already live for etl.* tunables today.)
+      ETL_RETAIN_CAPTURE_HTML_FOR: ${ETL_RETAIN_CAPTURE_HTML_FOR:-}
       # OTel SDK env vars — picked up automatically by opentelemetry-instrument
       OTEL_SERVICE_NAME: inmo-tool-etl
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
