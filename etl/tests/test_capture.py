@@ -11,6 +11,7 @@ any other listing.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -139,6 +140,78 @@ class TestCapturePortalListsStayInSync:
             f"dashboard/lib/worklist.ts CAPTURE_PORTALS: python="
             f"{set(capture.EXTENSION_CAPTURE_PORTALS)} ts={ts_portals}"
         )
+
+
+_SIGHTING_ID_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sighting_ids.json"
+_SIGHTING_ID_CASES = json.loads(_SIGHTING_ID_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+class TestSightingIdExtraction:
+    """Issue #639 task 1's own acceptance criterion (unmet by the first pass,
+    per the Opus review's C4 finding): a DB-free unit test on URL -> id
+    extraction across idealista/aliseda/altamira/hipoges shapes, including
+    the query-string / fragment / missing-trailing-slash variance a scraped
+    `<a href>` can carry that the connectors' own `external_id_from_url`
+    (calibrated for a real browser's `location.href`) does not tolerate on
+    its own -- `_sighting_id_from_url` normalizes for exactly this
+    (`_normalize_detail_path`) before calling it.
+
+    Issue #639 review's own follow-up (a second Opus pass, post-merge of the
+    C1-C4 fixes): this id-extraction RULE exists in TWO languages --
+    `etl.capture._sighting_id_from_url` here and
+    `dashboard/lib/capture-sightings.ts`'s `sightingIdFromUrl`, the one the
+    REAL production write (`dashboard/lib/db/worklist.ts` `addWorklistUrls`)
+    actually calls. A rule this important (it feeds #643/#645's expiry
+    signal) drifting silently between two hand-maintained case lists is
+    exactly the failure mode this project has already been bitten by twice
+    in one week -- so both languages' suites read the SAME
+    `etl/tests/fixtures/sighting_ids.json`, rather than each hard-coding its
+    own copy of the cases. A shape one language accepts and the other
+    rejects now fails a test instead of aging into a wrong expiry."""
+
+    @pytest.mark.parametrize(
+        "case",
+        _SIGHTING_ID_CASES,
+        ids=[c["case"] for c in _SIGHTING_ID_CASES],
+    )
+    def test_fixture_case(self, case):
+        assert (
+            capture._sighting_id_from_url(case["portal"], case["url"])
+            == case["expected"]
+        )
+
+    def test_fixture_is_nonempty_and_covers_every_capture_portal(self):
+        """A guard against the fixture itself silently losing coverage (e.g.
+        a bad merge truncating the file) -- every capture-supported portal
+        must have at least one case."""
+        portals = {c["portal"] for c in _SIGHTING_ID_CASES}
+        assert portals >= set(capture.EXTENSION_CAPTURE_PORTALS)
+        assert len(_SIGHTING_ID_CASES) >= len(capture.EXTENSION_CAPTURE_PORTALS)
+
+    def test_batch_extraction_dedupes_and_preserves_order(self):
+        """`_sighting_ids_from_detail_urls` (the batch/list form
+        `_record_sightings` actually calls) is a thin wrapper over
+        `_sighting_id_from_url` per URL -- this is the ONE thing the fixture
+        above can't cover (it's single-URL), so it gets its own small test:
+        de-dupe across two different URL forms resolving to the same id, a
+        dropped id doesn't break the ones around it, order is preserved."""
+        urls = [
+            "https://www.idealista.com/inmueble/11111/",
+            # A different form of the SAME id -- must not double-count.
+            "https://www.idealista.com/inmueble/11111?searchQueryId=x",
+            # A hipoges 'gone' route mixed into an idealista list resolves to
+            # nothing for the wrong portal anyway (no connector match) --
+            # included to prove a dropped entry doesn't disturb order.
+            "https://realestate.hipoges.com/es/detail/1/unavailable",
+            "https://www.idealista.com/inmueble/22222/",
+        ]
+        assert capture._sighting_ids_from_detail_urls("idealista", urls) == [
+            "11111",
+            "22222",
+        ]
+
+    def test_unknown_portal_yields_nothing(self):
+        assert capture._sighting_ids_from_detail_urls("cimenta2", ["/whatever"]) == []
 
 
 class TestProcessPendingCaptures:
@@ -927,6 +1000,278 @@ class TestListingPageCaptureReclassification:
             assert calls == []
         finally:
             self._cleanup_listing(pg_conn)
+
+
+class TestListingPageSightingsBumpLastSeen:
+    """Issue #639: a captured results page enumerates known adverts without
+    re-reading any of them. Before this, that enumeration updated nothing on
+    `listing` — only a real detail fetch ever bumped `last_seen_at`. That made
+    a captured portal's staleness numbers partly an artifact of the ledger,
+    not of the listings actually being gone (measured against production:
+    idealista showed 1,098 listings 'unseen >7d' while the owner was
+    routinely capturing its search pages).
+
+    Reuses TestListingPageCaptureReclassification's own fixture (detail links
+    to #11111 and #22222) so this suite exercises the exact same harvest path
+    issue #292 already covers — it only adds assertions about `listing`.
+    """
+
+    _LISTING_URL = TestListingPageCaptureReclassification._LISTING_URL
+    _LISTING_HTML = TestListingPageCaptureReclassification._LISTING_HTML
+    _STALE_INTERVAL = "10 days"
+
+    def _seed_listing(
+        self, conn, external_id: str, *, stale: bool = True
+    ) -> tuple[int, int]:
+        """Insert a minimal idealista property/listing row, `last_seen_at`
+        and `last_fetched_at` both `_STALE_INTERVAL` in the past (or NOW() if
+        `stale=False`), `status='active'` (the column default). Returns
+        (property_id, listing_id)."""
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO property DEFAULT VALUES RETURNING id")
+            (property_id,) = cur.fetchone()
+            age = f"NOW() - INTERVAL '{self._STALE_INTERVAL}'" if stale else "NOW()"
+            cur.execute(
+                f"""
+                INSERT INTO listing
+                    (property_id, source, external_id, last_seen_at, last_fetched_at)
+                VALUES (%s, 'idealista', %s, {age}, {age})
+                RETURNING id
+                """,
+                (property_id, external_id),
+            )
+            (listing_id,) = cur.fetchone()
+        conn.commit()
+        return property_id, listing_id
+
+    def _fetch_listing(self, conn, external_id: str):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, last_seen_at, last_fetched_at FROM listing "
+                "WHERE source = 'idealista' AND external_id = %s",
+                (external_id,),
+            )
+            return cur.fetchone()
+
+    def _cleanup(self, conn) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM extension_capture WHERE url = %s", (self._LISTING_URL,)
+            )
+            cur.execute(
+                "DELETE FROM capture_worklist WHERE source_portal = 'idealista' "
+                "AND added_via = 'derived'"
+            )
+            cur.execute(
+                "SELECT property_id FROM listing WHERE source = 'idealista' "
+                "AND external_id = ANY(%s)",
+                (["11111", "22222", "99999"],),
+            )
+            property_ids = [row[0] for row in cur.fetchall()]
+            cur.execute(
+                "DELETE FROM listing WHERE source = 'idealista' "
+                "AND external_id = ANY(%s)",
+                (["11111", "22222", "99999"],),
+            )
+            if property_ids:
+                cur.execute("DELETE FROM property WHERE id = ANY(%s)", (property_ids,))
+        conn.commit()
+
+    def test_listing_page_sighting_bumps_last_seen_at(self, pg_conn):
+        """EC-1: capturing a results page that enumerates a known listing
+        (external_id 11111, on the fixture page) leaves that listing's
+        `last_seen_at` at ~now — the honest, revertible half of the check:
+        reverting `_record_sightings`'s call site makes this fail red, since
+        the row would stay `_STALE_INTERVAL` old."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            self._seed_listing(pg_conn, "11111")
+            _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+
+            _, last_seen_at, _ = self._fetch_listing(pg_conn, "11111")
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT NOW()")
+                (now,) = cur.fetchone()
+            assert (now - last_seen_at).total_seconds() < 30
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_unenumerated_listing_last_seen_at_untouched(self, pg_conn):
+        """The other half: a listing NOT on the captured page (external_id
+        99999, never harvested from `_LISTING_HTML`) must keep its stale
+        `last_seen_at` — proving the update is scoped to what was actually
+        enumerated, not every active idealista row. A bug that bumped every
+        row for the source (rather than only the harvested ids) would pass
+        the first test and fail this one."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            self._seed_listing(pg_conn, "99999")
+            _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            capture.process_pending_captures(pg_conn)
+
+            _, last_seen_at, _ = self._fetch_listing(pg_conn, "99999")
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT NOW()")
+                (now,) = cur.fetchone()
+            # Still ~_STALE_INTERVAL old — nowhere near "just bumped".
+            assert (now - last_seen_at).total_seconds() > 9 * 24 * 3600
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_sighting_is_not_a_verification(self, pg_conn):
+        """EC-2: a sighting bumps `last_seen_at` only. `status` and
+        `last_fetched_at` — the field a real detail fetch owns, and the exact
+        signal skip-if-seen gates on — must stay exactly as seeded."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            self._seed_listing(pg_conn, "11111")
+            status_before, _, last_fetched_before = self._fetch_listing(
+                pg_conn, "11111"
+            )
+            _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            capture.process_pending_captures(pg_conn)
+
+            status_after, _, last_fetched_after = self._fetch_listing(pg_conn, "11111")
+            assert status_after == status_before == "active"
+            assert last_fetched_after == last_fetched_before
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_capture_with_no_known_listings_is_a_clean_no_op(self, pg_conn):
+        """Sighting matching is best-effort bookkeeping layered on an
+        already-clean 'listing page' outcome (D-069): when nothing on the
+        page matches an ingested listing (nothing seeded here at all), the
+        capture must still process cleanly, not error or fail."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, error_msg FROM extension_capture WHERE url = %s",
+                    (self._LISTING_URL,),
+                )
+                status, error_msg = cur.fetchone()
+            assert status == "listing"
+            assert error_msg is None
+        finally:
+            self._cleanup(pg_conn)
+
+    def _insert_pending_backdated(self, conn, url: str, html: str, age_sql: str) -> int:
+        """Like `_insert_pending`, but with `created_at` set to `age_sql`
+        (e.g. "NOW() - INTERVAL '3 days'") instead of the column's own
+        NOW() default -- simulates a capture that sat `pending` for a while
+        before being processed (issue #639 review, C2)."""
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO extension_capture (url, html, created_at) "
+                f"VALUES (%s, %s, {age_sql}) RETURNING id",
+                (url, html),
+            )
+            capture_id = cur.fetchone()[0]
+        conn.commit()
+        return capture_id
+
+    def test_delayed_processing_stamps_the_observation_instant_not_now(self, pg_conn):
+        """Issue #639 review, C2: a capture that sat `pending` for 3 days
+        (a paused connector, an outage) before being processed must record
+        the sighting at ITS OWN `created_at` -- the moment the page was
+        actually captured -- not at NOW() (processing time), which would
+        claim a sighting that never happened at that moment."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            self._seed_listing(pg_conn, "11111")
+            self._insert_pending_backdated(
+                pg_conn,
+                self._LISTING_URL,
+                self._LISTING_HTML,
+                "NOW() - INTERVAL '3 days'",
+            )
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+
+            _, last_seen_at, _ = self._fetch_listing(pg_conn, "11111")
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT NOW()")
+                (now,) = cur.fetchone()
+            age_seconds = (now - last_seen_at).total_seconds()
+            # ~3 days old, not ~0 -- ruling out a NOW()-at-processing-time bug.
+            assert 3 * 24 * 3600 - 60 < age_seconds < 3 * 24 * 3600 + 60
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_a_delayed_sighting_cannot_move_last_seen_at_backwards(self, pg_conn):
+        """Issue #639 review, C2: GREATEST-based write. A listing already
+        seen 1 hour ago (by some other, more recent path) must NOT be
+        dragged back to a stale 3-day-old sighting a delayed capture
+        happens to carry -- the write can only move `last_seen_at`
+        forward."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute("INSERT INTO property DEFAULT VALUES RETURNING id")
+                (property_id,) = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO listing "
+                    "(property_id, source, external_id, last_seen_at, last_fetched_at) "
+                    "VALUES (%s, 'idealista', '11111', "
+                    "NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')",
+                    (property_id,),
+                )
+            pg_conn.commit()
+
+            self._insert_pending_backdated(
+                pg_conn,
+                self._LISTING_URL,
+                self._LISTING_HTML,
+                "NOW() - INTERVAL '3 days'",
+            )
+            capture.process_pending_captures(pg_conn)
+
+            _, last_seen_at, _ = self._fetch_listing(pg_conn, "11111")
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT NOW()")
+                (now,) = cur.fetchone()
+            # Still ~1 hour old -- the 3-day-old delayed sighting never
+            # dragged it backwards.
+            assert (now - last_seen_at).total_seconds() < 2 * 3600
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_record_sightings_returns_rows_actually_matched_not_urls_targeted(
+        self, pg_conn
+    ):
+        """Issue #639 review, M1: `_record_sightings` must report the
+        UPDATE's real `rowcount`, not `len(external_ids)`. Two ids are
+        targeted (11111 and 22222) but only 11111 is a known listing -- the
+        honest return value is 1, not 2. Before the fix this returned 2
+        regardless of how many rows actually matched, which is exactly the
+        false "N sighted" the review's example (30 links, 0 matches -> '30
+        sighted') described."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            self._seed_listing(pg_conn, "11111")
+            sighted = capture._record_sightings(
+                pg_conn,
+                "idealista",
+                [
+                    "https://www.idealista.com/inmueble/11111/",
+                    "https://www.idealista.com/inmueble/22222/",
+                ],
+            )
+            assert sighted == 1
+        finally:
+            self._cleanup(pg_conn)
 
 
 class TestNulByteRejectedByPostgres:

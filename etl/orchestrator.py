@@ -1176,9 +1176,13 @@ def _warn_unrecognized_connector_config_names(conn) -> None:
 
 
 def _update_last_seen_for_discovered(
-    conn, source: str, external_ids: list[str]
-) -> None:
-    """Mark every listing this scope's discover() just found as seen now.
+    conn,
+    source: str,
+    external_ids: list[str],
+    seen_at: datetime | None = None,
+) -> int:
+    """Mark every listing this scope's discover() just found (or a capture
+    enumeration confirmed, issue #639) as seen at `seen_at` (default: now).
 
     Issue #143: skip-if-seen means fetch_detail() no longer runs for every
     discovered id on every run, so `listing.last_seen_at` can no longer
@@ -1200,16 +1204,67 @@ def _update_last_seen_for_discovered(
     connectors like Fotocasa — presence tracking for display/staleness
     purposes is a different concern from withdrawal reconciliation, which
     stays gated on `discovers_full_inventory` exactly as before.
+
+    `seen_at` (issue #639 review, C2): the discover() call site never
+    passes this, so the write uses Postgres's OWN `NOW()` — same clock
+    source as this function always used, deliberately UNCHANGED, because
+    `_record_discovery_price_observations`'s `run_started_at` guard (D-098)
+    compares a Python-clock timestamp against `last_fetched_at` (also
+    Postgres's `NOW()`); an earlier draft switched this function's default
+    to a Python-computed timestamp and that measurably reintroduced
+    cross-clock skew into that unrelated comparison, breaking
+    `TestDiscoveryPriceHistory::
+    test_discovery_does_not_clobber_a_same_run_authoritative_fetch` (caught
+    by that test, not a hypothetical). The capture path's caller
+    (etl.capture._record_sightings) passes an EXPLICIT `seen_at`
+    (extension_capture.created_at) instead, because a captured page can sit
+    `pending` for hours — a paused connector, an outage — before
+    etl/capture.py processes it; stamping NOW() at processing time would
+    then record a sighting that never happened at that moment, in the exact
+    column #643/#645 will trust for expiry. Only that explicit-seen_at path
+    uses a Python-computed value; the always-been-Postgres-clock default
+    path is untouched.
+
+    The write is `GREATEST(last_seen_at, seen_at)`, not a blind overwrite,
+    so a delayed or replayed observation can only move `last_seen_at`
+    forward, never backward past a more recent sighting some other path
+    already recorded. Postgres's GREATEST ignores a NULL `last_seen_at`
+    (unlike SQL MAX, which would propagate it) so a listing's first-ever
+    sighting still sets the column correctly.
+
+    Returns the number of rows actually updated (the cursor's own
+    `rowcount`) — the honest count for a caller's log line, distinct from
+    `len(external_ids)`, which only says how many ids were *targeted*, not
+    how many matched an ingested listing (issue #639 review, M1).
     """
     if not external_ids:
-        return
+        return 0
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE listing SET last_seen_at = NOW() "
-            "WHERE source = %s AND external_id = ANY(%s)",
-            (source, external_ids),
-        )
+        if seen_at is None:
+            # DO NOT "simplify" this to `seen_at or datetime.now(timezone.utc)`
+            # passed as a param on every call — that switch broke
+            # TestDiscoveryPriceHistory::
+            # test_discovery_does_not_clobber_a_same_run_authoritative_fetch
+            # by putting a Python-clock value where `run_started_at` (also
+            # Python-clock, captured a few lines above THIS function's own
+            # call site in run_connector) is compared against a
+            # Postgres-`NOW()`-stamped `last_fetched_at` a few lines below in
+            # the SAME run. Postgres's own NOW() here is deliberate — see
+            # the seen_at paragraph above and D-143.
+            cur.execute(
+                "UPDATE listing SET last_seen_at = GREATEST(last_seen_at, NOW()) "
+                "WHERE source = %s AND external_id = ANY(%s)",
+                (source, external_ids),
+            )
+        else:
+            cur.execute(
+                "UPDATE listing SET last_seen_at = GREATEST(last_seen_at, %s) "
+                "WHERE source = %s AND external_id = ANY(%s)",
+                (seen_at, source, external_ids),
+            )
+        updated = cur.rowcount
     conn.commit()
+    return updated
 
 
 def _record_discovery_price_observations(
@@ -1694,6 +1749,16 @@ def run_connector(
     # current_price adopter can tell which listings this run's fetch loop
     # already re-fetched (last_fetched_at >= run_started_at) and must not be
     # clobbered by the less-authoritative search-payload price.
+    #
+    # Issue #639 review, C2 postscript: this is a Python-clock timestamp,
+    # compared later this run against `last_fetched_at`, which
+    # `_update_existing_listing` stamps with Postgres's own NOW(). Don't
+    # "fix" that cross-clock comparison by passing THIS value into
+    # `_update_last_seen_for_discovered` below (or by making that function
+    # default to a Python clock) — that exact change broke
+    # TestDiscoveryPriceHistory::
+    # test_discovery_does_not_clobber_a_same_run_authoritative_fetch. See
+    # that function's own docstring and D-143.
     run_started_at = datetime.now(timezone.utc)
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
@@ -1703,7 +1768,9 @@ def run_connector(
     # safe (see _update_last_seen_for_discovered's docstring), and skip-
     # if-seen means a listing can go a whole run without ever reaching
     # _upsert_canonical_listing, which is the only other place
-    # last_seen_at gets written.
+    # last_seen_at gets written. No seen_at passed — this call keeps
+    # Postgres's own NOW() (see that function's docstring / the comment
+    # above on run_started_at for why).
     _update_last_seen_for_discovered(conn, connector.name, external_ids)
 
     # Issue #143: whatever discovery-time price signal this connector can

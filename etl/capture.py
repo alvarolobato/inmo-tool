@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import fields
+from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
 from etl.connectors.aliseda import AlisedaConnector
@@ -72,6 +73,16 @@ _CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
 EXTENSION_CAPTURE_PORTALS: frozenset[str] = frozenset(
     {"idealista", "aliseda", "altamira", "hipoges"}
 )
+
+# portal name (== each connector's own `.name`, e.g. "idealista") -> connector
+# class, derived from _CAPTURE_CONNECTORS so there's one list of "which
+# portals can be capture-processed", not a second hand-maintained one. Used by
+# `_sighting_id_from_url` (issue #639) to turn a harvested detail URL back
+# into an external_id via each connector's own `external_id_from_url` — the
+# same id extraction `_connector_for_url` uses for a single detail capture.
+_CONNECTOR_CLASS_BY_PORTAL: dict[str, type] = {
+    cls.name: cls for _, cls in _CAPTURE_CONNECTORS.values()
+}
 
 _BATCH_LIMIT = 10
 
@@ -244,7 +255,7 @@ def process_pending_captures(conn) -> int:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, url, html FROM extension_capture "
+            "SELECT id, url, html, created_at FROM extension_capture "
             "WHERE status = 'pending' ORDER BY created_at LIMIT %s",
             (_BATCH_LIMIT,),
         )
@@ -256,7 +267,7 @@ def process_pending_captures(conn) -> int:
     processed = 0
     skipped_disabled = 0
     ingested = 0
-    for capture_id, url, html in pending:
+    for capture_id, url, html, created_at in pending:
         try:
             resolved = _connector_for_url(url)
             if resolved is not None:
@@ -272,7 +283,7 @@ def process_pending_captures(conn) -> int:
             # marks it failed with the "no capture-capable connector"
             # message — unchanged behaviour, and not something a disabled
             # connector should silently swallow.
-            if _process_one(conn, capture_id, url, html):
+            if _process_one(conn, capture_id, url, html, created_at):
                 ingested += 1
         except Exception:
             logger.exception(
@@ -375,6 +386,173 @@ def _extract_detail_urls_from_html(
     return out
 
 
+# Path suffixes that mean "the portal ITSELF says this advert is gone" —
+# harvesting a link shaped like this off a results page must NEVER count as
+# a sighting (issue #639 review, C3). idealista/aliseda/altamira never emit
+# a link to a withdrawn listing from a live results page at all (it simply
+# isn't linked there any more); hipoges is the one portal whose detail route
+# accepts a same-id suffix for exactly this state -- see listing_detect.py's
+# own note on hipoges' route table (`.../detail/<id>/unavailable`,
+# `.../detail/<id>/contact-received`). Extend per-portal if another
+# capture-only portal turns out to share the shape.
+_GONE_URL_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "hipoges": ("/unavailable", "/contact-received"),
+}
+
+
+def _normalize_detail_path(href: str) -> str:
+    """The bare PATH of a harvested detail href -- query string and fragment
+    stripped, trailing slash guaranteed (issue #639 review, C4).
+
+    `detail_portal_for_url` (listing_detect.py) already classified this href
+    as a detail page by matching its PATH ALONE (`urlparse(url).path`
+    already excludes query/fragment) against a shape that, for idealista,
+    tolerates a MISSING trailing slash (`^/inmueble/\\d+/?$`). Each
+    connector's own `external_id_from_url` is stricter than that -- idealista's
+    requires the literal trailing slash -- because that method's OTHER call
+    site (`_connector_for_url`, a single real captured URL) can trust a
+    browser's canonical `location.href` to carry it. A harvested `<a href>`
+    cannot be trusted the same way: the same listing can be linked on one
+    page as `/inmueble/123`, `/inmueble/123/`, `/inmueble/123?utm=x` or
+    `/inmueble/123#foto`, and only the FIRST form seen for a given
+    `worklist_match_key` survives `_extract_detail_urls_from_html`'s de-dupe
+    -- so a badly-shaped first occurrence could never be rescued by a
+    well-formed duplicate later on the same page.
+
+    Deliberately does NOT touch or relax any connector's own
+    `external_id_from_url` regex -- that method is used UNRELAXED by
+    `_connector_for_url` on a real, full URL that may legitimately carry a
+    query string after the id; loosening those regexes risks a spurious id
+    match on a URL that never went through `detail_portal_for_url`'s own
+    classification at all. Normalizing the ALREADY-classified href here,
+    once, is the narrow fix."""
+    path = urlparse(href).path
+    if path and not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def _sighting_id_from_url(portal: str, url: str) -> str | None:
+    """External id for ONE harvested detail URL under `portal`, or None when
+    the portal is unknown, no id can be extracted, or the URL's normalized
+    path matches the portal's own "this advert is gone" route
+    (`_GONE_URL_SUFFIXES`, issue #639 review C3).
+
+    Applies each connector's own `external_id_from_url` to the URL's
+    NORMALIZED path (`_normalize_detail_path`) -- the same id-extraction
+    `_connector_for_url` uses for a single detail capture, made tolerant of
+    the query-string / fragment / missing-trailing-slash variance a scraped
+    `<a href>` can carry that a browser's own `location.href` never does
+    (issue #639 review, C4).
+
+    This is the ONE function this codebase's Python side calls "the sighting
+    id-extraction rule" -- it MUST stay in lockstep with
+    `dashboard/lib/capture-sightings.ts`'s `sightingIdFromUrl`, the
+    TypeScript mirror the real production write
+    (`dashboard/lib/db/worklist.ts` `addWorklistUrls`) actually calls (issue
+    #639 review, C1). Both are asserted against the SAME shared fixture,
+    `etl/tests/fixtures/sighting_ids.json` (`TestSightingIdExtraction` /
+    `capture-sightings.test.ts`), so a divergence between the two languages
+    fails a test instead of aging into a wrong expiry months later once
+    #643/#645 key off this signal -- see D-143 for why a two-language mirror
+    was unavoidable here rather than one shared implementation."""
+    connector_cls = _CONNECTOR_CLASS_BY_PORTAL.get(portal)
+    if connector_cls is None:
+        return None
+    path = _normalize_detail_path(url)
+    gone_suffixes = _GONE_URL_SUFFIXES.get(portal, ())
+    if gone_suffixes and path.rstrip("/").endswith(gone_suffixes):
+        return None
+    return connector_cls.external_id_from_url(path)
+
+
+def _sighting_ids_from_detail_urls(portal: str, urls: list[str]) -> list[str]:
+    """External ids for `portal`'s own `_update_last_seen_for_discovered`
+    call (issue #639), extracted from a results page's harvested detail
+    URLs via `_sighting_id_from_url` (one per URL) -- de-duped,
+    order-preserving. Unknown portal contributes nothing. Any URL
+    `_sighting_id_from_url` returns None for (unextractable shape, or a
+    portal 'gone' route) is silently dropped from the RETURN value;
+    `_record_sightings` logs the drop count so a systematic extraction gap
+    is visible rather than a quietly wrong "N sighted"."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        external_id = _sighting_id_from_url(portal, url)
+        if external_id is None or external_id in seen:
+            continue
+        seen.add(external_id)
+        ids.append(external_id)
+    return ids
+
+
+def _record_sightings(
+    conn, portal: str, urls: list[str], seen_at: datetime | None = None
+) -> int:
+    """Bump `listing.last_seen_at` for every already-known listing this
+    captured results page just enumerated (issue #639).
+
+    A results page enumerating a listing is weaker evidence than a detail
+    fetch: it proves the advert is STILL LISTED, not that its fields were
+    re-read. So this only ever touches `last_seen_at` — never `status`
+    (only a real fetch_detail()/normalize() may change that) and never
+    `last_fetched_at` (the signal skip-if-seen gates on, per
+    etl.orchestrator._update_existing_listing's own docstring — a sighting
+    must not make a stale listing look freshly re-fetched and get skipped).
+
+    `seen_at` (issue #639 review, C2) should be the capture's OWN
+    observation instant (`extension_capture.created_at`), not the moment
+    this function happens to run — a captured page can sit `pending` for
+    hours (paused connector, outage) before being processed, and stamping
+    NOW() at processing time would record a sighting that never happened
+    at that moment, in the exact column #643/#645 will trust. `None`
+    (the default) falls through to `_update_last_seen_for_discovered`'s own
+    NOW() — used by tests that don't care about the distinction.
+
+    Delegates the actual UPDATE to etl.orchestrator._update_last_seen_for_discovered
+    — the exact mechanism the crawl path already uses to bump presence for
+    listings a discover() sweep re-confirmed without fetching their detail
+    page, GREATEST-based so it can only move `last_seen_at` forward — rather
+    than reimplementing the same SQL a second time. Lazy import for the same
+    import-cycle reason `_process_one` already uses for
+    `_upsert_canonical_listing`.
+
+    A page with zero matches against known listings (nothing recognised, or
+    every harvested id belongs to a listing not yet ingested) is a no-op,
+    not an error — this is presence bookkeeping layered on an already-clean
+    'listing page' outcome, so a failure here must never turn that outcome
+    into a failed capture. Returns the number of rows ACTUALLY updated
+    (issue #639 review, M1 — not `len(external_ids)`, which only says how
+    many ids were targeted, not how many matched an ingested listing)."""
+    external_ids = _sighting_ids_from_detail_urls(portal, urls)
+    dropped = len(urls) - len(external_ids)
+    if dropped:
+        logger.info(
+            "capture sighting: %d of %d harvested %s detail link(s) did not "
+            "resolve to a sightable id this pass (unextractable URL shape, "
+            "a duplicate id, or a portal 'gone' route) — not counted as "
+            "sightings",
+            dropped,
+            len(urls),
+            portal,
+        )
+    if not external_ids:
+        return 0
+    try:
+        from etl.orchestrator import _update_last_seen_for_discovered
+
+        return _update_last_seen_for_discovered(conn, portal, external_ids, seen_at)
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "last_seen_at sighting update failed for portal=%s (%d id(s)) — "
+            "the listing-page capture itself is unaffected",
+            portal,
+            len(external_ids),
+        )
+        return 0
+
+
 def _seed_derived_worklist(conn, portal: str, urls: list[str]) -> int:
     """Upsert harvested detail URLs into `capture_worklist` as `added_via =
     'derived'` (issue #262/#292) — the same batch-capture / mine-results path
@@ -419,13 +597,20 @@ def _seed_derived_worklist(conn, portal: str, urls: list[str]) -> int:
 
 
 def _mark_listing(
-    conn, capture_id: int, url: str, portal: str, detail_links: int
+    conn, capture_id: int, url: str, portal: str, detail_links: int, sighted: int = 0
 ) -> None:
     """Record a captured SEARCH/results page as a clean 'listing' outcome
     (issue #292) — NOT a failure. `status = 'listing'` is neutral end-to-end:
     the data-health portal view counts it separately (never in failed_7d), and
     the popup renders it as an informational result. The HTML is dropped like a
-    'done' row (we've already harvested the detail links from it)."""
+    'done' row (we've already harvested the detail links from it).
+
+    `sighted` (issue #639) is purely a log annotation — how many of the
+    harvested detail links matched an already-known listing and got their
+    `last_seen_at` bumped by `_record_sightings`. It is NOT persisted on this
+    row (no schema change): `extension_capture` already records the harvest
+    count via `fields_extracted`/`title`, and a sighting is downstream
+    bookkeeping on the `listing` table, not a property of this capture row."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -445,19 +630,29 @@ def _mark_listing(
     conn.commit()
     logger.info(
         "extension_capture id=%s: %s listing/search page — %d detail link(s) "
-        "harvested into the batch worklist (not a failure)",
+        "harvested into the batch worklist, %d already-known listing(s) "
+        "sighted (not a failure)",
         capture_id,
         portal,
         detail_links,
+        sighted,
     )
 
 
-def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
+def _process_one(
+    conn, capture_id: int, url: str, html: str, created_at: datetime | None = None
+) -> bool:
     """Process one capture. Returns True if a listing was actually ingested
     (upserted into `property`/`listing`), False otherwise (a listing/search
     page routed to the batch worklist, or a genuinely failed detail capture).
     The caller uses the True count to decide whether the batch should fire a
-    dashboard re-materialize (issue #269)."""
+    dashboard re-materialize (issue #269).
+
+    `created_at` (issue #639 review, C2) is this row's own `extension_capture.
+    created_at` — the moment the capture actually arrived, which can predate
+    processing by hours (a paused connector, an outage keep rows `pending`).
+    Passed through to `_record_sightings` as the sighting's true observation
+    instant rather than letting it default to "now"."""
     resolved = _connector_for_url(url)
     if resolved is None:
         # Issue #292: a captured SEARCH/results page is not a broken detail
@@ -469,7 +664,23 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
         if portal is not None:
             detail_urls = _extract_detail_urls_from_html(html, url, portal)
             _seed_derived_worklist(conn, portal, detail_urls)
-            _mark_listing(conn, capture_id, url, portal, len(detail_urls))
+            # Issue #639: the crawl path already bumps last_seen_at for every
+            # id its discover() sweep re-confirms, even without fetching its
+            # detail page (etl.orchestrator._update_last_seen_for_discovered).
+            # A captured results page is the same kind of evidence — it too
+            # proves an already-known listing is still there — so it must
+            # feed the same presence ledger, not just the batch worklist.
+            #
+            # NOTE (issue #639 review, C1): this is the manually-captured /
+            # single-page-capture path only. The production D-088 walk that
+            # actually enumerates idealista's results pages never reaches
+            # here — it POSTs harvested URLs straight to
+            # POST /api/etl/worklist (dashboard/lib/db/worklist.ts
+            # addWorklistUrls), which records the SAME sighting server-side
+            # in TypeScript against the shared Postgres `listing` table. Kept
+            # here too because it's correct and covers this path for real.
+            sighted = _record_sightings(conn, portal, detail_urls, created_at)
+            _mark_listing(conn, capture_id, url, portal, len(detail_urls), sighted)
             return False
         _mark_failed(
             conn,
