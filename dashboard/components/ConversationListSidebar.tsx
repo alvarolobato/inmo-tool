@@ -78,13 +78,18 @@ export function ConversationListSidebar({ selectedId }: ConversationListSidebarP
   return (
     <div
       data-testid="conversation-list-sidebar"
+      // #573: below `md` the split view collapses to a single pane (the
+      // detail page's own "← Conversaciones" link is the phone-width
+      // navigation instead) — `hidden md:flex` owns display so there is no
+      // inline `display` fighting it (D-120). At >=768px this renders
+      // exactly as before (`md:flex` + `flexDirection: column` below).
+      className="hidden md:flex"
       style={{
         width: 280,
         flexShrink: 0,
         borderRight: "1px solid var(--border)",
         overflowY: "auto",
         background: "var(--bg-1)",
-        display: "flex",
         flexDirection: "column",
       }}
     >

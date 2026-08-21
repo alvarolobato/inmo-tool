@@ -62,12 +62,25 @@ export function ProfileSwitcher({
       value={currentId}
       onChange={(e) => router.push(`/profiles/${e.target.value}${subpath}`)}
       style={{
+        // #574: a native <select> sizes to its longest <option> (an
+        // owner-controlled profile name) with no intrinsic cap — on a
+        // phone that alone pushed `main.main-content`'s own scrollWidth
+        // (its `overflow: auto` from the #571 mobile shell) past its
+        // clientWidth, which reads as sideways scroll on the content pane
+        // even though `document.documentElement` never overflowed.
+        // `min(220px, 60vw)` caps it at both ends: a normal name never
+        // shrinks below 220px on a wide screen, and a phone never lets it
+        // exceed 60% of the viewport regardless of name length.
         padding: "6px 10px",
         background: "var(--bg-1)",
         color: "var(--fg)",
         border: "1px solid var(--border)",
         borderRadius: 6,
         fontSize: 13,
+        maxWidth: "min(220px, 60vw)",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
       }}
       aria-label="Cambiar de perfil de búsqueda"
     >

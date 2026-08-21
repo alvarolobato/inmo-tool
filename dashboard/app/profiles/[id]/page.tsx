@@ -71,7 +71,14 @@ export default function ProfileCandidateFeedPage() {
             {loading ? "Cargando…" : profile?.name ?? "Perfil"}
           </h1>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {/* #574: this row used to be non-wrapping (default flex nowrap) — a
+            long profile name in ProfileSwitcher's <select> pushed it past
+            the viewport, which `main.main-content`'s own `overflow: auto`
+            (from the #571 mobile shell) turned into real sideways scroll
+            on the content pane. flexWrap lets "Ver mapa →" drop to its own
+            line below the switcher on a narrow phone instead; combined
+            with the switcher's own width cap, this row never needs to. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <Link href={`/profiles/${id}/map`} style={{ fontSize: 13, color: "var(--fg-muted)" }}>
             Ver mapa →
           </Link>
