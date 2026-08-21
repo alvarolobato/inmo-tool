@@ -92,9 +92,29 @@ _STATICMAP_CENTER_RE = re.compile(
 # (plus separate PLAN/MAP groups we skip). The `src` values are partial paths
 # like "WEB_DETAIL/0/id.pro.es.image.master/xx/xx/xx/NNNN.jpg" — this exact
 # schema is transcribed from a real captured Idealista page's per-listing
-# `listingMultimediaCarrousels` blob (demo DB extension_capture id 10). We
+# `listingMultimediaCarrousels` blob (production extension_capture id 10). We
 # balance-match that JS object literal, json.loads it, and collect every
 # PICTURE src, prefixing the img host onto partial paths.
+#
+# Issue #625: production shows 100% of idealista listings landing at <=3
+# photos (avg 2.8) against fotocasa's 27 on the same corpus. Re-examining the
+# id-10 capture that this schema was transcribed from (a SEARCH page) shows
+# WHY: each listing's `multimedias[type=PICTURE].content` there is a fixed
+# 3-item PREVIEW — every one of its 30 listings has exactly 3 — while a
+# SIBLING field, `multimediasTotalSlides[type=PICTURE].totalSlides`, carries
+# the real count (13 in the sample checked). `_gallery_from_carousel` only
+# ever read `multimedias`, never `multimediasTotalSlides`, so a 3-photo
+# preview was silently reported as if it were the whole gallery. A live
+# fetch to confirm this exact truncation on the DETAIL page's own (singular)
+# object was attempted and blocked with an immediate DataDome 403 (see
+# docs/decisions/D-145-idealista-photo-gallery-truncation.md) — the site
+# structure is otherwise identical (same component, same field names), so
+# `_gallery_from_carousel` now also reads `multimediasTotalSlides` and
+# reports when the captured HTML is a known-truncated preview rather than
+# silently treating it as complete. This does NOT retrieve more photos by
+# itself — getting the rest needs a browser-side capture change (triggering
+# the full-gallery view before snapshotting), filed separately since no real
+# detail-page HTML was available to verify a selector against.
 _MULTIMEDIA_HOST = "https://img4.idealista.com/blur/"
 
 
@@ -252,12 +272,19 @@ class IdealistaConnector(Connector):
         # Full gallery from the embedded carousel JSON (issue #282); the
         # og:image is only the single hydration thumbnail and is used solely
         # as a fallback when the carousel object is absent/unparseable.
-        gallery = _gallery_from_carousel(html)
+        # `gallery_total` is the PICTURE `totalSlides` count reported
+        # alongside it — when it's larger than what `multimedias` actually
+        # embeds, the captured page only carries a preview, not the whole
+        # gallery (issue #625; see _gallery_from_carousel's docstring).
+        gallery, gallery_total = _gallery_from_carousel(html)
         if gallery:
             photo_urls: tuple[str, ...] = gallery
         else:
             main_image = _og_meta(soup, "og:image")
             photo_urls = (main_image,) if main_image else ()
+        gallery_truncated = gallery_total is not None and gallery_total > len(
+            photo_urls
+        )
 
         coordinates = _coordinates_from_staticmap(html)
         lat, lon = coordinates if coordinates is not None else (None, None)
@@ -334,6 +361,20 @@ class IdealistaConnector(Connector):
                 # the extension popup's result card without inventing a
                 # new canonical field just for that one UI need.
                 "title": title,
+                # Issue #625: the captured page's own carousel object says
+                # more photos exist than `photo_urls` carries — an honest
+                # "this gallery is a partial preview" signal rather than
+                # silently treating a 3-photo preview as the whole thing.
+                # Absent (no key at all) when the gallery is known-complete
+                # or completeness is simply unknown (no totalSlides field).
+                **(
+                    {
+                        "photo_gallery_truncated": True,
+                        "photo_gallery_total_available": gallery_total,
+                    }
+                    if gallery_truncated
+                    else {}
+                ),
             },
         )
 
@@ -408,26 +449,33 @@ def _extract_js_object(text: str, key: str) -> str | None:
     return None
 
 
-def _gallery_from_carousel(html: str) -> tuple[str, ...]:
+def _gallery_from_carousel(html: str) -> tuple[tuple[str, ...], int | None]:
     """Every PICTURE `src` from `config.multimediaCarrousel.multimedias`, in
     page order, deduplicated, prefixed with the img host for partial paths
-    (see _MULTIMEDIA_HOST). PLAN/MAP groups are skipped — only real photos
-    become photo_urls. Empty tuple if the object is absent or unparseable
+    (see _MULTIMEDIA_HOST), plus the PICTURE `totalSlides` count from the
+    sibling `multimediasTotalSlides` array when present (None if that field
+    is absent/unparseable — an older markup version, or a page that never
+    had it). PLAN/MAP groups are skipped — only real photos become
+    photo_urls. Returns `((), None)` if the object is absent or unparseable
     (the caller then falls back to the og:image thumbnail).
 
     `multimediaCarrousel` (singular) is the detail page's own object; the
     plural `listingMultimediaCarrousels` (a search page's per-listing map,
     capital-M and trailing 's') is deliberately NOT matched by the key
-    regex, which anchors on the lowercase singular form ending in a colon."""
+    regex, which anchors on the lowercase singular form ending in a colon.
+
+    The `totalSlides` count exists precisely to let a caller detect when
+    `multimedias` is a truncated preview rather than the full gallery — see
+    issue #625 / the module-level comment above _MULTIMEDIA_HOST."""
     raw = _extract_js_object(html, "multimediaCarrousel")
     if not raw:
-        return ()
+        return (), None
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
-        return ()
+        return (), None
     if not isinstance(data, dict):
-        return ()
+        return (), None
     urls: list[str] = []
     seen: set[str] = set()
     for group in data.get("multimedias") or []:
@@ -443,7 +491,14 @@ def _gallery_from_carousel(html: str) -> tuple[str, ...]:
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
-    return tuple(urls)
+    total_available: int | None = None
+    for slot in data.get("multimediasTotalSlides") or []:
+        if isinstance(slot, dict) and slot.get("type") == "PICTURE":
+            candidate = slot.get("totalSlides")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                total_available = candidate
+            break
+    return tuple(urls), total_available
 
 
 def _coordinates_from_staticmap(html: str) -> tuple[Decimal, Decimal] | None:

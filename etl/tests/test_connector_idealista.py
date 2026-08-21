@@ -252,6 +252,70 @@ class TestNormalize:
         assert all("id.plan.es.image" not in u for u in canonical.photo_urls)
         # No duplicates.
         assert len(set(canonical.photo_urls)) == len(canonical.photo_urls)
+        # This fixture's multimediasTotalSlides PICTURE totalSlides is 10 —
+        # matching the 10 embedded photos exactly — so nothing is truncated
+        # and issue #625's detection signal must stay absent.
+        assert "photo_gallery_truncated" not in canonical.raw_extra
+        assert "photo_gallery_total_available" not in canonical.raw_extra
+
+    def test_gallery_truncation_flagged_when_total_slides_exceeds_embedded(self):
+        """Issue #625: production shows 100% of idealista listings landing
+        at <=3 photos (avg 2.8) against fotocasa's 27 on the same corpus.
+        Root cause, confirmed against a real captured Idealista page
+        (production extension_capture id 10 — see
+        docs/decisions/D-145-idealista-photo-gallery-truncation.md): the
+        captured HTML's own `multimedias[type=PICTURE].content` is a fixed
+        preview, while a sibling `multimediasTotalSlides` field reports the
+        real count. This locks in that when the two disagree, `normalize()`
+        surfaces it honestly instead of silently treating the preview as
+        the whole gallery — and that `photo_urls` itself still only carries
+        what's genuinely embedded (3 here), never fabricating more."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {multimediaCarrousel: "
+            '{"multimediasTotalSlides":[{"type":"PICTURE","totalSlides":13},'
+            '{"type":"PLAN","totalSlides":1}],'
+            '"multimedias":[{"type":"PICTURE","content":['
+            '{"src":"WEB_DETAIL/0/a/b/c/1.jpg"},'
+            '{"src":"WEB_DETAIL/0/a/b/c/2.jpg"},'
+            '{"src":"WEB_DETAIL/0/a/b/c/3.jpg"}]}]}};</script>'
+            "</body></html>"
+        )
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert len(canonical.photo_urls) == 3  # only what's really embedded
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+        assert canonical.raw_extra["photo_gallery_total_available"] == 13
+
+    def test_gallery_not_flagged_truncated_when_total_slides_matches(self):
+        """Defensive counterpart: when `totalSlides` agrees with what's
+        embedded, no truncation flag — this must be able to fail, i.e. a
+        connector that always flags truncation regardless of the numbers
+        would be caught here."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {multimediaCarrousel: "
+            '{"multimediasTotalSlides":[{"type":"PICTURE","totalSlides":2}],'
+            '"multimedias":[{"type":"PICTURE","content":['
+            '{"src":"WEB_DETAIL/0/a/b/c/1.jpg"},'
+            '{"src":"WEB_DETAIL/0/a/b/c/2.jpg"}]}]}};</script>'
+            "</body></html>"
+        )
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert len(canonical.photo_urls) == 2
+        assert "photo_gallery_truncated" not in canonical.raw_extra
+        assert "photo_gallery_total_available" not in canonical.raw_extra
 
     def test_gallery_handles_absolute_src_and_dedups(self):
         """Defensive: a carousel whose `src` is already an absolute URL is
