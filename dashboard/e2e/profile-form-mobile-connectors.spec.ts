@@ -131,10 +131,26 @@ test("connector picker is usable at phone width, greys a globally-disabled conne
     expect(box!.x + box!.width).toBeLessThanOrEqual(clientWidth);
   }
 
-  // The globally-disabled connector is greyed (badged), NEVER hidden — the
+  // The globally-disabled connector is greyed AND badged, NEVER hidden — the
   // owner must be able to see why a source is unavailable.
   await expect(disabledRow.getByText("desactivado globalmente")).toBeVisible();
   await expect(activeRow.getByText("desactivado globalmente")).toHaveCount(0);
+  // #674 review L1: "greyed" used to be true of the badge only — the
+  // connector name rendered at full --fg like every other row, so the word
+  // in this test's own title described nothing. Assert the actual dim.
+  const dimmed = await disabledRow.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { color: s.color, opacity: Number(s.opacity) };
+  });
+  const solid = await activeRow.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { color: s.color, opacity: Number(s.opacity) };
+  });
+  expect(dimmed.color).not.toBe(solid.color);
+  expect(dimmed.opacity).toBeLessThan(solid.opacity);
+  // Greyed is not disabled: a globally-off source stays selectable (D-055
+  // hides its listings at read time; the profile may still name it).
+  await expect(disabledRow.getByRole("checkbox")).toBeEnabled();
 
   // Select ONLY the active connector — the decorative-trap-avoiding part:
   // the disabled one stays visible/selectable but we don't tick it.

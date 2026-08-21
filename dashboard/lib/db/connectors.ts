@@ -227,7 +227,8 @@ interface RegistryRow {
   last_capture_done_at: Date | string | null;
   // Issue #660: corpus size for the profile-form connector picker's
   // biggest-first ordering.
-  active_listing_count: number | string | null;
+  active_sale_listing_count: number | string | null;
+  active_rent_listing_count: number | string | null;
 }
 
 interface LastRunRow {
@@ -484,7 +485,8 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               -- aggregate (source cardinality is bounded by the registry
               -- itself), so a plain LEFT JOIN is cheap enough to run on
               -- every listConnectors() call.
-              COALESCE(al.active_listing_count, 0) AS active_listing_count
+              COALESCE(al.active_sale_listing_count, 0) AS active_sale_listing_count,
+              COALESCE(al.active_rent_listing_count, 0) AS active_rent_listing_count
          FROM connector_registry g
          LEFT JOIN connector_config c ON c.connector_name = g.connector_name
          LEFT JOIN connector_freshness_state f ON f.connector_name = g.connector_name
@@ -502,7 +504,9 @@ export async function listConnectors(): Promise<ConnectorView[]> {
             GROUP BY connector_name
          ) cap ON cap.connector_name = g.connector_name
          LEFT JOIN (
-           SELECT source, COUNT(*) AS active_listing_count
+           SELECT source,
+                  COUNT(*) FILTER (WHERE operation = 'sale') AS active_sale_listing_count,
+                  COUNT(*) FILTER (WHERE operation = 'rent') AS active_rent_listing_count
              FROM listing
             WHERE status = 'active'
             GROUP BY source
@@ -588,7 +592,8 @@ export async function listConnectors(): Promise<ConnectorView[]> {
         nowMs,
       }),
       lastRun: lastRuns.get(row.connector_name) ?? null,
-      activeListingCount: num(row.active_listing_count ?? 0),
+      activeSaleListingCount: num(row.active_sale_listing_count ?? 0),
+      activeRentListingCount: num(row.active_rent_listing_count ?? 0),
     };
   });
 }

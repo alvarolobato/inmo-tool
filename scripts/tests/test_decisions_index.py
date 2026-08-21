@@ -122,3 +122,61 @@ def test_preamble_precedes_first_group(tmp_path: Path) -> None:
     assert text.startswith("# DECISIONS.md")
     assert text.index("# DECISIONS.md") < text.index("## G")
     assert text.endswith("\n")
+
+
+def test_unescaped_pipe_in_rule_is_rejected(tmp_path: Path) -> None:
+    """A literal `|` in a rule would truncate its rendered table cell.
+
+    Regression for D-152, which shipped with `(\\"all\\" default | non-empty ...)`
+    in its `rule:`. GFM read the extra pipe as a third cell in a 2-column
+    table and dropped everything after it, so the index every session loads
+    lost the enforcement point, the D-055 intersection and the precedence
+    clause. The drift guard could not catch it: the checked-in file WAS what
+    the generator produced. So the generator itself has to refuse.
+    """
+    import pytest
+
+    _write(
+        tmp_path,
+        "D-001-a.md",
+        "id: D-001\ngroup: G\nrule: 'a | b'\norder: 1",
+    )
+    with pytest.raises(ValueError, match="unescaped"):
+        di.collect_records(tmp_path)
+
+
+def test_escaped_pipe_in_rule_is_accepted_and_renders_one_row(tmp_path: Path) -> None:
+    """`\\|` is the supported way to put a pipe in a rule (the D-079 convention).
+
+    Note it only parses inside a SINGLE-quoted YAML scalar — a double-quoted
+    one treats `\\|` as an unknown escape and raises. That is the trap the
+    first attempt at fixing D-152 fell into.
+    """
+    _write(
+        tmp_path,
+        "D-001-a.md",
+        "id: D-001\ngroup: G\nrule: 'a \\| b'\norder: 1",
+    )
+    records = di.collect_records(tmp_path)
+    assert records[0]["rule"] == "a \\| b"
+    text = di.render(records)
+    row = next(ln for ln in text.split("\n") if ln.startswith("| [D-001]"))
+    assert row.endswith("| a \\| b |")
+    # Exactly 2 cells: 3 unescaped delimiters (leading, separator, trailing).
+    assert len(di._UNESCAPED_PIPE_RE.findall(row)) == 3
+
+
+def test_every_real_record_renders_exactly_two_cells() -> None:
+    """Repo-wide: no checked-in decision record may truncate its own row.
+
+    The cell-count assertion lives in `render()`, so this just exercises the
+    real corpus through it — a new record with a stray pipe fails here even if
+    someone regenerates the index (which would keep the drift guard green).
+    """
+    text = di.generate()
+    rows = [ln for ln in text.split("\n") if ln.startswith("| [D-")]
+    assert rows, "generator produced no rows"
+    for row in rows:
+        assert len(di._UNESCAPED_PIPE_RE.findall(row)) == 3, (
+            f"row does not render as exactly 2 cells: {row!r}"
+        )

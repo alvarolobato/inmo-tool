@@ -2569,11 +2569,16 @@ def publish_search_previews(conn) -> None:
     )
 
 
-def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorScope]:
+def _override_scopes_for_connector(
+    conn,
+    connector_name: str,
+    profile_connectors: dict[int, frozenset[str] | None],
+) -> list[ConnectorScope]:
     """Owner-pinned recall scopes for *connector_name* (issue #478 P5, D-101).
 
     Every active profile that pinned a URL for this connector in
-    `profile_connector_filter` gets a DEDICATED `ConnectorScope` carrying that
+    `profile_connector_filter` — AND whose `scope.connectors` includes this
+    connector (issue #660) — gets a DEDICATED `ConnectorScope` carrying that
     profile's geography plus the pinned `override_url`. Because
     `ConnectorScope.scope_key` incorporates `override_url`, such a scope is
     never deduped against the twin (non-override) scope derived from the same
@@ -2590,6 +2595,18 @@ def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorS
     resolution" posture `_active_profile_scopes` takes. Ordered by row id for a
     deterministic scope order (fairness ordering downstream relies on a stable
     incoming order).
+
+    A pin from a profile that EXCLUDES this connector is dropped (issue #660,
+    D-152). A D-101 pin is tier 0 of "how does THIS profile search THIS
+    portal" — a (profile × connector) relationship. If the profile excluded
+    the portal there is no such relationship for the pin to be tier 0 of, so
+    honouring it would crawl a URL on behalf of a profile that said this
+    source shouldn't feed it, and (via `profile_ids`) attribute the outcome to
+    that profile in `connector_run_results.geography_scope`. The captura
+    resolver already reads the same pin this way — `resolveSearchTasks`
+    (`dashboard/lib/search-url/resolve.ts`) `continue`s past an excluded
+    portal BEFORE synthesizing an override task — and one pin must not mean
+    two different things on the two sides.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -2604,6 +2621,16 @@ def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorS
 
     scopes: list[ConnectorScope] = []
     for scope_json, url, profile_id in rows:
+        if not _profile_includes_connector(
+            profile_connectors.get(profile_id), connector_name
+        ):
+            logger.debug(
+                "profile %s pinned a %s URL but excludes that connector "
+                "(scope.connectors) — dropping the override scope (#660)",
+                profile_id,
+                connector_name,
+            )
+            continue
         center: tuple[float, float] | None = None
         radius: float | None = None
         geography = (scope_json or {}).get("geography")
@@ -2640,6 +2667,7 @@ def _scopes_for_connector(
     conn,
     connector_name: str,
     profile_scopes: list[ConnectorScope],
+    profile_connectors: dict[int, frozenset[str] | None],
     supports_search_override: bool = False,
 ) -> tuple[list[ConnectorScope], bool, int | None]:
     """Resolve one connector's actual scopes for this run, per issue #99's
@@ -2665,11 +2693,17 @@ def _scopes_for_connector(
     attribute-default pattern `filters.rooms` already established for
     `ConnectorScope.rooms` above.
 
+    `profile_connectors` is `_profile_connector_selections`' map, needed here
+    (not only by the caller's `_restrict_profile_scopes_to_connector`) because
+    the D-101 override scopes are built INSIDE this function, after that
+    narrowing has already happened — see issue #660 / D-152.
+
     Issue #478 P5 (D-101): when `supports_search_override` is True, every
-    owner-pinned URL in `profile_connector_filter` for this connector is
-    attached as a DEDICATED override scope (see
-    `_override_scopes_for_connector`), ADDED to whatever base scopes the
-    connector_config logic below resolves. Precedence for a given profile:
+    owner-pinned URL in `profile_connector_filter` for this connector *whose
+    profile includes this connector* (#660) is attached as a DEDICATED
+    override scope (see `_override_scopes_for_connector`), ADDED to whatever
+    base scopes the connector_config logic below resolves. Precedence for a
+    given profile:
     per-profile pinned override > `connector_config.geography_override`
     (global) > profile-derived scopes (#71/#99). "Added, not replacing" is
     deliberate — an override scope has a distinct `scope_key` so it is never
@@ -2677,6 +2711,15 @@ def _scopes_for_connector(
     every profile that did NOT pin a URL. A connector without
     `supports_search_override` never gains an override scope (the pin is
     ignored, no error).
+
+    NOTE (#660 / D-152, deliberate): a global `connector_config.
+    geography_override` REPLACES `base_scopes` outright, so it is not
+    profile-derived and per-profile connector selection cannot narrow it. A
+    connector with such an override therefore keeps crawling at its
+    configured scope even when every active profile excludes it. That is an
+    admin override outranking a per-profile preference — the operator
+    configured a geography for this connector explicitly — and it is left as
+    is rather than made conditional.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -2694,7 +2737,7 @@ def _scopes_for_connector(
         base_scopes = profile_scopes
         if supports_search_override:
             base_scopes = base_scopes + _override_scopes_for_connector(
-                conn, connector_name
+                conn, connector_name, profile_connectors
             )
         return base_scopes, True, None
 
@@ -2778,7 +2821,9 @@ def _scopes_for_connector(
     # to them too. Added, never replacing — their distinct scope_key keeps them
     # off the dedup path against the twin non-override scopes.
     if supports_search_override:
-        base_scopes = base_scopes + _override_scopes_for_connector(conn, connector_name)
+        base_scopes = base_scopes + _override_scopes_for_connector(
+            conn, connector_name, profile_connectors
+        )
 
     rooms: int | None = None
     if isinstance(filters, dict):
@@ -3444,6 +3489,7 @@ def run_all_connectors(
             conn,
             connector.name,
             connector_profile_scopes,
+            profile_connectors,
             supports_search_override=connector.supports_search_override,
         )
         if not enabled:

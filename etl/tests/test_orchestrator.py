@@ -1270,7 +1270,7 @@ class TestSearchOverrideScopes:
         try:
             base = orchestrator._active_profile_scopes(pg_conn)
             scopes, enabled, _ = orchestrator._scopes_for_connector(
-                pg_conn, name, base, supports_search_override=True
+                pg_conn, name, base, {}, supports_search_override=True
             )
             assert enabled is True
             # The twin (profile-derived, no override) scope AND the override
@@ -1303,7 +1303,9 @@ class TestSearchOverrideScopes:
             base = orchestrator._active_profile_scopes(pg_conn)
             # supports_search_override defaults to False — the pin must be
             # silently ignored (no override scope, no error).
-            scopes, enabled, _ = orchestrator._scopes_for_connector(pg_conn, name, base)
+            scopes, enabled, _ = orchestrator._scopes_for_connector(
+                pg_conn, name, base, {}
+            )
             assert enabled is True
             assert all(s.override_url is None for s in scopes)
             assert len(scopes) == len(base)
@@ -1346,7 +1348,7 @@ class TestSearchOverrideScopes:
                     (_TEST_PROFILE_NAME,),
                 )
             pg_conn.commit()
-            scopes = orchestrator._override_scopes_for_connector(pg_conn, name)
+            scopes = orchestrator._override_scopes_for_connector(pg_conn, name, {})
             assert scopes == []
         finally:
             with pg_conn.cursor() as cur:
@@ -6457,7 +6459,7 @@ class TestScopeProfileAttribution:
             (_radius_geo(37.3891, -5.9845, 15), "https://x/pinned-b", 11),
         ]
         scopes = orchestrator._override_scopes_for_connector(
-            _FakeScopeConn(rows), "fotocasa"
+            _FakeScopeConn(rows), "fotocasa", {}
         )
         assert [s.profile_ids for s in scopes] == [(7,), (11,)]
         # Attribution is additive: it does not disturb the override_url the pin
@@ -6466,6 +6468,43 @@ class TestScopeProfileAttribution:
             "https://x/pinned-a",
             "https://x/pinned-b",
         ]
+
+    def test_override_scope_dropped_when_its_profile_excludes_the_connector(self):
+        """Issue #660 / D-152 (PR #674 review M1): a D-101 pin from a profile
+        that excludes this connector must NOT be crawled.
+
+        The narrowing (`_restrict_profile_scopes_to_connector`) runs on the
+        profile-DERIVED scopes before `_scopes_for_connector` sees them, but
+        the override scopes are built inside that function afterwards — so a
+        pin used to survive its own profile's exclusion, crawl the URL on that
+        profile's behalf, and get attributed to it in
+        `connector_run_results.geography_scope`. Captura's resolver
+        (`resolveSearchTasks`) already skips an excluded portal before
+        synthesizing an override task; one pin must not mean two things.
+        """
+        rows = [
+            (_radius_geo(40.4168, -3.7038, 10), "https://x/pinned-a", 7),
+            (_radius_geo(37.3891, -5.9845, 15), "https://x/pinned-b", 11),
+        ]
+        # Profile 7 pinned fotocasa but selected only pisos; profile 11
+        # selected fotocasa explicitly.
+        selections = {7: frozenset({"pisos"}), 11: frozenset({"fotocasa"})}
+        scopes = orchestrator._override_scopes_for_connector(
+            _FakeScopeConn(rows), "fotocasa", selections
+        )
+        assert [s.profile_ids for s in scopes] == [(11,)]
+        assert [s.override_url for s in scopes] == ["https://x/pinned-b"]
+
+    def test_override_scope_kept_for_an_unrestricted_profile(self):
+        """`None` (scope.connectors "all"/absent) includes every connector, so
+        a pin from a pre-#660 profile is untouched — the narrowing must not
+        quietly drop the owner's existing pins."""
+        rows = [(_radius_geo(40.4168, -3.7038, 10), "https://x/pinned-a", 7)]
+        for selections in ({7: None}, {}):
+            scopes = orchestrator._override_scopes_for_connector(
+                _FakeScopeConn(rows), "fotocasa", selections
+            )
+            assert [s.override_url for s in scopes] == ["https://x/pinned-a"]
 
     def test_profile_ids_is_not_part_of_scope_key(self):
         # The identity contract must ignore profile_ids (D-101): two scopes that

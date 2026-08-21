@@ -119,7 +119,7 @@ const PropertyTypesSchema = z.union([
  * /api/profiles/[id]) validate each name against the registry after this
  * parse succeeds and 400 on an unknown one (same pattern the
  * connector-filters PUT route uses for its host check) — see
- * lib/db/connectors.ts's `validateConnectorNames`.
+ * lib/db/connectors.ts's `unknownConnectorNames`.
  *
  * Deliberately OPTIONAL, not `.default("all")`: unlike `geography`/
  * `property_types` (issue #659/D-147), a genuinely-absent `connectors` has no

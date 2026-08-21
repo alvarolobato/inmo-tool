@@ -9,6 +9,7 @@ import type {
   ConnectorView,
   GeographyOverride,
 } from "@/lib/connectors-schema";
+import { isConnectorActive } from "@/lib/db/source-active";
 
 const cardStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
@@ -428,7 +429,9 @@ export function ConnectorCard({
   // A disabled source is also hidden from the candidate feed (see
   // lib/db/source-active.ts) — the toggle is the single lever for both.
   const isCaptureOnly = !connector.supports_discovery;
-  const active = isCaptureOnly ? connector.capture_enabled : connector.enabled;
+  // Shared with DISABLED_SOURCES_CTE's SQL CASE (#674 review L2) so the card,
+  // the profile picker and the feed can never disagree about "is it on".
+  const active = isConnectorActive(connector);
   const toggleActive = () =>
     run(isCaptureOnly ? { capture_enabled: !active } : { enabled: !active });
 
