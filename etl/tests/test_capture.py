@@ -19,6 +19,7 @@ import psycopg2
 import pytest
 
 from etl import capture
+from etl.connectors import hipoges as hipoges_module
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
 _FIXTURE_HTML = (
@@ -657,12 +658,24 @@ class TestProcessPendingCaptures:
 
 class TestUncalibratedConnectorRetainsHtml:
     """Opus review (PR #548, C3): a connector whose raw_extra reports
-    selectors_calibrated=False (Hipoges today) must NOT have its html nulled
-    on a 'done' row. normalize() never raises for an uncalibrated connector —
-    every capture reaches 'done' — so without this, issue #547's whole plan
-    (preserve the real captured HTML as a fixture, once the owner captures a
-    real page) would be impossible: the HTML that landed in the DB would
-    already be gone by the time anyone went looking for it."""
+    selectors_calibrated=False must NOT have its html nulled on a 'done'
+    row. normalize() never raises for an uncalibrated connector — every
+    capture reaches 'done' — so without this, a future calibration task
+    (#547's own plan: preserve the real captured HTML as a fixture, once
+    the owner captures a real page) would be impossible: the HTML that
+    landed in the DB would already be gone by the time anyone went looking
+    for it.
+
+    Hipoges itself is CALIBRATED now (#547/PR #657 — `_SELECTORS_CALIBRATED
+    = True`), so it is no longer a live example of an uncalibrated
+    connector and no other registered connector is either. This test
+    monkeypatches Hipoges' own `_SELECTORS_CALIBRATED` flag back to False
+    for its duration — reusing the real connector/capture path end to end
+    (real host resolution, real `normalize()`) rather than standing up a
+    separate stub connector class, while still proving the retention
+    mechanism itself (keyed purely on `raw_extra["selectors_calibrated"]`,
+    read fresh by `etl/capture.py` on every call) still works for whichever
+    connector next ships in the uncalibrated state."""
 
     _URL = "https://realestate.hipoges.com/es/detail/99001"
     _HTML = (
@@ -688,7 +701,8 @@ class TestUncalibratedConnectorRetainsHtml:
                 cur.execute("DELETE FROM property WHERE id = %s", (row[0],))
         conn.commit()
 
-    def test_uncalibrated_hipoges_capture_retains_html(self, pg_conn):
+    def test_uncalibrated_hipoges_capture_retains_html(self, pg_conn, monkeypatch):
+        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", False)
         _apply_schema(pg_conn)
         self._cleanup(pg_conn)
         try:
@@ -706,8 +720,31 @@ class TestUncalibratedConnectorRetainsHtml:
             assert status == "done"
             assert stored_html == self._HTML, (
                 "an uncalibrated connector's captured HTML must survive "
-                "processing — #547 needs it to build real fixtures"
+                "processing — a future calibration task needs it to build "
+                "real fixtures"
             )
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_calibrated_hipoges_capture_now_nulls_html(self, pg_conn):
+        """Control, the flip side of the test above: Hipoges is calibrated
+        in this codebase TODAY (no monkeypatch), so its retained-HTML
+        mechanism must now be OFF — proving #547 actually turned off
+        retention for the connector it calibrated, not just that the
+        mechanism works when forced on."""
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, self._URL, self._HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT html FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                (stored_html,) = cur.fetchone()
+            assert stored_html is None
         finally:
             self._cleanup(pg_conn)
 

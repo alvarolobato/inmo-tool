@@ -3,7 +3,7 @@ id: D-111
 title: Hipoges ingests via guided browser-extension capture, selectors an unvalidated draft pending the owner's first real capture
 date: 2026-08-18
 group: Data / connectors
-rule: 'Hipoges ingests via a capture-only connector (`etl/connectors/hipoges.py`) mirroring idealista/aliseda/altamira; detail-URL shape is grounded in the site''s public Angular route table, but every DOM selector is an UNVALIDATED DRAFT hard-gated by `_SELECTORS_CALIBRATED` (False) — `normalize()` writes only external_id/url/status/listing_kind/OG title+description until the owner''s first real capture flips it.'
+rule: 'Hipoges ingests via a capture-only connector (`etl/connectors/hipoges.py`) mirroring idealista/aliseda/altamira; detail-URL shape is grounded in the site''s public Angular route table, and every DOM selector is hard-gated by the module constant `_SELECTORS_CALIBRATED` — `normalize()` writes a draft-derived field only once it is real-capture-validated (see D-146 for the #547 calibration: True since 2026-08-21, single-observation confidence).'
 ---
 
 # D-111: Hipoges ingests via guided browser-extension capture, selectors an unvalidated draft
@@ -138,6 +138,21 @@ reverse-engineering, or User-Agent spoofing was attempted, per D-075/D-033.
    one), and correct every DRAFT selector against them — the same path
    issue #266 walked for Aliseda.
 
+**Addendum (2026-08-21, issue #547/D-146):** done. The owner captured
+`RARE-04347` four times; the retained HTML (point 3 above) was pulled
+read-only from production Postgres and used to build a real fixture,
+replacing the synthetic one referenced below. `_SELECTORS_CALIBRATED` is
+now `True` — price/m²/rooms/bathrooms/reference/photos/property_type/
+operation/city/province are real-capture-grounded; title/description
+flipped from OG-meta-only to DOM-ONLY, no fallback at all (the real page's
+OG meta turned out to be generic site branding, not per-listing content —
+and a fresh-context review of this PR caught that falling back to it was
+actively HARMFUL, not just weaker: it could turn a real sale listing's
+`operation` into `"rent"`). Floor and energy_rating stay uncalibrated
+(ambiguous single-sample risk). Full details, including which class-based
+selector guesses turned out to match literally nothing on the real page:
+[D-146](D-146-hipoges-selectors-calibrated.md).
+
 **Alternatives rejected**:
 - *Reverse-engineering `POST /api/assets/map` to get real listing HTML/JSON
   without a human capture*: rejected — exactly the probing D-075/D-033
@@ -174,4 +189,6 @@ capture-path precedent), [D-033](D-033-cimenta2-not-viable-guest-api-overexposur
 (the stop-probing condition), [D-079](D-079-runresults-classification-and-scope.md)
 (the shared-fixture discipline `listing_detect.py`/`detect.js` follow),
 `etl/connectors/hipoges.py`, `etl/connectors/hipoges_mapping.py`,
-`etl/tests/test_connector_hipoges.py`, `etl/tests/fixtures/hipoges_detail_SYNTHETIC.html`.
+`etl/tests/test_connector_hipoges.py`,
+`etl/tests/fixtures/hipoges_detail_RARE-04347.html` (real, replaces the
+former synthetic fixture — see [D-146](D-146-hipoges-selectors-calibrated.md)).

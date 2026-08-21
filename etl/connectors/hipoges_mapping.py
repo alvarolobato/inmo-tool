@@ -1,19 +1,19 @@
 """Hipoges-specific field mapping: raw captured values -> canonical vocabulary.
 
 ═══════════════════════════════════════════════════════════════════════════
-  DRAFT — UNVALIDATED. No real Hipoges capture exists yet (see hipoges.py's
-  module docstring and D-111). This table is a best-effort transcription of
-  the CHECK-vocabulary Spanish real-estate words the other REO-servicer
-  mapping modules (aliseda_mapping.py, altamira_mapping.py) already use,
-  cross-checked against the typology display strings genuinely present in
+  Cross-checked against the typology display strings genuinely present in
   Hipoges' own public `assets/i18n/es.json` translation bundle ("Piso",
   "Casa", "Garaje", "Trastero", "Terreno", "Oficina", "Edificio",
   "Apartamento" all appear there as translations of the `flat`/`house`/
   `garage`/`storage`/`land`/`office`/`building`/`apartment` typology keys).
-  What is NOT confirmed: whether these exact words appear on a rendered
-  Hipoges detail-page TITLE the way they do on Altamira/Aliseda titles —
-  that depends on DOM structure this project has not observed. Keyword
-  matching degrades to None on a miss, never a wrong bucket.
+  **Independently reconfirmed against a real capture (RARE-04347, issue
+  #547, D-146):** the site's own "Tipo de propiedad" detail-panel field
+  read "Piso" verbatim, and the real `<h1>` title read "Piso en venta en
+  urbanización Maria Teresa Leon" — both map cleanly through this table.
+  Still a SINGLE OBSERVATION covering exactly one keyword ("piso") and one
+  operation word ("venta") — every other keyword/mapping pair below remains
+  unconfirmed against real Hipoges markup. Keyword matching degrades to
+  None on a miss, never a wrong bucket.
 ═══════════════════════════════════════════════════════════════════════════
 
 Like Idealista/Aliseda/Altamira, Hipoges is capture-only (D-075: every

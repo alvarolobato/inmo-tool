@@ -1,0 +1,139 @@
+<!--
+  Trimmed reconstruction of a REAL Hipoges detail page, captured live via the
+  browser extension on 2026-08-21 (issue #547) — external_id RARE-04347,
+  https://realestate.hipoges.com/es/detail/RARE-04347. Preserved via
+  etl/capture.py's selectors_calibrated-gated HTML retention (D-111 / #548
+  C3) as `extension_capture` rows 3614-3617 (366,081 / 366,763 / 366,763 /
+  368,552 bytes — NOT byte-identical; the size differences are entirely
+  tracking/cookie-consent payload noise) — pulled read-only from production
+  Postgres, never re-fetched live. The LOAD-BEARING listing content (title,
+  price, location, reference, feature cards, description, gallery, similar-
+  properties rail) is identical across all four captures except one
+  harmless map-widget CSS class that only appears on the largest one.
+
+  This is NOT a literal full-page dump (the real capture was ~358-369 KB of
+  tracking pixels, PrimeNG carousel internals, a lead-gen contact form with
+  a real Hipoges call-center phone number, and cookie-consent markup — none
+  of that is load-bearing for the parser). Trimmed to the real tag names and
+  class attributes every calibrated selector in hipoges.py actually reads:
+  `init-asset-detail-main-info` (title/location/price/reference),
+  `init-asset-detail-features` (m2/rooms/baths via `init-feature-card`),
+  `init-asset-detail-details` (the "Tipo de propiedad" label/value row),
+  `init-asset-detail-description` (the real description text), and
+  `init-asset-detail-gallery` vs. `init-asset-detail-related-assets`/
+  `init-similar-card` (the neighbour-bleed contamination pair — this is the
+  real observed contamination shape: a custom element with id="others", NOT
+  a similar/related/recommend CSS class, which is why the pre-#547 draft's
+  class-based contamination-drop matched ZERO elements on the real page).
+
+  Scrubbed for this public repo: the contact-form component, the "O
+  llámenos" call-center tel: link, all tracking/analytics scripts, cookie
+  consent markup, and every icon/SVG not needed to prove a selector. Photo
+  CDN URLs are Hipoges' own already-public marketing image links (no PII);
+  the description text is the servicer's own boilerplate about the
+  property/financing, with no owner name, phone number, or other personal
+  data — trimmed to a representative excerpt (the real block is ~1350
+  chars of similar marketing copy) that keeps the one genuinely useful
+  signal it carries ("Esta propiedad se encuentra alquilada").
+
+  Photo order: the real gallery repeats each image (a desktop/mobile
+  duplicate rendering) in the sequence 2nd/3rd/1st image, not 1st/2nd/3rd —
+  this fixture simplifies to a single, numerically-ordered rendering per
+  photo for readability. See `_photos()`'s own docstring in hipoges.py.
+
+  SINGLE OBSERVATION — one property, one servicer template. See
+  docs/decisions/D-111-hipoges-capture-only.md's amendment for which fields
+  this fixture backs with real confidence vs. which stay uncalibrated.
+-->
+<html lang="es"><head>
+<meta charset="utf-8">
+<meta name="description" content="Venta y alquiler de inmuebles al mejor precio | Hipoges">
+<title>Hipoges - Venta y alquiler de inmuebles</title>
+<link rel="canonical" href="https://realestate.hipoges.com/es/detail/RARE-04347" hreflang="es">
+<meta property="og:title" content="Venta y alquiler de inmuebles al mejor precio | Hipoges">
+<meta property="og:description" content="Encuentra aquí las mejores oportunidades de apartamentos, pisos, locales, naves y oficinas.">
+</head>
+<body>
+<article>
+<init-asset-detail-gallery class="ng-star-inserted">
+<section>
+<img loading="lazy" alt="photo count" src="/assets/icons/asset-detail/camera.webp">
+<img loading="lazy" alt="First image" src="https://hipoges.azureedge.net/imageshams/hams_es_rand/rran01399/rare-04347/59180389_96ac779dadbf058fb279abebad8b43b106be36ca.png">
+<img loading="lazy" alt="Second image" src="https://hipoges.azureedge.net/imageshams/hams_es_rand/rran01399/rare-04347/59180390_1d29b170878421001feead3b1805d8c910fdc150.png">
+<img loading="lazy" alt="Third image" src="https://hipoges.azureedge.net/imageshams/hams_es_rand/rran01399/rare-04347/59180391_e063a3e750da99ede97f6ec256547606fdb47ff6.png">
+</section>
+</init-asset-detail-gallery>
+
+<init-asset-detail-main-info class="order-10">
+<div class="container flex flex-col mx-auto gap-6">
+<div class="flex flex-col gap-2">
+<h1 class="font-rubik text-hp-secondary-gray-50 text-hp-medium-22"> Piso en venta en urbanización Maria Teresa Leon </h1>
+<section class="flex items-center gap-2"><img width="15" height="18" src="assets/icons/asset-detail/geolocation-gray.svg" alt="Location icon"><span class="text-hp-gray-2 text-hp-xsmall">Estepona, Málaga</span></section>
+</div>
+<section class="flex flex-wrap justify-between">
+<div class="flex flex-col">
+<span class="font-roboto text-hp-secondary-gray-50 font-semibold text-hp-xxsmall">Precio</span>
+<span class="font-roboto text-hp-desktop-28 font-medium text-hp-orange ng-star-inserted">266.000&nbsp;€</span>
+</div>
+</section>
+<section class="flex flex-col gap-4">
+<div class="flex items-center gap-3"><img width="28" height="28" src="assets/icons/asset-detail/house-search.webp" alt="Asset reference icon"><div class="flex flex-wrap items-center gap-x-8"><span class="text-hp-gray-2 text-hp-xxsmall">Referencia: RARE-04347</span></div></div>
+</section>
+</div>
+</init-asset-detail-main-info>
+
+<init-asset-detail-description id="description">
+<section class="container flex flex-col my-6">
+<h2 class="text-hp-xmedium">Descripción</h2>
+<div class="contenedor relative"><div class="contenido"><div class="text-container"><p class="text-hp-gray-2 text-hp-xxsmall">Excelente oportunidad de adquirir esta vivienda en propiedad ubicada en la localidad de Estepona (Málaga). Esta propiedad se encuentra alquilada. No se puede visitar. No apta para compradores que requieran financiación hipotecaria. El comprador se subrogará a las condiciones indicadas en el contrato de alquiler vigente.</p></div></div></div>
+</section>
+</init-asset-detail-description>
+
+<init-asset-detail-features id="features">
+<section class="container flex flex-col mb-6">
+<init-feature-card class="ng-star-inserted"><div class="flex flex-col items-center"><span class="text-hp-xsmall text-hp-orange ng-star-inserted">84 </span><span class="text-hp-xsmall hidden md:block ng-star-inserted">Metros cuadrados</span><span class="text-hp-secondary-gray-200 block md:hidden ng-star-inserted">Metros²</span></div></init-feature-card>
+<init-feature-card class="ng-star-inserted"><div class="flex flex-col items-center"><span class="text-hp-xsmall text-hp-orange ng-star-inserted">3 </span><span class="text-hp-xsmall hidden md:block ng-star-inserted">Habitaciones</span><span class="text-hp-secondary-gray-200 block md:hidden ng-star-inserted">Habs.</span></div></init-feature-card>
+<init-feature-card class="ng-star-inserted"><div class="flex flex-col items-center"><span class="text-hp-xsmall text-hp-orange ng-star-inserted">2 </span><span class="text-hp-xsmall hidden md:block ng-star-inserted">Baños</span><span class="text-hp-secondary-gray-200 block md:hidden ng-star-inserted">Baños</span></div></init-feature-card>
+<!-- Real page also has a 4th "Consumo de energía" card (letter grade "G")
+     whose mobile/desktop variants render the value/label spans in OPPOSITE
+     order -- proof that any future numeric feature-card reader must match
+     by label keyword, not by fixed span position. Left out here: energy
+     rating is NOT one of #547's calibrated fields (single-sample, real risk
+     of a "no cert available" placeholder being mistaken for a real grade -
+     see D-111's amendment), so no selector reads it and this fixture
+     doesn't need to carry it to exercise the ones that do. -->
+</section>
+</init-asset-detail-features>
+
+<init-asset-detail-details id="details">
+<section class="container flex flex-col gap-12">
+<h2 class="text-hp-xmedium">Detalles del Inmueble</h2>
+<div class="flex flex-col gap-4">
+<div class="grid grid-cols-2 sm:grid-cols-3 items-start gap-12 ng-star-inserted">
+<span class="text-hp-xxsmall text-hp-gray-2">Tipo de propiedad</span>
+<span class="text-hp-xxsmall text-hp-secondary-black font-medium">Piso</span>
+</div>
+</div>
+</section>
+</init-asset-detail-details>
+
+<!-- The real "similar properties" rail: a custom element with id="others",
+     NOT anything carrying a similar/related/recommend CLASS name. Carries a
+     DIFFERENT property's own price/m2/rooms/baths/photo -- proves the
+     calibrated selectors above (scoped to the real per-section component
+     tags) never pick this up, the same neighbour-bleed bug class the
+     synthetic fixture this replaces was built to catch. -->
+<init-asset-detail-related-assets id="others">
+<div class="bg-hp-secondary-gray-600 py-8">
+<init-similar-card class="ng-star-inserted">
+<img src="https://hipoges.azureedge.net/imageshams/hams_es_gentauro/rgnt0710/gtre-01073/51507872_11ccc260e35a374459f3cfeed96e383e1faba61e.jpeg" alt="Piso en urbanización Vaguada">
+<span>Piso en urbanización Vaguada, Estepona, Málaga</span>
+<span>119 m²</span>
+<span>3 Habs.</span>
+<span>2 Baños</span>
+<span>251.000 €</span>
+</init-similar-card>
+</div>
+</init-asset-detail-related-assets>
+</article>
+</body></html>
