@@ -659,6 +659,73 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
       expect(entry.metrics.new_count).toBe(1);
     }
   });
+
+  it("new_count/B1/B2 hold on an 'everywhere'/'all' SENTINEL scope (#665, D-147) — including a matched property with NO coordinates, the exact class #665 newly makes matchable", async () => {
+    const profile = await createProfile("Sin filtro (todo)", {
+      geography: { type: "everywhere" },
+      property_types: "all",
+      hard_exclusions: {},
+    }, {});
+    createdProfileIds = [profile.id];
+    let fresh!: number, old!: number, rejected!: number, noCoords!: number;
+    await withRealDb(async (pool) => {
+      fresh = await seedProperty(pool, { price: 200000, firstSeenAt: new Date().toISOString() });
+      old = await seedProperty(pool, {
+        price: 200000,
+        firstSeenAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      rejected = await seedProperty(pool, { price: 200000, firstSeenAt: new Date().toISOString() });
+      createdPropertyIds.push(fresh, old, rejected);
+      await matchProperty(pool, profile.id, fresh);
+      await matchProperty(pool, profile.id, old);
+      await matchProperty(pool, profile.id, rejected);
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'reject')`,
+        [profile.id, rejected],
+      );
+
+      // #665: 695 previously-unmatchable NULL-coordinate properties become
+      // matchable under 'everywhere' (no haversine clause requires lat/lon).
+      // new_count/onlyNew must not choke on — or silently mis-handle — a
+      // NULL lat/lon row, since neither reads property.lat/lon at all.
+      const noCoordsRes = await pool.query<{ id: number }>(
+        `INSERT INTO property (lat, lon, property_type, m2_built, created_at)
+         VALUES (NULL, NULL, 'piso', 70, NOW()) RETURNING id`,
+      );
+      noCoords = noCoordsRes.rows[0].id;
+      createdPropertyIds.push(noCoords);
+      await pool.query(
+        `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
+         VALUES ($1, 'test', $2, 'active', 200000, NOW())`,
+        [noCoords, `ext-${noCoords}-${Math.random()}`],
+      );
+      await matchProperty(pool, profile.id, noCoords);
+    });
+
+    const overviews = await listProfileOverviews();
+    const entry = overviews.find((e) => e.ok && e.profile.id === profile.id);
+    expect(entry?.ok).toBe(true);
+    if (entry?.ok) {
+      // matched: fresh, old, rejected, noCoords = 4. new: fresh + noCoords
+      // (both first-seen just now) MINUS rejected (B2) = 2. old is not new.
+      expect(entry.metrics.matched_count).toBe(4);
+      expect(entry.metrics.new_count).toBe(2);
+
+      // B1/count⇔feed: the SAME predicate onlyNew filters on must agree —
+      // the frozen new_since anchor, applied via listCandidates, returns
+      // exactly the 2 candidates new_count promised (fresh + noCoords),
+      // never the old one or the rejected one, regardless of scope shape.
+      const page = await listCandidates(profile.id, {
+        onlyNew: true,
+        newSince: entry.metrics.new_since,
+        limit: 50,
+      });
+      const ids = page.items.map((i) => i.property_id).sort((a, b) => a - b);
+      expect(ids).toEqual([fresh, noCoords].sort((a, b) => a - b));
+      expect(ids).not.toContain(old);
+      expect(ids).not.toContain(rejected);
+    }
+  });
 });
 
 describe.runIf(dbAvailable)("EXPLAIN ANALYZE — profile overview query (issue #192)", () => {
