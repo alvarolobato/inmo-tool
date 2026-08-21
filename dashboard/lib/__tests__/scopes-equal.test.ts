@@ -6,7 +6,7 @@
  * false/undefined as different) fails a test.
  */
 import { describe, it, expect } from "vitest";
-import { scopesEqual, type Scope } from "@/lib/profiles-schema";
+import { scopesEqual, type RadiusGeography, type Scope } from "@/lib/profiles-schema";
 
 const BASE: Scope = {
   geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },
@@ -26,21 +26,25 @@ describe("scopesEqual — identical", () => {
 });
 
 describe("scopesEqual — geography", () => {
+  // Issue #659: `geography` is now a discriminated union (radius |
+  // everywhere) — these tests mutate a KNOWN-radius clone of BASE, so the
+  // cast is safe (BASE.geography.type === "radius" always) and just
+  // recovers what direct property access could no longer narrow on its own.
   it("a radius change is NOT equal", () => {
     const b = clone(BASE);
-    b.geography.radius_km = 10;
+    (b.geography as RadiusGeography).radius_km = 10;
     expect(scopesEqual(BASE, b)).toBe(false);
   });
 
   it("a center-latitude change is NOT equal", () => {
     const b = clone(BASE);
-    b.geography.center = [41.0, -3.7038];
+    (b.geography as RadiusGeography).center = [41.0, -3.7038];
     expect(scopesEqual(BASE, b)).toBe(false);
   });
 
   it("a center-longitude change is NOT equal", () => {
     const b = clone(BASE);
-    b.geography.center = [40.4168, -3.0];
+    (b.geography as RadiusGeography).center = [40.4168, -3.0];
     expect(scopesEqual(BASE, b)).toBe(false);
   });
 });

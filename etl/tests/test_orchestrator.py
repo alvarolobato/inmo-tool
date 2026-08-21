@@ -6507,10 +6507,20 @@ class TestActiveProfileScopesEverywhereSentinel:
         assert len(scopes) == 1
         assert scopes[0].profile_ids == (2,)
 
-    def test_a_genuinely_malformed_geography_still_warns(self):
+    def test_a_genuinely_malformed_geography_still_warns(self, caplog):
         # Regression guard: the everywhere branch must not swallow the
         # warning for a TRULY malformed/missing geography — only the
-        # deliberate "everywhere" sentinel is quiet.
+        # deliberate "everywhere" sentinel is quiet. #665 review (L1): this
+        # test's name and docstring already claimed to check the warning,
+        # but only asserted `scopes == []` — a mutation that makes the
+        # everywhere branch ALSO swallow "polygon" (e.g. `geography.get(
+        # "type") in ("everywhere", "polygon")`) left it silently green.
+        # Mirror test_everywhere_scope_logs_no_warning's caplog pattern and
+        # actually assert the warning fired.
         rows = [(1, {"geography": {"type": "polygon"}})]
-        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        with caplog.at_level("WARNING", logger="etl.orchestrator"):
+            scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
         assert scopes == []
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "missing/not type 'radius'" in warnings[0].message

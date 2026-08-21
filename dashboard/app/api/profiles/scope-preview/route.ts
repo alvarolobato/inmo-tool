@@ -1,22 +1,35 @@
 /**
- * POST /api/profiles/scope-preview — count how many properties a DRAFT scope
- * (not yet saved) would match, before the owner commits to it (issue #659).
+ * POST /api/profiles/scope-preview — for a DRAFT scope (not yet saved),
+ * report how many properties it would match AND how many of those would
+ * become newly eligible for AI assessment — before the owner commits to it
+ * (issue #659, M1 from the #665 review).
  *
  * Why this exists: an unfiltered "novedades" profile
  * (`geography:{type:"everywhere"}` / `property_types:"all"`) is meant for a
- * SMALL, deliberately-scoped connector selection (#660) — the small-portal
- * plan is ~1,185 properties / ~$20-35 of one-time LLM backlog. A full-pool
- * everywhere+all profile is a different thing entirely (11.6k properties,
- * $180-320, ~19 days at the assessment scheduler cap — see issue #658's
- * judgement comment) and #663 (the per-profile assessment opt-out) hasn't
- * landed yet to guard against that. This route is the one thing this PR CAN
- * do about that risk without building #660/#663 early: let ProfileForm show
- * the owner a real number for a sentinel-carrying draft BEFORE they save it,
- * so "how big is this" is visible rather than discovered after the fact.
+ * SMALL, deliberately-scoped connector selection (#660). A full-pool
+ * everywhere+all profile is a different thing entirely, and #663 (the
+ * per-profile assessment opt-out) hasn't landed yet to guard against it.
+ * This route is the one thing this PR CAN do about that risk without
+ * building #660/#663 early: let ProfileForm show the owner real numbers for
+ * a sentinel-carrying draft BEFORE they save it.
  *
- * Read-only (a single COUNT), reuses buildScopeWhereClause — no new query
- * shape, no write. Never called for a scope with neither sentinel (the
- * existing radius+explicit-types case doesn't need this warning).
+ * The owner's LLM access is a Claude Max subscription, not a per-token
+ * bill (D-102/D-103) — so the number that matters is NOT euros, it's
+ * assessment QUEUE TIME: `eligibility.ts`'s `assessmentEligibleClause`
+ * gates purely on `profile_listing_state.matched` under an active profile
+ * (D-052's scheduler drains whatever is matched+pending), so saving a
+ * wide-open profile immediately queues every property it newly matches
+ * that isn't already eligible via some other active profile.
+ * `newly_eligible_count` is exactly that delta — draft-scope matches, minus
+ * whatever is already eligible today — and `projected_days` reuses the
+ * SAME backlog-projection arithmetic `/etl/salud`'s LLM panel uses
+ * (`projectBacklogSeconds`, `loadSchedulerConfig`), so the two numbers can
+ * never drift apart.
+ *
+ * Read-only, reuses buildScopeWhereClause + the shared eligibility
+ * predicates — no new query shape, no write. Never called for a scope with
+ * neither sentinel (the existing radius+explicit-types case doesn't need
+ * this warning).
  *
  * Error codes:
  *   400 — invalid body / scope fails ScopeSchema
@@ -27,6 +40,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { ScopeSchema } from "@/lib/profiles-schema";
 import { buildScopeWhereClause } from "@/lib/filtering/scope-query";
+import {
+  DISABLED_SOURCES_CTE,
+  assessmentEligibleClause,
+  missingCurrentVerdictClause,
+  selectionFlowValues,
+} from "@/lib/ai-assessment/eligibility";
+import { activeSourceClause } from "@/lib/db/source-active";
+import { loadSchedulerConfig } from "@/lib/ai-assessment/scheduler";
+import { projectBacklogSeconds } from "@/lib/llm-health";
 import { sql } from "@/lib/db-write";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -61,11 +83,53 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   try {
     const { whereSql, params } = buildScopeWhereClause(parsed.data);
-    const rows = await sql<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM property WHERE ${whereSql}`,
-      params,
+
+    // Stage 2a alone (readable listing from an ACTIVE source) — the same
+    // fragment assessmentEligibleClause bundles with stage 1, but here it
+    // gates the FILTER independently so "NOT assessmentEligibleClause"
+    // below correctly reduces to "not already matched by an existing
+    // active profile" (stage 2a is already asserted true in this branch).
+    const readableFromActiveSource = `EXISTS (
+        SELECT 1 FROM listing l
+         WHERE l.property_id = property.id
+           AND l.status = 'active'
+           AND COALESCE(TRIM(l.description), '') <> ''
+           AND ${activeSourceClause("l")}
+      )`;
+
+    const { valuesSql, params: flowParams } = selectionFlowValues(params.length + 1);
+    const allParams = [...params, ...flowParams];
+
+    const rows = await sql<{ total_count: number; newly_eligible_count: number }>(
+      `WITH ${DISABLED_SOURCES_CTE}
+       SELECT
+         COUNT(*) AS total_count,
+         COUNT(*) FILTER (
+           WHERE ${readableFromActiveSource}
+             AND ${missingCurrentVerdictClause("property", valuesSql)}
+             AND NOT (${assessmentEligibleClause("property")})
+         ) AS newly_eligible_count
+       FROM property
+       WHERE ${whereSql}`,
+      allParams,
     );
-    return NextResponse.json({ count: rows[0]?.count ?? 0 });
+
+    const totalCount = rows[0]?.total_count ?? 0;
+    const newlyEligibleCount = rows[0]?.newly_eligible_count ?? 0;
+
+    const scheduler = loadSchedulerConfig();
+    const projectedSeconds = projectBacklogSeconds(
+      newlyEligibleCount,
+      scheduler.batchSize,
+      scheduler.intervalSeconds,
+    );
+    const projectedDays = projectedSeconds === null ? null : Math.ceil(projectedSeconds / 86400);
+
+    return NextResponse.json({
+      count: totalCount,
+      newlyEligibleForAssessment: newlyEligibleCount,
+      projectedAssessmentDays: projectedDays,
+    });
   } catch (err) {
     console.error(`[${requestId}] Error al contar candidatos del ámbito:`, err);
     return NextResponse.json(

@@ -144,27 +144,47 @@ export function ProfileForm({
   // Only fetched when a sentinel is actually active; a plain radius+types
   // scope behaves exactly as it did before this issue.
   const [previewCount, setPreviewCount] = useState<number | null>(null);
+  const [previewNewlyEligible, setPreviewNewlyEligible] = useState<number | null>(null);
+  const [previewProjectedDays, setPreviewProjectedDays] = useState<number | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  // Issue #665 review (L2): a failed/non-ok fetch must NOT leave the box
+  // stuck on "Calculando…" forever — that reads as "still working" when it
+  // actually broke. previewError distinguishes "never finished" (a real
+  // failure) from "in flight" (previewLoading) and from "have a number".
+  const [previewError, setPreviewError] = useState(false);
   useEffect(() => {
     if (!isEverywhere && !isAllTypes) {
       setPreviewCount(null);
+      setPreviewNewlyEligible(null);
+      setPreviewProjectedDays(null);
+      setPreviewError(false);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(async () => {
       setPreviewLoading(true);
+      setPreviewError(false);
       try {
         const res = await fetch("/api/profiles/scope-preview", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scope: values.scope }),
         });
-        if (!cancelled && res.ok) {
-          const body = await res.json();
-          setPreviewCount(typeof body.count === "number" ? body.count : null);
+        if (cancelled) return;
+        if (!res.ok) {
+          setPreviewError(true);
+          return;
         }
+        const body = await res.json();
+        setPreviewCount(typeof body.count === "number" ? body.count : null);
+        setPreviewNewlyEligible(
+          typeof body.newlyEligibleForAssessment === "number" ? body.newlyEligibleForAssessment : null,
+        );
+        setPreviewProjectedDays(
+          typeof body.projectedAssessmentDays === "number" ? body.projectedAssessmentDays : null,
+        );
       } catch {
-        // Best-effort — the warning is a courtesy, never a save blocker.
+        if (!cancelled) setPreviewError(true);
       } finally {
         if (!cancelled) setPreviewLoading(false);
       }
@@ -408,7 +428,13 @@ export function ProfileForm({
 
       {/* Issue #659/#663 (guardrail, not built here): visibility, not a
           block — the owner can still save an accidentally huge profile, but
-          he sees the number first. */}
+          he sees the numbers first. #665 review (M1): the owner's LLM
+          access is a Claude Max subscription, not a per-token bill, so the
+          consequence named here is assessment QUEUE TIME (D-052's
+          scheduler drains matched+pending at a fixed rate), never a euro
+          figure. #663 (a per-profile assessment opt-out) is still a
+          separate issue; `dashboard.llm_enabled` (D-105) remains the
+          escape hatch if the queue ever needs to be paused outright. */}
       {(isEverywhere || isAllTypes) && (
         <p
           data-testid="scope-preview-warning"
@@ -422,9 +448,29 @@ export function ProfileForm({
             color: "var(--fg-muted)",
           }}
         >
-          {previewLoading || previewCount === null
-            ? "Calculando cuántos inmuebles coincidirían…"
-            : `Este ámbito coincide ahora mismo con ${previewCount.toLocaleString("es-ES")} inmuebles. Un perfil sin filtros pensado para "novedades" debería limitarse a pocos conectores pequeños — un número muy alto aquí probablemente significa que el ámbito es más amplio de lo que quieres.`}
+          {previewError ? (
+            // L2 fix: a failed/non-ok fetch is reported explicitly, never
+            // left indistinguishable from "still calculating".
+            "No se pudo calcular la vista previa de este ámbito — puedes guardar igualmente, pero no verás el número de inmuebles ni el impacto en la cola de evaluación IA."
+          ) : previewLoading || previewCount === null ? (
+            "Calculando cuántos inmuebles coincidirían…"
+          ) : (
+            <>
+              Este ámbito coincide ahora mismo con {previewCount.toLocaleString("es-ES")} inmuebles.
+              {previewNewlyEligible !== null && (
+                <>
+                  {" "}
+                  De ellos, {previewNewlyEligible.toLocaleString("es-ES")} pasarían a la cola de evaluación por
+                  IA
+                  {previewProjectedDays !== null && previewNewlyEligible > 0
+                    ? ` (≈${previewProjectedDays.toLocaleString("es-ES")} día${previewProjectedDays === 1 ? "" : "s"} al ritmo actual).`
+                    : "."}
+                </>
+              )}{" "}
+              Un perfil sin filtros pensado para &ldquo;novedades&rdquo; debería limitarse a pocos conectores
+              pequeños.
+            </>
+          )}
         </p>
       )}
 

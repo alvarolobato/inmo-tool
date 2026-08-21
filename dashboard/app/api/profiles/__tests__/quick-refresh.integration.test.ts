@@ -26,7 +26,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { POST } from "../route";
 import { PATCH } from "../[id]/route";
-import type { Scope } from "@/lib/profiles-schema";
+import type { RadiusGeography, Scope } from "@/lib/profiles-schema";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   const pool = new Pool(buildPgPoolConfig({ max: 2 }));
@@ -162,7 +162,18 @@ describe.runIf(dbAvailable)("issue #245 — quick refresh on profile save (real 
     // the PATCH enqueues its OWN fresh pending row rather than coalescing.
     await withRealDb((pool) => pool.query("DELETE FROM etl_manual_trigger").then(() => undefined));
 
-    const changed: Scope = { ...VALID_SCOPE, geography: { ...VALID_SCOPE.geography, radius_km: 15 } };
+    // Issue #659: geography is now a discriminated union — spreading it
+    // and merging in radius_km no longer type-checks against either branch
+    // (VALID_SCOPE.geography is statically known to be "radius", so this
+    // just rebuilds that branch explicitly instead of spreading the union).
+    const changed: Scope = {
+      ...VALID_SCOPE,
+      geography: {
+        type: "radius",
+        center: (VALID_SCOPE.geography as RadiusGeography).center,
+        radius_km: 15,
+      },
+    };
     const res = await patchReq(created.id, { name: "Perfil", scope: changed });
     expect(res.status).toBe(200);
     const json = (await res.json()) as RefreshBody;
