@@ -413,6 +413,37 @@ describe("resolveSearchTasks — tier 0 owner-pinned overrides (issue #478)", ()
     expect(t!.overridden).toBe(true);
   });
 
+  // Issue #659/D-147: an "everywhere" profile has no builder-derivable
+  // scope, but an owner-pinned override for a portal WITH a builder (not
+  // just no-builder altamira) is still a valid recall source on its own —
+  // same posture as _override_scopes_for_connector on the ETL side.
+  it("an everywhere profile still resolves an owner override for a portal that HAS a builder", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED)]);
+    const everywhereScope: Scope = {
+      geography: { type: "everywhere" },
+      property_types: "all",
+      hard_exclusions: {},
+    };
+    const tasks = await resolveSearchTasks(everywhereScope, PROFILE_ID);
+    const t = tasks.find((x) => x.portal === "idealista");
+    expect(t).toBeDefined();
+    expect(t!.url).toBe(PINNED);
+    expect(t!.overridden).toBe(true);
+  });
+
+  it("an everywhere profile with no override derives NO tasks for a builder-backed portal", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([]);
+    const everywhereScope: Scope = {
+      geography: { type: "everywhere" },
+      property_types: "all",
+      hard_exclusions: {},
+    };
+    const tasks = await resolveSearchTasks(everywhereScope, PROFILE_ID);
+    expect(tasks.filter((t) => t.portal === "idealista")).toHaveLength(0);
+  });
+
   it("with no override, output is identical to today (snapshot)", async () => {
     withExamples({});
     mockOverrides.mockResolvedValue([]);

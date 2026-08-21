@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   PROPERTY_TYPES,
   PROPERTY_TYPE_LABELS,
+  type RadiusGeography,
   type Scope,
   type ThesisParams,
 } from "@/lib/profiles-schema";
@@ -94,12 +95,112 @@ export function ProfileForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Issue #659: the two "sin filtro" sentinels each need something to
+  // restore when the owner unticks them — a plain toggle straight into
+  // `values.scope` would otherwise throw away the radius/types they had
+  // before flipping to "everywhere"/"all". Remembered here, updated
+  // whenever the form holds a real (non-sentinel) value, so toggling back
+  // and forth is lossless within one editing session.
+  const [lastRadiusGeography, setLastRadiusGeography] = useState<RadiusGeography>(
+    values.scope.geography.type === "radius" ? values.scope.geography : DEFAULT_VALUES.scope.geography as RadiusGeography,
+  );
+  const [lastPropertyTypes, setLastPropertyTypes] = useState<(typeof PROPERTY_TYPES)[number][]>(
+    values.scope.property_types !== "all" && values.scope.property_types.length > 0
+      ? values.scope.property_types
+      : (DEFAULT_VALUES.scope.property_types as (typeof PROPERTY_TYPES)[number][]),
+  );
+  useEffect(() => {
+    if (values.scope.geography.type === "radius") setLastRadiusGeography(values.scope.geography);
+  }, [values.scope.geography]);
+  useEffect(() => {
+    if (values.scope.property_types !== "all" && values.scope.property_types.length > 0) {
+      setLastPropertyTypes(values.scope.property_types);
+    }
+  }, [values.scope.property_types]);
+
+  const isEverywhere = values.scope.geography.type === "everywhere";
+  const isAllTypes = values.scope.property_types === "all";
+
+  const setEverywhere = (everywhere: boolean) => {
+    setValues((v) => ({
+      ...v,
+      scope: {
+        ...v.scope,
+        geography: everywhere ? { type: "everywhere" } : lastRadiusGeography,
+      },
+    }));
+  };
+
+  const setAllTypes = (all: boolean) => {
+    setValues((v) => ({
+      ...v,
+      scope: { ...v.scope, property_types: all ? "all" : lastPropertyTypes },
+    }));
+  };
+
+  // Issue #659/#663 (not built here): a warning line, not a block — the
+  // owner can still create a full-pool profile if he chooses to, but he
+  // should not be able to do it BY ACCIDENT without seeing the scale first.
+  // Only fetched when a sentinel is actually active; a plain radius+types
+  // scope behaves exactly as it did before this issue.
+  const [previewCount, setPreviewCount] = useState<number | null>(null);
+  const [previewNewlyEligible, setPreviewNewlyEligible] = useState<number | null>(null);
+  const [previewProjectedDays, setPreviewProjectedDays] = useState<number | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  // Issue #665 review (L2): a failed/non-ok fetch must NOT leave the box
+  // stuck on "Calculando…" forever — that reads as "still working" when it
+  // actually broke. previewError distinguishes "never finished" (a real
+  // failure) from "in flight" (previewLoading) and from "have a number".
+  const [previewError, setPreviewError] = useState(false);
+  useEffect(() => {
+    if (!isEverywhere && !isAllTypes) {
+      setPreviewCount(null);
+      setPreviewNewlyEligible(null);
+      setPreviewProjectedDays(null);
+      setPreviewError(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setPreviewLoading(true);
+      setPreviewError(false);
+      try {
+        const res = await fetch("/api/profiles/scope-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: values.scope }),
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          setPreviewError(true);
+          return;
+        }
+        const body = await res.json();
+        setPreviewCount(typeof body.count === "number" ? body.count : null);
+        setPreviewNewlyEligible(
+          typeof body.newlyEligibleForAssessment === "number" ? body.newlyEligibleForAssessment : null,
+        );
+        setPreviewProjectedDays(
+          typeof body.projectedAssessmentDays === "number" ? body.projectedAssessmentDays : null,
+        );
+      } catch {
+        if (!cancelled) setPreviewError(true);
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEverywhere, isAllTypes, JSON.stringify(values.scope)]);
+
   const togglePropertyType = (pt: (typeof PROPERTY_TYPES)[number]) => {
     setValues((v) => {
-      const has = v.scope.property_types.includes(pt);
-      const property_types = has
-        ? v.scope.property_types.filter((t) => t !== pt)
-        : [...v.scope.property_types, pt];
+      const current = v.scope.property_types === "all" ? [] : v.scope.property_types;
+      const has = current.includes(pt);
+      const property_types = has ? current.filter((t) => t !== pt) : [...current, pt];
       return { ...v, scope: { ...v.scope, property_types } };
     });
   };
@@ -107,8 +208,8 @@ export function ProfileForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (values.scope.property_types.length === 0) {
-      setError("Selecciona al menos un tipo de inmueble.");
+    if (values.scope.property_types !== "all" && values.scope.property_types.length === 0) {
+      setError("Selecciona al menos un tipo de inmueble, o marca «Todos los tipos».");
       return;
     }
     setSubmitting(true);
@@ -225,33 +326,82 @@ export function ProfileForm({
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Zona (radio desde un punto)</legend>
-        <div style={{ marginTop: 6 }}>
-          <LocationPicker
-            value={{
-              center: values.scope.geography.center,
-              radiusKm: values.scope.geography.radius_km,
-            }}
-            onChange={({ center, radiusKm }) =>
-              setValues((v) => ({
-                ...v,
-                scope: {
-                  ...v.scope,
-                  geography: {
-                    ...v.scope.geography,
-                    center,
-                    radius_km: radiusKm,
-                  },
-                },
-              }))
-            }
+        {/* Issue #659: the "everywhere" STATED sentinel — not an absent
+            field. D-013 still holds: a scope that never mentions geography
+            fails to save; this checkbox is what writes the explicit
+            {type:"everywhere"} value instead. */}
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 13,
+            color: "var(--fg)",
+            marginTop: 6,
+          }}
+        >
+          <input
+            type="checkbox"
+            data-testid="scope-everywhere-toggle"
+            checked={isEverywhere}
+            onChange={(e) => setEverywhere(e.target.checked)}
           />
-        </div>
+          Sin filtro geográfico (todo el territorio)
+        </label>
+        {isEverywhere ? (
+          <p
+            data-testid="scope-everywhere-note"
+            style={{ margin: "6px 0 0", fontSize: 12, color: "var(--fg-subtle)" }}
+          >
+            Este perfil buscará candidatos en toda la base de datos, incluidos inmuebles sin coordenadas
+            geocodificadas. Pensado para un perfil de &ldquo;novedades&rdquo; con muy pocos conectores — no para el catálogo
+            completo (ver aviso más abajo).
+          </p>
+        ) : (
+          <div style={{ marginTop: 6 }}>
+            <LocationPicker
+              value={{
+                center: values.scope.geography.type === "radius" ? values.scope.geography.center : lastRadiusGeography.center,
+                radiusKm: values.scope.geography.type === "radius" ? values.scope.geography.radius_km : lastRadiusGeography.radius_km,
+              }}
+              onChange={({ center, radiusKm }) =>
+                setValues((v) => ({
+                  ...v,
+                  scope: {
+                    ...v.scope,
+                    geography: { type: "radius", center, radius_km: radiusKm },
+                  },
+                }))
+              }
+            />
+          </div>
+        )}
       </fieldset>
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Tipo de inmueble</legend>
+        {/* Issue #659: the "all" STATED sentinel — same posture as
+            "everywhere" above, never an absent/optional field. */}
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 13,
+            color: "var(--fg)",
+            marginTop: 6,
+          }}
+        >
+          <input
+            type="checkbox"
+            data-testid="scope-all-types-toggle"
+            checked={isAllTypes}
+            onChange={(e) => setAllTypes(e.target.checked)}
+          />
+          Todos los tipos
+        </label>
         <div
-          style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 10 }}
+          style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 10 }}
         >
           {PROPERTY_TYPES.map((pt) => (
             <label
@@ -261,12 +411,13 @@ export function ProfileForm({
                 alignItems: "center",
                 gap: 5,
                 fontSize: 13,
-                color: "var(--fg)",
+                color: isAllTypes ? "var(--fg-subtle)" : "var(--fg)",
               }}
             >
               <input
                 type="checkbox"
-                checked={values.scope.property_types.includes(pt)}
+                disabled={isAllTypes}
+                checked={isAllTypes || (Array.isArray(values.scope.property_types) && values.scope.property_types.includes(pt))}
                 onChange={() => togglePropertyType(pt)}
               />
               {PROPERTY_TYPE_LABELS[pt]}
@@ -274,6 +425,54 @@ export function ProfileForm({
           ))}
         </div>
       </fieldset>
+
+      {/* Issue #659/#663 (guardrail, not built here): visibility, not a
+          block — the owner can still save an accidentally huge profile, but
+          he sees the numbers first. #665 review (M1): the owner's LLM
+          access is a Claude Max subscription, not a per-token bill, so the
+          consequence named here is assessment QUEUE TIME (D-052's
+          scheduler drains matched+pending at a fixed rate), never a euro
+          figure. #663 (a per-profile assessment opt-out) is still a
+          separate issue; `dashboard.llm_enabled` (D-105) remains the
+          escape hatch if the queue ever needs to be paused outright. */}
+      {(isEverywhere || isAllTypes) && (
+        <p
+          data-testid="scope-preview-warning"
+          style={{
+            margin: 0,
+            padding: "8px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            fontSize: 12,
+            color: "var(--fg-muted)",
+          }}
+        >
+          {previewError ? (
+            // L2 fix: a failed/non-ok fetch is reported explicitly, never
+            // left indistinguishable from "still calculating".
+            "No se pudo calcular la vista previa de este ámbito — puedes guardar igualmente, pero no verás el número de inmuebles ni el impacto en la cola de evaluación IA."
+          ) : previewLoading || previewCount === null ? (
+            "Calculando cuántos inmuebles coincidirían…"
+          ) : (
+            <>
+              Este ámbito coincide ahora mismo con {previewCount.toLocaleString("es-ES")} inmuebles.
+              {previewNewlyEligible !== null && (
+                <>
+                  {" "}
+                  De ellos, {previewNewlyEligible.toLocaleString("es-ES")} pasarían a la cola de evaluación por
+                  IA
+                  {previewProjectedDays !== null && previewNewlyEligible > 0
+                    ? ` (≈${previewProjectedDays.toLocaleString("es-ES")} día${previewProjectedDays === 1 ? "" : "s"} al ritmo actual).`
+                    : "."}
+                </>
+              )}{" "}
+              Un perfil sin filtros pensado para &ldquo;novedades&rdquo; debería limitarse a pocos conectores
+              pequeños.
+            </>
+          )}
+        </p>
+      )}
 
       <div style={rowStyle}>
         <div style={colStyle}>

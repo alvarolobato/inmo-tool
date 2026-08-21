@@ -19,4 +19,6 @@ order: 11
 
 **Rationale**: A loud INSERT-time failure is strictly better than a quiet, permanent disappearance from the UI. This also pairs with #113's broader fix: `lib/db/profiles.ts` now exposes a discriminated `ProfileListEntry` shape (`{ok:true, profile}` / `{ok:false, id, name, issues}`) so any *existing* malformed row (from before this migration, or from a future bug) is still visible to callers that want to surface it, rather than being unconditionally filtered — see `docs/architecture/data-model.md` and the Perfiles overview query (issue #192).
 
-**See**: Issue #113, issue #176 (Perfiles redesign design doc), `dashboard/lib/db/profiles.ts`, `etl/schema/init.sql`.
+**Extended by D-147** (2026-08-21, issue #659): this decision's guarantee — a scope that omits `geography`/`property_types` fails to parse, always — is unchanged and still enforced exactly as described above. What changed is that "no filter at all" became expressible *without* omitting anything: `geography` gained a `{type:"everywhere"}` sentinel value and `property_types` gained an `"all"` sentinel value, both stated, both required to be written explicitly like every other scope field. The "no schema-valid empty scope" rejection above still holds for a genuinely absent field — it's just no longer the only way to mean "no filter". See D-147 for the full mechanics (query-builder, diagnostics, search-url, ETL consumer changes).
+
+**See**: Issue #113, issue #176 (Perfiles redesign design doc), `dashboard/lib/db/profiles.ts`, `etl/schema/init.sql`, D-147 (extension, issue #659).

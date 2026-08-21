@@ -66,7 +66,10 @@ describe("profile templates", () => {
     const t = findTemplate("buy-to-let")!;
     const values = templateToFormValues(t);
     expect(values.name).toBe(t.label);
-    values.scope.property_types.push("chalet");
+    // Issue #659: property_types is now "all" | PropertyType[] — no
+    // template ever defaults to "all", so this cast just recovers what
+    // direct array access could no longer narrow on its own.
+    (values.scope.property_types as string[]).push("chalet");
     (values.thesis_params as { target_yield_pct?: number }).target_yield_pct =
       99;
     // Registry object untouched.

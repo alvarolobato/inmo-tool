@@ -192,3 +192,75 @@ describe("buildScopeWhereClause", () => {
     );
   });
 });
+
+/**
+ * Issue #659/D-147: the unfiltered-scope sentinels. Four combinations —
+ * radius+list (already covered above), everywhere+list, radius+all,
+ * everywhere+all — each asserted on ACTUAL SQL-shape behaviour, not just
+ * that the sentinel parses (the decorative trap the issue explicitly warns
+ * against): the unconditional active-SALE EXISTS must survive every
+ * combination (D-016), the haversine/lat-lon clause must be ABSENT for
+ * "everywhere", and the ANY(...) type clause must be ABSENT for "all" —
+ * never bound as NULL.
+ */
+describe("buildScopeWhereClause — unfiltered sentinels (issue #659)", () => {
+  const SALE_EXISTS =
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')";
+
+  it("everywhere + explicit types: no haversine/lat-lon clause, sale EXISTS survives, ANY(...) type clause present", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({ geography: { type: "everywhere" }, property_types: ["piso"] }),
+    );
+    expect(whereSql).not.toContain("property.lat");
+    expect(whereSql).not.toContain("property.lon");
+    expect(whereSql).not.toMatch(/acos/);
+    expect(whereSql).toContain(SALE_EXISTS);
+    expect(whereSql).toContain("property.property_type = ANY(");
+    expect(params).toEqual([["piso"]]);
+  });
+
+  it("radius + 'all' types: haversine clause present, sale EXISTS survives, NO ANY(...) clause, no NULL bound", () => {
+    const { whereSql, params } = buildScopeWhereClause(baseScope({ property_types: "all" }));
+    expect(whereSql).toContain("property.lat IS NOT NULL AND property.lon IS NOT NULL");
+    expect(whereSql).toContain(SALE_EXISTS);
+    expect(whereSql).not.toContain("property.property_type = ANY(");
+    // Only the 3 geography params (lat, lon, radius) — never a 4th
+    // undefined/null property_types bind.
+    expect(params).toEqual([40.4168, -3.7038, 5]);
+    expect(params).not.toContain(undefined);
+    expect(params).not.toContain(null);
+  });
+
+  it("everywhere + 'all': ONLY the unconditional sale EXISTS — no geography clause, no type clause, no params at all", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({ geography: { type: "everywhere" }, property_types: "all" }),
+    );
+    expect(whereSql).toBe(SALE_EXISTS);
+    expect(params).toEqual([]);
+  });
+
+  it("everywhere geography never throws (only a truly unrecognised type does)", () => {
+    expect(() =>
+      buildScopeWhereClause(baseScope({ geography: { type: "everywhere" } })),
+    ).not.toThrow();
+  });
+
+  it("price/size/exclusions stages still compose correctly on top of an everywhere+all base", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({
+        geography: { type: "everywhere" },
+        property_types: "all",
+        price_max: 200000,
+        hard_exclusions: { requires_elevator: true },
+      }),
+    );
+    expect(whereSql).toContain(SALE_EXISTS);
+    expect(whereSql).toContain("<= $" + params.length); // price_max is the last param
+    expect(whereSql).toContain("IS NOT FALSE"); // requires_elevator
+    // Every placeholder still maps 1:1 to a param — no gaps introduced by
+    // omitting the geography/type clauses.
+    const placeholders = [...whereSql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+    expect(new Set(placeholders).size).toBe(params.length);
+    expect(Math.max(...placeholders)).toBe(params.length);
+  });
+});

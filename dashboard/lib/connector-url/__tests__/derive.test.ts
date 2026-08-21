@@ -84,4 +84,12 @@ describe("deriveGrammarPreview", () => {
   it("returns null when the grammar has no profile-sourced param to fill", () => {
     expect(deriveGrammarPreview(NO_PROFILE_PARAM_GRAMMAR, MALAGA_SCOPE)).toBeNull();
   });
+
+  // Issue #659/D-147: an "everywhere" geography has no center to resolve a
+  // province slug from — must fall back to the honest "pending" null, never
+  // crash on `.center`.
+  it("returns null (not a crash) for an everywhere geography", () => {
+    const everywhereScope: Scope = { geography: { type: "everywhere" }, property_types: "all" };
+    expect(deriveGrammarPreview(SIMPLE_GRAMMAR, everywhereScope)).toBeNull();
+  });
 });

@@ -64,10 +64,17 @@ export type ZeroCandidateDiagnosis =
   | { kind: "never_materialized" }
   | {
       kind: "geography_empty";
-      radiusKm: number;
+      // Issue #659/D-147: `radiusKm`/`areaCoverage` are meaningless for an
+      // "everywhere" scope (there is no center to measure distance/coverage
+      // from) — null for that case rather than a fabricated radius or a
+      // fabricated coverage claim. `nearest` stays null too (nothing to
+      // compute nearest-to), which the UI already renders as "no active
+      // listing in the whole database yet" — the exactly correct message
+      // for an unfiltered profile's zero-candidate case.
+      radiusKm: number | null;
       nearest: NearestPropertyResult | null;
       connectorLastRunFinishedAt: string | null;
-      areaCoverage: AreaCoverage;
+      areaCoverage: AreaCoverage | null;
     }
   | { kind: "type_empty"; geographyCount: number; propertyTypes: string[] }
   | {

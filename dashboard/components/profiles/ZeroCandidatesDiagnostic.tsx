@@ -155,7 +155,14 @@ export function ZeroCandidatesDiagnostic({
 
       {diagnosis.kind === "geography_empty" && (
         <>
-          {diagnosis.nearest === null ? (
+          {diagnosis.radiusKm === null ? (
+            // Issue #659: "everywhere" scope — there is no center/radius to
+            // report a distance against. Zero here means no property in the
+            // whole pool has an active sale listing.
+            <p style={{ margin: 0 }}>
+              No hay ningún inmueble con anuncio de venta activo en toda la base de datos todavía.
+            </p>
+          ) : diagnosis.nearest === null ? (
             <p style={{ margin: 0 }}>
               No hay ningún inmueble con anuncio activo en toda la base de datos todavía.
             </p>
@@ -177,14 +184,14 @@ export function ZeroCandidatesDiagnostic({
               (see `_MUNICIPAL_COVERAGE_RADIUS_KM`), so a perfectly covered
               area lands here for a run or two — and the correct advice then
               is "wait one run", the opposite of what was shown. */}
-          {diagnosis.areaCoverage.kind === "never_crawled" && (
+          {diagnosis.areaCoverage?.kind === "never_crawled" && (
             <p style={{ margin: "4px 0 0" }}>
               No hay constancia de que se haya rastreado esta zona todavía. Si acabas de crear el perfil, puede
               aparecer tras una de las próximas ejecuciones; si sigue igual, probablemente falte cobertura para
               esta zona.
             </p>
           )}
-          {diagnosis.areaCoverage.kind === "awaiting_turn" && (
+          {diagnosis.areaCoverage?.kind === "awaiting_turn" && (
             <p style={{ margin: "4px 0 0" }}>
               Esta zona sí está cubierta ({diagnosis.areaCoverage.connectorNames.join(", ")}), pero todavía no le
               ha tocado el turno de rastreo. Debería rastrearse en una de las próximas ejecuciones.
@@ -194,15 +201,18 @@ export function ZeroCandidatesDiagnostic({
               scope must never render as "se rastreó el <fecha>" — nothing
               was ever retrieved, so "no hay resultados" says nothing about
               real inventory. */}
-          {diagnosis.areaCoverage.kind === "attempted_never_succeeded" && (
+          {diagnosis.areaCoverage?.kind === "attempted_never_succeeded" && (
             <p style={{ margin: "4px 0 0" }}>
               Se ha intentado rastrear esta zona ({diagnosis.areaCoverage.connectorNames.join(", ")}), la última
               vez el {new Date(diagnosis.areaCoverage.lastAttemptedAt).toLocaleString("es-ES")}, pero ningún
               rastreo ha llegado a completarse. La falta de resultados no significa que no haya inmuebles.
             </p>
           )}
+          {/* Issue #659: areaCoverage is null for an "everywhere" scope (no
+              single area to report coverage for) — falls straight to the
+              plain connector-recency line instead of a fabricated claim. */}
           <p style={{ margin: "4px 0 0", color: "var(--fg-subtle)" }}>
-            {diagnosis.areaCoverage.kind === "crawled"
+            {diagnosis.areaCoverage?.kind === "crawled"
               ? `Esta zona se rastreó por última vez el ${new Date(diagnosis.areaCoverage.lastCrawledAt).toLocaleString("es-ES")}.`
               : diagnosis.connectorLastRunFinishedAt === null
                 ? "Ningún conector ha completado una ejecución todavía."

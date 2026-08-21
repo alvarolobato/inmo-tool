@@ -16,9 +16,11 @@ import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
 import { Modal } from "@/components/Modal";
 import { NovedadesStrip } from "@/components/profiles/NovedadesStrip";
 import { RefreshIndicator } from "@/components/profiles/RefreshIndicator";
-import type {
-  ProfileRefreshResult,
-  SearchProfileRow,
+import {
+  formatGeographyLabel,
+  formatPropertyTypesLabel,
+  type ProfileRefreshResult,
+  type SearchProfileRow,
 } from "@/lib/profiles-schema";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
@@ -94,8 +96,8 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
         <p
           style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}
         >
-          {profile.scope.property_types.join(", ")} · radio{" "}
-          {profile.scope.geography.radius_km} km
+          {formatPropertyTypesLabel(profile.scope.property_types)} ·{" "}
+          {formatGeographyLabel(profile.scope.geography)}
         </p>
         <p
           data-testid="profile-degraded-note"

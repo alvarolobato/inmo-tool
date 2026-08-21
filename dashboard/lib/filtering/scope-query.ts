@@ -181,32 +181,47 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  // --- Geography (radius-from-point; polygon not yet supported, see
-  // docs/architecture/data-model.md "Deliberately deferred") + the
-  // unconditional active-listing requirement, as ONE stage: a property with
-  // no currently-active listing must never count as a candidate regardless
-  // of geography alone, so "geography-only" (issue #194 §2a) already means
-  // "geography AND has an active listing", not geography in isolation. ---
-  if (scope.geography.type !== "radius") {
-    // ScopeSchema only defines "radius" today (z.literal("radius")), so this
-    // branch is unreachable through validated input — guarded here anyway so
-    // a future geography type doesn't silently fall through with no filter
-    // at all (which would match every property in the country).
-    throw new Error("Unsupported geography type: " + (scope.geography as { type: string }).type);
+  // --- Geography (radius-from-point, or the "everywhere" sentinel — issue
+  // #659/D-147; polygon not yet supported, see docs/architecture/data-model.md
+  // "Deliberately deferred") + the unconditional active-listing requirement,
+  // as ONE stage: a property with no currently-active listing must never
+  // count as a candidate regardless of geography alone, so "geography-only"
+  // (issue #194 §2a) already means "geography AND has an active listing",
+  // not geography in isolation. ---
+  if (scope.geography.type === "radius") {
+    const [lat, lon] = scope.geography.center;
+    params.push(lat);
+    const latPh = ph(params.length);
+    params.push(lon);
+    const lonPh = ph(params.length);
+    params.push(scope.geography.radius_km);
+    const radiusPh = ph(params.length);
+    conditions.push(
+      "property.lat IS NOT NULL AND property.lon IS NOT NULL AND " +
+        haversineKm(latPh, lonPh) +
+        " <= " +
+        radiusPh,
+    );
+  } else if (scope.geography.type === "everywhere") {
+    // Issue #659/D-147: "everywhere" drops the radius/haversine condition
+    // entirely — no lat/lon params, no NOT NULL requirement. This is a
+    // deliberate recall gain, not an oversight: today's radius clause
+    // implies `lat/lon IS NOT NULL`, so every un-geocoded property (695 in
+    // production at design time) is invisible to every radius profile. An
+    // "everywhere" profile is the first thing that can ever match them. The
+    // unconditional active-SALE EXISTS below still applies unconditionally
+    // — dropping the radius clause must never also drop that gate.
+  } else {
+    // Exhaustiveness guard: ScopeSchema only defines "radius"/"everywhere"
+    // (a discriminated union) today, so this branch is unreachable through
+    // validated input — guarded here anyway so a future geography type
+    // doesn't silently fall through with no filter at all (which would
+    // match every property in the country as an unintended side effect,
+    // rather than "everywhere" being the one deliberate way to do that).
+    throw new Error(
+      "Unsupported geography type: " + (scope.geography as { type: string }).type,
+    );
   }
-  const [lat, lon] = scope.geography.center;
-  params.push(lat);
-  const latPh = ph(params.length);
-  params.push(lon);
-  const lonPh = ph(params.length);
-  params.push(scope.geography.radius_km);
-  const radiusPh = ph(params.length);
-  conditions.push(
-    "property.lat IS NOT NULL AND property.lon IS NOT NULL AND " +
-      haversineKm(latPh, lonPh) +
-      " <= " +
-      radiusPh,
-  );
   // A property with no currently-active listing (sold, withdrawn, expired —
   // or every listing simply removed) must never materialize as a live
   // candidate, independent of whether a price band is set. This used to
@@ -236,9 +251,16 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   );
   stages.push({ key: "geography", whereSql: conditions.join(" AND "), params: [...params] });
 
-  // --- Property type(s) ---
-  params.push(scope.property_types);
-  conditions.push("property.property_type = ANY(" + ph(params.length) + "::text[])");
+  // --- Property type(s). "all" (issue #659/D-147) omits the condition
+  // entirely — never bind `undefined`/NULL into ANY($n::text[]), which
+  // Postgres evaluates to zero rows (the exact silent-zero-matches failure
+  // D-013 exists to prevent). A missing/absent property_types is rejected
+  // at parse time (ScopeSchema); by the time a Scope reaches here it is
+  // always either "all" or a real, non-empty array. ---
+  if (scope.property_types !== "all") {
+    params.push(scope.property_types);
+    conditions.push("property.property_type = ANY(" + ph(params.length) + "::text[])");
+  }
   stages.push({ key: "type", whereSql: conditions.join(" AND "), params: [...params] });
 
   // --- Size band (m2_built specifically, not m2_useful — see data-model.md)

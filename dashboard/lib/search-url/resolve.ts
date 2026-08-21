@@ -244,9 +244,15 @@ export async function resolveSearchTasks(scope: Scope, profileId: number): Promi
   });
   for (const { portal } of CAPTURE_PORTALS) {
     const builder = BUILDERS[portal];
-    if (!builder) {
-      // No builder (altamira): the portal has no derived URL, but an owner
-      // override can still give it one — synthesize a task per override.
+    // Issue #659/D-147: `canonical` is null for an "everywhere" geography
+    // (canonicalScopeFromProfile — no center for a builder's grammar to
+    // work from). Same posture as "no builder": no DERIVED URL, but an
+    // owner-pinned override still stands on its own (D-101's pin is a
+    // valid recall source regardless of geography, mirroring the ETL's
+    // `_override_scopes_for_connector`).
+    if (!builder || !canonical) {
+      // No builder (altamira), or no derivable scope: synthesize a task
+      // per owner override only.
       for (const o of overrides.filter((x) => x.connector === portal)) {
         out.push(withCaptureUrl(synthesizeOverrideTask(o)));
       }

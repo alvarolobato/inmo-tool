@@ -83,43 +83,50 @@ export function decodeFilterUrl(portal: string, url: string, scope: Scope): Deco
     chips.push(`Superficie: ${range(f.sizeMin, f.sizeMax, m2)}`);
   }
 
+  // Issue #659/D-147: canonicalScopeFromProfile returns null for an
+  // "everywhere" geography (no center a portal URL's bounds could be
+  // compared against) — skip the scope-mismatch comparison entirely rather
+  // than dereferencing a null `c`. Chips (decoded straight from the URL,
+  // above) still render; there's just nothing scope-side to compare them to.
   const c = canonicalScopeFromProfile(scope);
   const warnings: string[] = [];
-  const compareBound = (
-    scopeVal: number | undefined,
-    urlVal: number | undefined,
-    unfilteredMsg: string,
-    differsMsg: (u: number) => string,
-  ) => {
-    if (scopeVal === undefined) return;
-    if (urlVal === undefined) warnings.push(unfilteredMsg);
-    else if (urlVal !== scopeVal) warnings.push(differsMsg(urlVal));
-  };
+  if (c) {
+    const compareBound = (
+      scopeVal: number | undefined,
+      urlVal: number | undefined,
+      unfilteredMsg: string,
+      differsMsg: (u: number) => string,
+    ) => {
+      if (scopeVal === undefined) return;
+      if (urlVal === undefined) warnings.push(unfilteredMsg);
+      else if (urlVal !== scopeVal) warnings.push(differsMsg(urlVal));
+    };
 
-  compareBound(
-    c.priceMax,
-    f.priceMax,
-    `El perfil pide ≤${eur(c.priceMax as number)} pero la URL no filtra por precio máximo; los resultados serán más amplios.`,
-    (u) => `El perfil pide ≤${eur(c.priceMax as number)} pero la URL filtra ≤${eur(u)}.`,
-  );
-  compareBound(
-    c.priceMin,
-    f.priceMin,
-    `El perfil pide ≥${eur(c.priceMin as number)} pero la URL no filtra por precio mínimo.`,
-    (u) => `El perfil pide ≥${eur(c.priceMin as number)} pero la URL filtra ≥${eur(u)}.`,
-  );
-  compareBound(
-    c.sizeMax,
-    f.sizeMax,
-    `El perfil pide ≤${m2(c.sizeMax as number)} pero la URL no filtra por superficie máxima.`,
-    (u) => `El perfil pide ≤${m2(c.sizeMax as number)} pero la URL filtra ≤${m2(u)}.`,
-  );
-  compareBound(
-    c.sizeMin,
-    f.sizeMin,
-    `El perfil pide ≥${m2(c.sizeMin as number)} pero la URL no filtra por superficie mínima.`,
-    (u) => `El perfil pide ≥${m2(c.sizeMin as number)} pero la URL filtra ≥${m2(u)}.`,
-  );
+    compareBound(
+      c.priceMax,
+      f.priceMax,
+      `El perfil pide ≤${eur(c.priceMax as number)} pero la URL no filtra por precio máximo; los resultados serán más amplios.`,
+      (u) => `El perfil pide ≤${eur(c.priceMax as number)} pero la URL filtra ≤${eur(u)}.`,
+    );
+    compareBound(
+      c.priceMin,
+      f.priceMin,
+      `El perfil pide ≥${eur(c.priceMin as number)} pero la URL no filtra por precio mínimo.`,
+      (u) => `El perfil pide ≥${eur(c.priceMin as number)} pero la URL filtra ≥${eur(u)}.`,
+    );
+    compareBound(
+      c.sizeMax,
+      f.sizeMax,
+      `El perfil pide ≤${m2(c.sizeMax as number)} pero la URL no filtra por superficie máxima.`,
+      (u) => `El perfil pide ≤${m2(c.sizeMax as number)} pero la URL filtra ≤${m2(u)}.`,
+    );
+    compareBound(
+      c.sizeMin,
+      f.sizeMin,
+      `El perfil pide ≥${m2(c.sizeMin as number)} pero la URL no filtra por superficie mínima.`,
+      (u) => `El perfil pide ≥${m2(c.sizeMin as number)} pero la URL filtra ≥${m2(u)}.`,
+    );
+  }
 
   return { unparseable: false, chips, warnings, sectionKey: parsed.categoryKey };
 }

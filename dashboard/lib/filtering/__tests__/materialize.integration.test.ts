@@ -120,8 +120,11 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
   async function insertProperty(
     pool: Pool,
     overrides: Partial<{
-      lat: number;
-      lon: number;
+      // Issue #659: null is a real case here — an un-geocoded property, the
+      // one an "everywhere" scope is the first thing able to match (a
+      // radius scope's haversine clause implies lat/lon IS NOT NULL).
+      lat: number | null;
+      lon: number | null;
       property_type: string;
       m2_built: number;
     }> = {},
@@ -420,4 +423,78 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       expect(rows[0].rank_explanation).not.toBe(COLD_START_EXPLANATION);
     });
   }, 20000);
+
+  // Issue #659/D-147 — EC-1/EC-3: an "everywhere"/"all" scope must
+  // materialize, and it must match a property that a radius scope
+  // structurally CANNOT (no coordinates at all — the radius clause implies
+  // lat/lon IS NOT NULL). This is the actual behavioural proof the issue
+  // asks for, not just "the sentinel parses".
+  it("everywhere + all scope materializes an un-geocoded property that no radius scope could ever match", async () => {
+    await withRealDb(async (pool) => {
+      const geocodedId = await insertProperty(pool, { lat: MADRID_SOL[0], lon: MADRID_SOL[1] });
+      await insertListing(pool, geocodedId);
+
+      const ungeocodedId = await insertProperty(pool, { lat: null, lon: null, property_type: "local" });
+      await insertListing(pool, ungeocodedId);
+
+      // Control: the SAME un-geocoded property is invisible to an ordinary
+      // radius profile — proves this isn't a pre-existing capability, it's
+      // the recall gain the issue names explicitly.
+      const radiusProfileId = await makeProfile({
+        geography: { type: "radius", center: MADRID_SOL, radius_km: 50 },
+        property_types: "all",
+        hard_exclusions: {},
+      });
+      await materializeProfile(radiusProfileId);
+      const radiusMatches = (await matchedRows(pool, radiusProfileId)).map((r) => r.property_id);
+      expect(radiusMatches).toContain(geocodedId);
+      expect(radiusMatches).not.toContain(ungeocodedId);
+
+      const everywhereProfileId = await makeProfile({
+        geography: { type: "everywhere" },
+        property_types: "all",
+        hard_exclusions: {},
+      });
+      await materializeProfile(everywhereProfileId);
+      const everywhereMatches = (await matchedRows(pool, everywhereProfileId)).map((r) => r.property_id);
+      expect(everywhereMatches).toContain(geocodedId);
+      expect(everywhereMatches).toContain(ungeocodedId); // EC-1/EC-3: the recall gain
+    });
+  });
+
+  it("everywhere scope with an EXPLICIT type list still excludes the wrong type (only property_types:'all' matches everything)", async () => {
+    await withRealDb(async (pool) => {
+      const pisoId = await insertProperty(pool, { property_type: "piso" });
+      await insertListing(pool, pisoId);
+      const localId = await insertProperty(pool, { property_type: "local" });
+      await insertListing(pool, localId);
+
+      const profileId = await makeProfile({
+        geography: { type: "everywhere" },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      });
+      await materializeProfile(profileId);
+      const matches = (await matchedRows(pool, profileId)).map((r) => r.property_id);
+      expect(matches).toContain(pisoId);
+      expect(matches).not.toContain(localId);
+    });
+  });
+
+  it("a profile with no active sale listing anywhere never materializes as a candidate, even with everywhere+all (D-016 survives)", async () => {
+    await withRealDb(async (pool) => {
+      // A rental-only property: an active listing exists, but operation='rent'.
+      const rentalOnlyId = await insertProperty(pool);
+      await insertListing(pool, rentalOnlyId, { operation: "rent" });
+
+      const profileId = await makeProfile({
+        geography: { type: "everywhere" },
+        property_types: "all",
+        hard_exclusions: {},
+      });
+      await materializeProfile(profileId);
+      const matches = (await matchedRows(pool, profileId)).map((r) => r.property_id);
+      expect(matches).not.toContain(rentalOnlyId);
+    });
+  });
 });
