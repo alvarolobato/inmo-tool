@@ -747,15 +747,19 @@ def _process_one(
     )
 
     # Issue #547 / Opus review (PR #548, C3): a connector whose selectors are
-    # not yet calibrated (raw_extra.selectors_calibrated is False — Hipoges
-    # today) writes an honest near-empty row, but normalize() never raises,
-    # so every one of its captures would otherwise reach 'done' with `html`
-    # discarded — making it IMPOSSIBLE to later pull the real captured DOM
-    # back out of the DB to build the real fixtures #547 needs. Retain the
-    # HTML for exactly that case; every OTHER (calibrated) connector keeps
-    # the pre-existing behaviour of dropping it once processed, since there
-    # is no reason to hold onto a full page capture once its fields have
-    # actually been trusted and extracted.
+    # not yet calibrated (raw_extra.selectors_calibrated is False) writes an
+    # honest near-empty row, but normalize() never raises, so every one of
+    # its captures would otherwise reach 'done' with `html` discarded —
+    # making it IMPOSSIBLE to later pull the real captured DOM back out of
+    # the DB to build real fixtures against. Retain the HTML for exactly
+    # that case; every OTHER (calibrated) connector keeps the pre-existing
+    # behaviour of dropping it once processed, since there is no reason to
+    # hold onto a full page capture once its fields have actually been
+    # trusted and extracted. Hipoges used this mechanism to bootstrap its
+    # own real fixture (issue #547, D-146) and is now calibrated — HTML
+    # retention for it turns off automatically the moment its
+    # `_SELECTORS_CALIBRATED` flag flips `raw_extra["selectors_calibrated"]`
+    # to True, no code change needed here.
     retain_html = canonical.raw_extra.get("selectors_calibrated") is False
     retained_html = html if retain_html else None
 

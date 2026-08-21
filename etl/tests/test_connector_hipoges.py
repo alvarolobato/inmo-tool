@@ -1,28 +1,28 @@
-"""Unit tests for the Hipoges capture connector (issue #207, D-111).
+"""Unit tests for the Hipoges capture connector (issue #207/#547, D-111/D-146).
 
-UNLIKE test_connector_altamira.py / test_connector_aliseda.py, `normalize()`
-here is exercised against a SYNTHETIC, entirely fabricated fixture
-(etl/tests/fixtures/hipoges_detail_SYNTHETIC.html) — no real Hipoges capture
-exists yet (D-075's walled enumeration + the Angular-shell chicken-and-egg
-problem D-111 records). These tests prove the PARSER LOGIC behaves as
-intended (reads the right node, degrades to None on a miss, never lets a
-"similar properties" neighbour's figures leak into the subject property) —
-they prove NOTHING about whether the selectors match the real site. Every
-selector under test MUST be revalidated against the owner's first real
-capture (the calibration issue linked from D-111), the same way issue #266
-replaced Aliseda's originally-fabricated fixture with real ones.
+Exercised against a REAL fixture (`etl/tests/fixtures/hipoges_detail_RARE-
+04347.html`) — trimmed from a real Hipoges capture (`extension_capture` ids
+3614-3617, pulled read-only from production Postgres) rather than the
+synthetic, hand-fabricated one this file used before #547 (removed — see
+D-146). `_SELECTORS_CALIBRATED` is now `True`: `normalize()` writes
+price/m2/rooms/bathrooms/reference_code/photo_urls/property_type/operation/
+city/province from real, capture-grounded selectors.
 
-Opus review (PR #548, C2) added a hard gate: `hipoges._SELECTORS_CALIBRATED`
-is False today, so `normalize()` forces every draft-derived field (price,
-m2, rooms, bathrooms, reference code, photos, property_type, operation) to
-None/() regardless of what the draft extractors would have found — only
-external_id/url/status/listing_kind and the OpenGraph title/description are
-ever populated. `TestNormalizeGatedByDefault` proves that gate holds against
-the rich fixture; `TestCalibratedWiring` monkeypatches the gate on to prove
-the wiring underneath it still works (so a future #547 calibration PR that
-just flips the constant doesn't ALSO have to debug wiring that silently rotted);
-`TestDraftExtractors` unit-tests the draft functions directly, independent of
-either.
+**This is SINGLE-OBSERVATION confidence** — one property (RARE-04347), one
+servicer template. `TestCalibratedExtraction` proves each field's real
+value; `TestSelectorMutationBreaksExtraction` proves each assertion can
+actually fail (breaks the underlying markup and confirms the extracted
+value changes — a fixture that only matches the selector it was built
+against is circular, per the #632 review finding this task was warned
+about); `TestContaminationGuard` proves the real "similar properties" rail
+(a custom element, `init-asset-detail-related-assets id="others"` — NOT a
+similar/related/recommend CSS class, which is what the pre-#547 draft
+guessed and which matches nothing on the real page) never bleeds into the
+subject property's fields; `TestGateOffFallsBackToDraftBehavior` proves the
+gate itself still works if a future regression flips `_SELECTORS_CALIBRATED`
+back to `False`; `TestHonestDegradation` proves an empty/un-hydrated shell
+still degrades to `None` regardless of the gate; `TestUnitExtractors`
+exercises the extractor functions directly.
 """
 
 from __future__ import annotations
@@ -37,10 +37,10 @@ from etl.connectors.base import ConnectorError, RawListing
 from etl.connectors.hipoges import HipogesConnector
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_URL = "https://realestate.hipoges.com/es/detail/99001"
+_URL = "https://realestate.hipoges.com/es/detail/RARE-04347"
 
 
-def _normalize(html: str, url: str = _URL, external_id: str = "99001"):
+def _normalize(html: str, url: str = _URL, external_id: str = "RARE-04347"):
     connector = HipogesConnector()
     raw = RawListing(
         external_id=external_id, source=connector.name, raw={"url": url, "html": html}
@@ -49,7 +49,7 @@ def _normalize(html: str, url: str = _URL, external_id: str = "99001"):
 
 
 def _fixture_html() -> str:
-    return (_FIXTURES / "hipoges_detail_SYNTHETIC.html").read_text(encoding="utf-8")
+    return (_FIXTURES / "hipoges_detail_RARE-04347.html").read_text(encoding="utf-8")
 
 
 class TestExternalIdFromUrl:
@@ -64,6 +64,10 @@ class TestExternalIdFromUrl:
             ("https://realestate.hipoges.com/es/detail/99001/unavailable", "99001"),
             ("https://realestate.hipoges.com/es/npl/detail/ABC-123", "ABC-123"),
             ("https://realestate.hipoges.com/pt/detail/99001?utm=x#foto", "99001"),
+            # The real 2026-08-21 captures (issue #547) all matched this
+            # base-case shape — real confirmation, not just the route-table
+            # grounding D-111 originally had.
+            ("https://realestate.hipoges.com/es/detail/RARE-04347", "RARE-04347"),
             # Search/listing/home pages — no id.
             ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", None),
             ("https://realestate.hipoges.com/", None),
@@ -74,19 +78,233 @@ class TestExternalIdFromUrl:
         assert HipogesConnector.external_id_from_url(url) == expected
 
 
-class TestNormalizeGatedByDefault:
-    """`_SELECTORS_CALIBRATED` is False in this codebase today — proves the
-    gate actually suppresses every draft-derived field even against a
-    fixture that HAS all of them (price, m2, rooms, baths, reference,
-    photos, property_type, operation), not just against an empty shell
-    (that's `TestHonestDegradation` below, a weaker/different property)."""
+class TestCalibratedExtraction:
+    """Every field's real value, read from the real RARE-04347 capture."""
 
-    def test_gate_is_off_in_this_codebase(self):
-        # If this ever flips, TestCalibratedWiring stops being the only path
-        # that exercises the real extraction — see that class's docstring.
-        assert hipoges_module._SELECTORS_CALIBRATED is False
+    def test_grounded_fields(self):
+        c = _normalize(_fixture_html())
+        assert c.source == "hipoges"
+        assert c.external_id == "RARE-04347"
+        assert c.url == _URL
+        assert c.listing_kind == "agency"
+        assert c.status == "active"
+        assert c.contact_raw is None
 
-    def test_draft_fields_all_none_despite_rich_fixture(self):
+    def test_title_is_dom_h1_not_generic_og_meta(self):
+        """The real page's og:title is generic site branding ("Venta y
+        alquiler de inmuebles al mejor precio | Hipoges") — proven by the
+        production DB's own extension_capture.title column carrying that
+        exact string. The real per-listing title only exists in the <h1>."""
+        c = _normalize(_fixture_html())
+        assert c.raw_extra["title"] == "Piso en venta en urbanización Maria Teresa Leon"
+        assert (
+            c.raw_extra["title"]
+            != "Venta y alquiler de inmuebles al mejor precio | Hipoges"
+        )
+
+    def test_description_is_dom_not_generic_og_meta(self):
+        c = _normalize(_fixture_html())
+        assert "Estepona" in c.description
+        assert "alquilada" in c.description
+        assert c.description != (
+            "Encuentra aquí las mejores oportunidades de apartamentos, "
+            "pisos, locales, naves y oficinas."
+        )
+
+    def test_price(self):
+        c = _normalize(_fixture_html())
+        assert c.current_price == Decimal(266000)
+
+    def test_surface_rooms_baths(self):
+        c = _normalize(_fixture_html())
+        assert c.m2_built == Decimal(84)
+        assert c.rooms == 3
+        assert c.bathrooms == 2
+
+    def test_reference_code(self):
+        c = _normalize(_fixture_html())
+        assert c.reference_code == "RARE-04347"
+
+    def test_property_type_and_operation(self):
+        c = _normalize(_fixture_html())
+        assert c.property_type == "piso"
+        assert c.operation == "sale"
+
+    def test_city_and_province(self):
+        """Previously hardcoded None ("not extractable without a real
+        capture") — the real page proves otherwise."""
+        c = _normalize(_fixture_html())
+        assert c.city == "Estepona"
+        assert c.province == "Málaga"
+
+    def test_photos_are_only_the_subject_gallery(self):
+        c = _normalize(_fixture_html())
+        assert len(c.photo_urls) == 3
+        assert all("rare-04347" in u for u in c.photo_urls)
+        assert all(u.startswith("https://hipoges.azureedge.net/") for u in c.photo_urls)
+        # The gallery's own photo-count badge icon must not appear.
+        assert not any("/assets/" in u for u in c.photo_urls)
+
+    def test_uncalibrated_fields_stay_none(self):
+        """Fields observed on the real page but deliberately left
+        uncalibrated (floor, energy rating) or genuinely absent (address,
+        lat/lon, postal code, cadastral ref) — see D-146 for why."""
+        c = _normalize(_fixture_html())
+        assert c.floor is None
+        assert c.energy_rating is None
+        assert c.address is None
+        assert c.lat is None
+        assert c.lon is None
+        assert c.postal_code is None
+        assert c.cadastral_ref is None
+        assert c.has_elevator is None
+        assert c.year_built is None
+
+    def test_raw_extra_provenance_and_calibration_flag(self):
+        c = _normalize(_fixture_html())
+        assert c.raw_extra["capture_source"] == "browser-extension"
+        assert c.raw_extra["capture_portal"] == "hipoges"
+        assert c.raw_extra["selectors_calibrated"] is True
+
+
+class TestContaminationGuard:
+    """The real "similar properties" rail (`init-asset-detail-related-assets
+    id="others"`, containing `init-similar-card`) embeds a DIFFERENT
+    property's own price/m2/photo. None of it must leak into the subject
+    property's fields."""
+
+    def test_price_excludes_neighbour(self):
+        c = _normalize(_fixture_html())
+        assert c.current_price != Decimal(251000)
+        assert c.current_price == Decimal(266000)
+
+    def test_m2_excludes_neighbour(self):
+        c = _normalize(_fixture_html())
+        assert c.m2_built != Decimal(119)
+        assert c.m2_built == Decimal(84)
+
+    def test_photos_exclude_neighbour(self):
+        c = _normalize(_fixture_html())
+        assert not any("gtre-01073" in u for u in c.photo_urls)
+        assert not any("gentauro" in u for u in c.photo_urls)
+
+
+class TestSelectorMutationBreaksExtraction:
+    """Revert-and-confirm-fail: corrupt the specific fixture markup each
+    selector reads and confirm the extracted value actually changes. A
+    fixture that only matches the selector it was written against proves
+    nothing (the #632 review finding this task was explicitly warned
+    about) — these tests fail if the corresponding selector is deleted or
+    stops reading real markup."""
+
+    def test_price_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).current_price == Decimal(266000)
+        mutated = html.replace(">266.000&nbsp;€</span>", ">310.000&nbsp;€</span>")
+        assert mutated != html
+        assert _normalize(mutated).current_price == Decimal(310000)
+
+    def test_m2_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).m2_built == Decimal(84)
+        mutated = html.replace(">84 <", ">120 <")
+        assert mutated != html
+        assert _normalize(mutated).m2_built == Decimal(120)
+
+    def test_rooms_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).rooms == 3
+        mutated = html.replace(">3 <", ">5 <")
+        assert mutated != html
+        assert _normalize(mutated).rooms == 5
+
+    def test_bathrooms_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).bathrooms == 2
+        mutated = html.replace(">2 <", ">4 <")
+        assert mutated != html
+        assert _normalize(mutated).bathrooms == 4
+
+    def test_reference_code_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).reference_code == "RARE-04347"
+        mutated = html.replace("Referencia: RARE-04347", "Referencia: RARE-99999")
+        assert mutated != html
+        assert _normalize(mutated).reference_code == "RARE-99999"
+
+    def test_property_type_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).property_type == "piso"
+        mutated = html.replace(">Piso</span>", ">Chalet</span>")
+        assert mutated != html
+        assert _normalize(mutated).property_type == "chalet"
+
+    def test_operation_mutation_is_caught(self):
+        html = _fixture_html()
+        assert _normalize(html).operation == "sale"
+        mutated = html.replace(" en venta ", " en alquiler ")
+        assert mutated != html
+        assert _normalize(mutated).operation == "rent"
+
+    def test_city_province_mutation_is_caught(self):
+        html = _fixture_html()
+        c = _normalize(html)
+        assert c.city == "Estepona"
+        assert c.province == "Málaga"
+        mutated = html.replace(
+            '<span class="text-hp-gray-2 text-hp-xsmall">Estepona, Málaga</span>',
+            '<span class="text-hp-gray-2 text-hp-xsmall">Sevilla, Sevilla</span>',
+        )
+        assert mutated != html
+        mutated_c = _normalize(mutated)
+        assert mutated_c.city == "Sevilla"
+        assert mutated_c.province == "Sevilla"
+
+    def test_photos_mutation_is_caught(self):
+        html = _fixture_html()
+        assert len(_normalize(html).photo_urls) == 3
+        mutated = html.replace(
+            '<img loading="lazy" alt="Third image" '
+            'src="https://hipoges.azureedge.net/imageshams/hams_es_rand/'
+            'rran01399/rare-04347/59180391_e063a3e750da99ede97f6ec256547606fdb47ff6.png">',
+            "",
+        )
+        assert mutated != html
+        assert len(_normalize(mutated).photo_urls) == 2
+
+    def test_title_mutation_is_caught(self):
+        html = _fixture_html()
+        assert (
+            _normalize(html).raw_extra["title"]
+            == "Piso en venta en urbanización Maria Teresa Leon"
+        )
+        mutated = html.replace(
+            "Piso en venta en urbanización Maria Teresa Leon",
+            "Piso en venta en urbanización Otra Direccion",
+        )
+        assert mutated != html
+        assert (
+            _normalize(mutated).raw_extra["title"]
+            == "Piso en venta en urbanización Otra Direccion"
+        )
+
+    def test_description_mutation_is_caught(self):
+        html = _fixture_html()
+        assert "alquilada" in _normalize(html).description
+        mutated = html.replace("alquilada", "vacía")
+        assert mutated != html
+        assert "vacía" in _normalize(mutated).description
+        assert "alquilada" not in _normalize(mutated).description
+
+
+class TestGateOffFallsBackToDraftBehavior:
+    """Proves the calibration gate itself still works — if a future
+    regression flips `_SELECTORS_CALIBRATED` back to False (e.g. a
+    suspected site redesign), every DOM-derived field must degrade to
+    None/OG-meta-only again, exactly like the pre-#547 shipped behaviour."""
+
+    def test_draft_fields_all_none_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", False)
         c = _normalize(_fixture_html())
         assert c.current_price is None
         assert c.m2_built is None
@@ -96,105 +314,29 @@ class TestNormalizeGatedByDefault:
         assert c.photo_urls == ()
         assert c.property_type is None
         assert c.operation is None
-
-    def test_grounded_fields_still_populated(self):
-        c = _normalize(_fixture_html())
-        assert c.source == "hipoges"
-        assert c.external_id == "99001"
-        assert c.url == _URL
-        assert c.listing_kind == "agency"
-        assert c.status == "active"
-        assert c.contact_raw is None
-        assert c.cadastral_ref is None
-        assert c.address is None
         assert c.city is None
         assert c.province is None
 
-    def test_title_and_description_are_opengraph_only(self):
-        """The fixture's h1 ("Piso en venta en Madrid") and its
-        `.asset-description` div text both differ from the og:title/
-        og:description meta tags — proving title/description come from
-        OpenGraph meta ONLY (Opus review, PR #548, C2), not an h1/class-based
-        DOM guess."""
+    def test_title_description_fall_back_to_og_meta_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", False)
         c = _normalize(_fixture_html())
-        assert c.raw_extra["title"] == "Piso en venta en Madrid, Hipoges"
-        assert c.description == (
-            "Piso reformado con 3 habitaciones y 2 baños en el centro de Madrid."
+        assert c.raw_extra["title"] == (
+            "Venta y alquiler de inmuebles al mejor precio | Hipoges"
         )
-        # The h1/desc-div text is NOT what got picked.
-        assert c.raw_extra["title"] != "Piso en venta en Madrid"
-        assert "luminoso" not in (c.description or "")
+        assert c.description == (
+            "Encuentra aquí las mejores oportunidades de apartamentos, "
+            "pisos, locales, naves y oficinas."
+        )
 
-    def test_raw_extra_provenance_and_draft_flag(self):
+    def test_raw_extra_flag_tracks_the_gate(self, monkeypatch):
+        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", False)
         c = _normalize(_fixture_html())
-        assert c.raw_extra["capture_source"] == "browser-extension"
-        assert c.raw_extra["capture_portal"] == "hipoges"
         assert c.raw_extra["selectors_calibrated"] is False
 
-
-class TestCalibratedWiring:
-    """Monkeypatches `_SELECTORS_CALIBRATED` True for the duration of each
-    test (auto-reverted by pytest's monkeypatch fixture) to prove the
-    extraction PIPELINE underneath the gate still genuinely works — the same
-    assertions PR #548's original (pre-review) test suite made before the
-    gate existed. This is what #547's calibration PR inherits once real
-    selectors replace the draft ones; it must not have silently rotted."""
-
-    def test_core_fields_extracted_once_calibrated(self, monkeypatch):
-        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", True)
-        c = _normalize(_fixture_html())
-        assert c.operation == "sale"
-        assert c.property_type == "piso"
-        assert c.current_price == Decimal(185000)
-        assert c.m2_built == Decimal(90)
-        assert c.rooms == 3
-        assert c.bathrooms == 2
-        assert c.reference_code == "HIP-99001-ES"
-        assert c.raw_extra["selectors_calibrated"] is True
-
-    def test_contamination_guard_excludes_neighbour_figures(self, monkeypatch):
-        """The 'similar properties' carousel embeds a DIFFERENT property's
-        price/m2/rooms/baths (999.999 €, 210 m2, 6 hab, 5 baños). None of
-        those must leak into the subject property's fields — proving the
-        contamination-drop guard actually does something, not just that it
-        exists in the source."""
-        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", True)
-        c = _normalize(_fixture_html())
-        assert c.current_price != Decimal(999999)
-        assert c.current_price == Decimal(185000)
-        assert c.m2_built != Decimal(210)
-        assert c.rooms != 6
-        assert c.bathrooms != 5
-
-    def test_photos_exclude_neighbour_gallery(self, monkeypatch):
-        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", True)
-        c = _normalize(_fixture_html())
-        assert len(c.photo_urls) == 2
-        assert all("hip-99001" in u for u in c.photo_urls)
-        assert not any("neighbour" in u for u in c.photo_urls)
-        assert all(
-            u.startswith("https://realestate.hipoges.com/") for u in c.photo_urls
-        )
-        # Deduped, order preserved.
-        assert len(set(c.photo_urls)) == len(c.photo_urls)
-
-    def test_price_mutation_is_caught(self, monkeypatch):
-        """Revert-and-confirm-fail: corrupt the fixture's asset-price value
-        and the extracted price must change — proving it is genuinely parsed,
-        not hard-coded/coincidental."""
-        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", True)
-        html = _fixture_html()
-
-        def price_of(h: str):
-            return _normalize(h).current_price
-
-        assert price_of(html) == Decimal(185000)
-        mutated = html.replace(
-            '<span class="asset-price">185.000 €</span>',
-            '<span class="asset-price">222.500 €</span>',
-        )
-        assert mutated != html
-        assert price_of(mutated) == Decimal(222500)
+    def test_gate_is_on_in_this_codebase(self):
+        """If this ever flips back to False, the test above proves the
+        fallback path still works — this just documents current state."""
+        assert hipoges_module._SELECTORS_CALIBRATED is True
 
 
 class TestHonestDegradation:
@@ -209,7 +351,7 @@ class TestHonestDegradation:
 <html lang="es"><head><meta charset="utf-8"><title>Hipoges</title></head>
 <body><app-root></app-root><script src="/main-x.js"></script></body></html>"""
 
-    def test_empty_shell_degrades_to_nones_gate_off(self):
+    def test_empty_shell_degrades_to_nones(self):
         c = _normalize(self._EMPTY_SHELL, external_id="1")
         assert c.current_price is None
         assert c.m2_built is None
@@ -219,61 +361,67 @@ class TestHonestDegradation:
         assert c.photo_urls == ()
         assert c.property_type is None
         assert c.operation is None
-
-    def test_empty_shell_degrades_to_nones_gate_on(self, monkeypatch):
-        monkeypatch.setattr(hipoges_module, "_SELECTORS_CALIBRATED", True)
-        c = _normalize(self._EMPTY_SHELL, external_id="1")
-        assert c.current_price is None
-        assert c.m2_built is None
-        assert c.rooms is None
-        assert c.bathrooms is None
-        assert c.reference_code is None
-        assert c.photo_urls == ()
-        assert c.property_type is None
-        assert c.operation is None
+        assert c.city is None
+        assert c.province is None
+        assert c.raw_extra["title"] is None
+        assert c.description is None
 
 
-class TestDraftExtractors:
-    """Direct unit tests of the DRAFT extractor functions, independent of
-    `normalize()`/the calibration gate — this is the "clearly marked and
-    unit-tested" half of the Opus review's C2 ask (PR #548): the guessed
-    selectors stay exercised so they don't silently bit-rot while gated off,
-    and flipping `_SELECTORS_CALIBRATED` later is a one-line change with a
-    known-working pipeline underneath it."""
+class TestUnitExtractors:
+    """Direct unit tests of the calibrated extractor functions, independent
+    of `normalize()`/the gate."""
 
-    def test_m2_rooms_baths_patterns(self):
-        from etl.connectors.hipoges import (
-            _BATHS_RE,
-            _M2_RE,
-            _ROOMS_RE,
-            _first_match_decimal,
-            _first_match_int,
+    def test_feature_card_value_matches_by_label_not_position(self):
+        """The real page's energy-grade card renders value/label spans in
+        the OPPOSITE order between mobile/desktop variants (both present at
+        once) — proves `_feature_card_value` matches by label keyword, not
+        a fixed span index."""
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _M2_LABEL_RE, _feature_card_value
+
+        value_first = BeautifulSoup(
+            "<init-feature-card><span>84 </span>"
+            "<span>Metros cuadrados</span></init-feature-card>",
+            "html.parser",
         )
-
-        text = "Piso de 87 m2 con 2 hab. y 1 baño reformado"
-        assert _first_match_decimal(_M2_RE, text) == Decimal(87)
-        assert _first_match_int(_ROOMS_RE, text) == 2
-        assert _first_match_int(_BATHS_RE, text) == 1
-
-    def test_no_match_returns_none(self):
-        from etl.connectors.hipoges import (
-            _BATHS_RE,
-            _M2_RE,
-            _ROOMS_RE,
-            _first_match_decimal,
-            _first_match_int,
+        label_first = BeautifulSoup(
+            "<init-feature-card><span>Metros cuadrados</span>"
+            "<span>84 </span></init-feature-card>",
+            "html.parser",
         )
+        assert _feature_card_value(value_first, _M2_LABEL_RE) == 84
+        assert _feature_card_value(label_first, _M2_LABEL_RE) == 84
 
-        assert _first_match_decimal(_M2_RE, "sin datos") is None
-        assert _first_match_int(_ROOMS_RE, "sin datos") is None
-        assert _first_match_int(_BATHS_RE, "sin datos") is None
+    def test_feature_card_value_no_match_returns_none(self):
+        from bs4 import BeautifulSoup
 
-    def test_price_from_dom(self):
+        from etl.connectors.hipoges import _M2_LABEL_RE, _feature_card_value
+
+        soup = BeautifulSoup(
+            "<init-feature-card><span>Trastero</span></init-feature-card>",
+            "html.parser",
+        )
+        assert _feature_card_value(soup, _M2_LABEL_RE) is None
+
+    def test_price_from_dom_label_sibling_pattern(self):
         from bs4 import BeautifulSoup
 
         from etl.connectors.hipoges import _price_from_dom
 
-        soup = BeautifulSoup('<div class="asset-price">150.000 €</div>', "html.parser")
+        soup = BeautifulSoup(
+            "<div><span>Precio</span><span>150.000 €</span></div>", "html.parser"
+        )
+        assert _price_from_dom(soup) == Decimal(150000)
+
+    def test_price_from_dom_no_label_falls_back_to_class_guess(self):
+        """Never observed on the real page (0 matches) — kept only as a
+        best-effort fallback for a possible different template."""
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _price_from_dom
+
+        soup = BeautifulSoup('<div class="precio">150.000 €</div>', "html.parser")
         assert _price_from_dom(soup) == Decimal(150000)
 
     def test_price_from_dom_no_match_returns_none(self):
@@ -284,49 +432,87 @@ class TestDraftExtractors:
         soup = BeautifulSoup("<div>nada aquí</div>", "html.parser")
         assert _price_from_dom(soup) is None
 
-    def test_photos_harvests_carousel_named_gallery(self):
-        """Opus review (PR #548, C1): a real Angular property page's MAIN
-        gallery is very plausibly named `*-carousel` (the synthetic
-        fixture's `asset-gallery` name was too convenient to catch this).
-        Confirms the fix: `_photos()` must NOT come back empty for a
-        carousel-named gallery once contamination-drop no longer treats
-        "carousel" as contamination."""
+    def test_detail_row_value(self):
         from bs4 import BeautifulSoup
 
-        from etl.connectors.extraction import scoped_node
-        from etl.connectors.hipoges import _CONTAMINATION_SELECTORS, _photos
+        from etl.connectors.hipoges import _detail_row_value
+
+        soup = BeautifulSoup(
+            "<init-asset-detail-details>"
+            '<div class="grid grid-cols-2"><span>Tipo de propiedad</span>'
+            "<span>Piso</span></div>"
+            "</init-asset-detail-details>",
+            "html.parser",
+        )
+        assert _detail_row_value(soup, "Tipo de propiedad") == "Piso"
+        assert _detail_row_value(soup, "Planta") is None
+
+    def test_location_from_dom_splits_city_province(self):
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _location_from_dom
+
+        soup = BeautifulSoup(
+            "<init-asset-detail-main-info>"
+            '<img alt="Location icon"><span>Estepona, Málaga</span>'
+            "</init-asset-detail-main-info>",
+            "html.parser",
+        )
+        assert _location_from_dom(soup) == ("Estepona", "Málaga")
+
+    def test_location_from_dom_no_comma(self):
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _location_from_dom
+
+        soup = BeautifulSoup(
+            "<init-asset-detail-main-info>"
+            '<img alt="Location icon"><span>Madrid</span>'
+            "</init-asset-detail-main-info>",
+            "html.parser",
+        )
+        assert _location_from_dom(soup) == ("Madrid", None)
+
+    def test_location_from_dom_missing_returns_none_none(self):
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _location_from_dom
+
+        soup = BeautifulSoup(
+            "<init-asset-detail-main-info></init-asset-detail-main-info>", "html.parser"
+        )
+        assert _location_from_dom(soup) == (None, None)
+
+    def test_photos_harvests_only_gallery_container(self):
+        from bs4 import BeautifulSoup
+
+        from etl.connectors.hipoges import _photos
 
         html = (
-            '<div class="image-carousel">'
-            '<img src="/assets/a.jpg"><img src="/assets/b.jpg">'
-            "</div>"
+            "<init-asset-detail-gallery>"
+            '<img src="/assets/icons/camera.webp">'
+            '<img src="/photos/a.jpg"><img src="/photos/b.jpg">'
+            "</init-asset-detail-gallery>"
+            '<init-asset-detail-related-assets id="others">'
+            '<img src="/photos/neighbour.jpg">'
+            "</init-asset-detail-related-assets>"
         )
         soup = BeautifulSoup(html, "html.parser")
-        scoped = scoped_node(soup, drop=_CONTAMINATION_SELECTORS)
-        photos = _photos(scoped, "https://realestate.hipoges.com/es/detail/1")
+        photos = _photos(soup, "https://realestate.hipoges.com/es/detail/1")
         assert photos == (
-            "https://realestate.hipoges.com/assets/a.jpg",
-            "https://realestate.hipoges.com/assets/b.jpg",
+            "https://realestate.hipoges.com/photos/a.jpg",
+            "https://realestate.hipoges.com/photos/b.jpg",
         )
 
-    def test_photos_still_excludes_similar_properties_carousel(self):
-        """The contamination guard still drops a rail explicitly named
-        "similar"/"related"/"recommend" — only the bare word "carousel" was
-        removed from the contamination list (C1), not the guard itself."""
+    def test_photos_falls_back_to_class_guess_when_container_missing(self):
         from bs4 import BeautifulSoup
 
-        from etl.connectors.extraction import scoped_node
-        from etl.connectors.hipoges import _CONTAMINATION_SELECTORS, _photos
+        from etl.connectors.hipoges import _photos
 
-        html = (
-            '<div class="main-gallery"><img src="/assets/subject.jpg"></div>'
-            '<div class="similar-properties-carousel">'
-            '<img src="/assets/neighbour.jpg"></div>'
-        )
+        html = '<div class="gallery"><img src="/photos/a.jpg"></div>'
         soup = BeautifulSoup(html, "html.parser")
-        scoped = scoped_node(soup, drop=_CONTAMINATION_SELECTORS)
-        photos = _photos(scoped, "https://realestate.hipoges.com/es/detail/1")
-        assert photos == ("https://realestate.hipoges.com/assets/subject.jpg",)
+        photos = _photos(soup, "https://realestate.hipoges.com/es/detail/1")
+        assert photos == ("https://realestate.hipoges.com/photos/a.jpg",)
 
     def test_photos_no_page_url_returns_empty(self):
         from bs4 import BeautifulSoup
@@ -334,7 +520,8 @@ class TestDraftExtractors:
         from etl.connectors.hipoges import _photos
 
         soup = BeautifulSoup(
-            '<div class="gallery"><img src="/a.jpg"></div>', "html.parser"
+            '<init-asset-detail-gallery><img src="/a.jpg"></init-asset-detail-gallery>',
+            "html.parser",
         )
         assert _photos(soup, None) == ()
 
