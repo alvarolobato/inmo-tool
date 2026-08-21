@@ -556,4 +556,59 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
       expect(Number(rows[0].n)).toBe(0); // NOT one strike per property — zero
     });
   });
+
+  // ---------------------------------------------------------------------
+  // #666/D-149 finding 2 — the exact scenario the review reproduced against
+  // the write-pool-shared design: 8 concurrent assessment workers plus
+  // ordinary long-running write-pool traffic (a real materialize/dedup
+  // query's shape) starved EVERY worker, or lost an already-paid-for LLM
+  // call at `save()`. `getLockPool()` isolating lock-holding into its own
+  // pool is what this proves against real Postgres, real concurrency.
+  // ---------------------------------------------------------------------
+
+  it("#666/D-149 finding 2: 8 concurrent getOrCompute calls all succeed alongside 4 ordinary long-running write-pool queries", async () => {
+    await withRealDb(async (pool) => {
+      const propertyIds = await Promise.all(
+        Array.from({ length: 8 }, () => seedProperty(pool)),
+      );
+      const listings: ListingSnapshot[] = [{ listingId: 1, description: "texto cualquiera" }];
+
+      // 4 ordinary long write-pool queries, started first and left running
+      // for the whole test — the review's repro used plain `pg_sleep` calls
+      // "well inside statement_timeout — the shape of a real materialize or
+      // dedup query"; same shape here, on the SAME `sql()` helper the rest
+      // of the dashboard's write traffic uses.
+      const longQueries = Array.from({ length: 4 }, () => sql("SELECT pg_sleep(2)"));
+
+      // 8 concurrent assessment workers — `computeFn` sleeps briefly to
+      // simulate a real network LLM round trip overlapping the long queries
+      // above, not resolving instantly.
+      const results = await Promise.all(
+        propertyIds.map((propertyId) =>
+          getOrCompute(
+            propertyId,
+            "condition",
+            CONDITION_PROMPT_VERSION,
+            listings,
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              return { result: parseConditionResult(A_REFORMAR), model: "test-model" };
+            },
+            saveConditionAssessment,
+          ),
+        ),
+      );
+
+      await Promise.all(longQueries); // let the long queries actually finish
+
+      expect(results).toHaveLength(8);
+      for (const r of results) expect(r.fromCache).toBe(false);
+
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ai_assessment WHERE property_id = ANY($1::bigint[])`,
+        [propertyIds],
+      );
+      expect(Number(rows[0].n)).toBe(8); // every worker's save() actually persisted
+    });
+  });
 });

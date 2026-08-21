@@ -7,16 +7,29 @@
  * end — real Postgres selection/cache/failure-ledger code, real
  * `assessPropertyOccupancy` flow, real LLM backend (whatever
  * `dashboard.llm_provider`/`DASHBOARD_LLM_PROVIDER` resolves to; the #666 PR
- * measurement used `cli`, the production default) — at `concurrency=1`
- * (the old, always-serial behaviour) and then at a configurable
- * `--concurrency` (the new default is 4) over two DISJOINT sets of
- * properties, so neither run can be a #30 cache hit against the other, and
- * reports wall-clock assessments/hour for each.
+ * measurement used `cli`, the production default) — and reports wall-clock
+ * assessments/hour, plus the `llm_usage` cache_creation vs cache_read token
+ * split for the run (D-103's prompt-cache question).
+ *
+ * ## #666/D-149 review finding 4 — n MUST be >> concurrency
+ *
+ * `workerCount = Math.min(concurrency, propertyIds.length)`
+ * (`batch.ts`) — a run with `n ≈ concurrency` is a SINGLE wave whose wall
+ * clock is just `max(call latency)`, with no queueing tail, and flatters
+ * high concurrency. The PR's first measurement made exactly this mistake
+ * (`--n 6 --concurrency 4`, `--n 8 --concurrency 8`, `--n 10 --concurrency
+ * 10` — always one wave) and reported speedups the review could not
+ * reproduce at a real multi-wave `n`. The default `n` here is now large
+ * enough (`--n`, default 24) that every `--concurrency` level in a normal
+ * comparison run (4/8/10/12) is several waves deep, not one.
  *
  * This is a MECHANISM measurement, not a synthetic proxy: only the listing
  * TEXT is synthetic (generic, made-up Spanish real-estate prose — never
  * scraped content, per this repo's public-data policy); the code path that
- * runs is exactly what production runs on a real backlog.
+ * runs is exactly what production runs on a real backlog. The wall-clock
+ * CURVE this reports is host-dependent — one `claude` CLI child process per
+ * in-flight call (D-106) — re-run it on the actual deployment host if you
+ * need a number to size that host's own default off.
  *
  * ## Usage
  *
@@ -26,10 +39,17 @@
  *      under a fixed synthetic address prefix; it refuses to run if that
  *      prefix already has rows left over from a previous interrupted run
  *      (clean up manually rather than risk double-processing stale IDs).
- *   2. `npx tsx scripts/bench-assessment-concurrency.ts [--n 6] [--concurrency 4]`
+ *   2. `npx tsx scripts/bench-assessment-concurrency.ts [--n 24] [--concurrency 8] [--skip-before]`
  *
- * Costs real LLM calls under whatever provider/backend is configured (2 × N
- * calls). Under `cli` with a Claude subscription this is quota, not €.
+ *      `--skip-before` omits the concurrency=1 baseline leg (useful when
+ *      comparing several `--concurrency` values back to back against a
+ *      baseline already measured in an earlier invocation — a fresh
+ *      concurrency=1 baseline at large `n` is the single most expensive leg
+ *      to re-run every time).
+ *
+ * Costs real LLM calls under whatever provider/backend is configured
+ * (n, or 2n with the baseline leg). Under `cli` with a Claude subscription
+ * this is quota, not €.
  */
 import { fileURLToPath } from "url";
 import { sql, resetPool } from "../lib/db-write";
@@ -37,11 +57,15 @@ import { runAssessmentBatch, DEFAULT_BATCH_FLOWS } from "../lib/ai-assessment/ba
 
 const ADDRESS_PREFIX = "Calle Ficticia Bench666 ";
 
-function parseArg(name: string, fallback: number): number {
+function parseIntArg(name: string, fallback: number): number {
   const idx = process.argv.indexOf(`--${name}`);
   if (idx === -1 || !process.argv[idx + 1]) return fallback;
   const n = Number(process.argv[idx + 1]);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function hasFlag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
 }
 
 /** A generic, made-up (never scraped) Spanish listing description. */
@@ -112,6 +136,19 @@ interface RunOutcome {
   stopped: string | null;
   elapsedMs: number;
   perHour: number;
+  waves: number;
+}
+
+/** #666/D-149 review finding 5 — cache_creation vs cache_read tokens logged during [startedAt, now]. */
+async function cacheTokenSplit(startedAt: Date): Promise<{ creation: number; read: number }> {
+  const rows = await sql<{ creation: string | null; read: string | null }>(
+    `SELECT COALESCE(SUM(cache_creation_input_tokens), 0)::text AS creation,
+            COALESCE(SUM(cache_read_input_tokens), 0)::text AS read
+       FROM llm_usage
+      WHERE endpoint = 'occupancy' AND created_at >= $1`,
+    [startedAt.toISOString()],
+  );
+  return { creation: Number(rows[0]?.creation ?? 0), read: Number(rows[0]?.read ?? 0) };
 }
 
 async function runOne(
@@ -120,6 +157,7 @@ async function runOne(
   concurrency: number,
 ): Promise<RunOutcome> {
   const occupancyOnly = DEFAULT_BATCH_FLOWS.filter((f) => f.type === "occupancy");
+  const startedAt = new Date();
   const started = Date.now();
   const result = await runAssessmentBatch({
     flows: occupancyOnly,
@@ -130,6 +168,7 @@ async function runOne(
   });
   const elapsedMs = Date.now() - started;
   const perHour = result.assessed > 0 ? (result.assessed / (elapsedMs / 1000)) * 3600 : 0;
+  const waves = Math.ceil(propertyIds.length / Math.max(1, Math.min(concurrency, propertyIds.length)));
   const outcome: RunOutcome = {
     label,
     concurrency,
@@ -139,35 +178,58 @@ async function runOne(
     stopped: result.stopped,
     elapsedMs,
     perHour,
+    waves,
   };
+  const cacheSplit = await cacheTokenSplit(startedAt);
+  const cacheTotal = cacheSplit.creation + cacheSplit.read;
+  const readPct = cacheTotal > 0 ? ((cacheSplit.read / cacheTotal) * 100).toFixed(0) : "n/a";
   console.log(
-    `[${label}] concurrency=${concurrency} properties=${propertyIds.length} ` +
+    `[${label}] concurrency=${concurrency} properties=${propertyIds.length} waves=${waves} ` +
       `assessed=${result.assessed} errors=${result.errors} stopped=${result.stopped ?? "none"} ` +
-      `elapsedMs=${elapsedMs} assessments/hour=${perHour.toFixed(0)}`,
+      `elapsedMs=${elapsedMs} assessments/hour=${perHour.toFixed(0)} ` +
+      `cache_creation_tokens=${cacheSplit.creation} cache_read_tokens=${cacheSplit.read} ` +
+      `(${readPct}% of cache-relevant tokens were reads, not writes)`,
   );
   return outcome;
 }
 
 async function main() {
-  const n = parseArg("n", 6);
-  const concurrency = parseArg("concurrency", 4);
+  const n = parseIntArg("n", 24);
+  const concurrency = parseIntArg("concurrency", 8);
+  const skipBefore = hasFlag("skip-before");
 
   console.log("#666 assessment-batch concurrency benchmark");
   console.log("============================================");
-  console.log(`n=${n} properties per run, concurrency=${concurrency} for the "after" run.\n`);
+  console.log(
+    `n=${n} properties per run, concurrency=${concurrency} for the "after" run` +
+      `${skipBefore ? " (baseline leg SKIPPED)" : ""}.\n`,
+  );
 
-  const allIds = await seed(n * 2);
-  const baselineIds = allIds.slice(0, n);
-  const concurrentIds = allIds.slice(n);
+  const totalNeeded = skipBefore ? n : n * 2;
+  const allIds = await seed(totalNeeded);
+  const baselineIds = skipBefore ? [] : allIds.slice(0, n);
+  const concurrentIds = skipBefore ? allIds : allIds.slice(n);
 
   try {
-    const before = await runOne("BEFORE (concurrency=1, the old always-serial shape)", baselineIds, 1);
-    const after = await runOne(`AFTER (concurrency=${concurrency}, #666/D-149 default)`, concurrentIds, concurrency);
+    const before = skipBefore
+      ? null
+      : await runOne("BEFORE (concurrency=1, the old always-serial shape)", baselineIds, 1);
+    const after = await runOne(
+      `AFTER (concurrency=${concurrency}, #666/D-149)`,
+      concurrentIds,
+      concurrency,
+    );
 
     console.log("\n=== Summary ===");
-    console.log(`BEFORE: ${before.perHour.toFixed(0)} assessments/hour (${before.elapsedMs} ms for ${before.assessed} calls)`);
-    console.log(`AFTER:  ${after.perHour.toFixed(0)} assessments/hour (${after.elapsedMs} ms for ${after.assessed} calls)`);
-    if (before.elapsedMs > 0) {
+    if (before) {
+      console.log(
+        `BEFORE: ${before.perHour.toFixed(0)} assessments/hour (${before.elapsedMs} ms for ${before.assessed} calls, ${before.waves} wave(s))`,
+      );
+    }
+    console.log(
+      `AFTER:  ${after.perHour.toFixed(0)} assessments/hour (${after.elapsedMs} ms for ${after.assessed} calls, ${after.waves} wave(s))`,
+    );
+    if (before && before.elapsedMs > 0) {
       console.log(`Speedup: ${(before.elapsedMs / after.elapsedMs).toFixed(2)}x wall-clock for the same call count`);
     }
   } finally {

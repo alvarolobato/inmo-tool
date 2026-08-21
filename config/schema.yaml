@@ -567,7 +567,7 @@
   sensitive: false
   default: 8
   section: "Evaluación IA"
-  description: "Nº de llamadas (inmueble, eje) en paralelo DENTRO de la ronda de un mismo eje del pase de evaluación IA (#666) — nunca se entrelazan ejes distintos, para no enfriar la caché de --system-prompt del CLI (D-103). Cuenta procesos `claude` simultáneos (D-106) y conexiones del pool de escritura que la #30 advisory-lock mantiene abiertas durante toda la llamada al LLM (D-149) — no la API, que en medición aguanta mucha más concurrencia. Fijado a un máximo de 8 sin importar el valor configurado; medido (D-149) contra el backend real: ~5x más rápido en pared de reloj a concurrencia 8 frente a serie, con ganancia marginal ya a 10 — de ahí tope y valor por defecto iguales."
+  description: "Nº de llamadas (inmueble, eje) en paralelo DENTRO de la ronda de un mismo eje del pase de evaluación IA (#666) — nunca se entrelazan ejes distintos. Cuenta procesos `claude` simultáneos (D-106) y el pool de conexiones dedicado al advisory-lock de #30 (D-149) — no la API, que en medición aguanta mucha más concurrencia. Fijado a un máximo de 8 sin importar el valor configurado; medido (D-149, correctamente con n muchas propiedades por encima de la concurrencia, nunca una sola tanda) contra el backend real: el rendimiento seguía subiendo hasta concurrencia 12 sin techo claro en el rango probado — 8 es un punto de equilibrio deliberado (~6x más rápido en pared de reloj frente a serie), no una meseta medida."
   requires_restart: [dashboard]
   components: [dashboard]
 

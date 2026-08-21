@@ -28,13 +28,14 @@
  */
 
 import { query } from "@/lib/db";
-import { loadSchedulerConfig } from "@/lib/ai-assessment/scheduler";
+import { loadSchedulerConfig, getLastProductiveTickDurationMs } from "@/lib/ai-assessment/scheduler";
 import { getSystemConfig } from "@/lib/system-config/loader";
 import {
   DISABLED_SOURCES_CTE,
   assessmentEligibleClause,
   selectionFlowValues,
-  missingCurrentVerdictClause,
+  pendingClause,
+  parkGuardParams,
 } from "@/lib/ai-assessment/eligibility";
 import {
   parseRateTable,
@@ -72,8 +73,15 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
 
   // Coverage query params: the (atype, ver) pairs, built with the SHARED
   // fragment so eligibility + backlog match `selectPropertiesNeedingAssessment`
-  // exactly (#330).
-  const { valuesSql: covValues, params: covParams } = selectionFlowValues(1);
+  // exactly (#330). #666/D-149: the per-flow parked guard is folded in the
+  // same way (`pendingClause`, not a separate AND) for the same reason — a
+  // flow that's actively parked is no longer "pending" work the scheduler
+  // will automatically get to, so the panel must not count it as backlog
+  // either, but a DIFFERENT flow on the same property that's still healthy
+  // must still count.
+  const { valuesSql: covValues, params: selectionParams } = selectionFlowValues(1);
+  const covGuard = parkGuardParams(selectionParams.length + 1);
+  const covParams = [...selectionParams, ...covGuard.params];
 
   const [
     flowRes,
@@ -146,7 +154,7 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
          pending AS (
            SELECT e.id
              FROM eligible e
-            WHERE ${missingCurrentVerdictClause("e", covValues)}
+            WHERE ${pendingClause("e", covValues, covGuard.maxFailuresParam, covGuard.decayDaysParam)}
          )
          SELECT (SELECT COUNT(*) FROM eligible) AS eligible,
                 (SELECT COUNT(*) FROM pending)  AS pending`,
@@ -246,22 +254,31 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
       ? assessment7dEur / propertiesAssessed7d
       : null;
 
+  // #666/D-149 review "also": while a real backlog exists, consecutive
+  // ticks reschedule after `drainIntervalSeconds`, not the full idle
+  // `intervalSeconds` — see scheduler.ts's adaptive duty cycle. But
+  // `drainIntervalSeconds` alone assumes each tick's OWN processing time is
+  // ~0, which was a rounding error against the old 900s idle interval and
+  // is no longer negligible against the new 5s drain interval — a real
+  // multi-property, multi-flow tick can itself take tens of seconds. Fold
+  // in the scheduler's own observed duration of its most recent PRODUCTIVE
+  // tick (`getLastProductiveTickDurationMs`, in-memory, resets on process
+  // restart) as a floor: the real per-tick cadence is at least
+  // `drainIntervalSeconds` PLUS however long a tick itself actually took,
+  // never just the sleep between them. `null` (no productive tick observed
+  // yet this process) falls back to the drain interval alone — the same
+  // lower-bound-only behaviour as before this fix, not a regression.
+  const lastTickDurationMs = getLastProductiveTickDurationMs();
+  const perTickCadenceSeconds =
+    scheduler.drainIntervalSeconds + (lastTickDurationMs !== null ? lastTickDurationMs / 1000 : 0);
+
   const coverage = {
     eligible,
     covered,
     pending,
     coverage_fraction: coverageFraction(covered, eligible),
     projected_ticks: projectBacklogTicks(pending, scheduler.batchSize),
-    // #666/D-149: while a real backlog exists, consecutive ticks reschedule
-    // after `drainIntervalSeconds`, not the full idle `intervalSeconds` — see
-    // scheduler.ts's adaptive duty cycle. Using the idle cadence here would
-    // wildly overstate how long the backlog actually takes to clear now that
-    // draining doesn't wait out the full interval between ticks.
-    projected_seconds: projectBacklogSeconds(
-      pending,
-      scheduler.batchSize,
-      scheduler.drainIntervalSeconds,
-    ),
+    projected_seconds: projectBacklogSeconds(pending, scheduler.batchSize, perTickCadenceSeconds),
     projected_cost_eur: projectBacklogCostEur(pending, avgCostPerProperty),
     avg_cost_eur_per_property: avgCostPerProperty,
   };

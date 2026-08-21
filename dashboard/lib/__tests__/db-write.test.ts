@@ -33,10 +33,10 @@ describe("withTransaction", () => {
     await resetPool();
   });
 
-  it("#666/D-149: getPool() constructs the write pool with max: 12 (headroom above the concurrency hard cap of 8)", () => {
+  it("#666/D-149: getPool() constructs the write pool with max: 10 (transient-query headroom; lock-holding lives on its own dedicated pool, cache.ts's getLockPool())", () => {
     getPool();
     expect(poolConstructorCalls).toHaveLength(1);
-    expect((poolConstructorCalls[0] as { max: number }).max).toBe(12);
+    expect((poolConstructorCalls[0] as { max: number }).max).toBe(10);
   });
 
   it("commits on success and releases client", async () => {

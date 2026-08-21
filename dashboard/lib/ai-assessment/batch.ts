@@ -53,7 +53,8 @@ import {
   DISABLED_SOURCES_CTE,
   assessmentEligibleClause,
   selectionFlowValues,
-  missingCurrentVerdictClause,
+  pendingClause,
+  parkGuardParams,
 } from "./eligibility";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { LlmQuotaExceededError } from "@/lib/llm-enabled";
@@ -176,20 +177,27 @@ export async function selectPropertiesNeedingAssessment(
   batchSize: number,
 ): Promise<number[]> {
   if (batchSize <= 0) return [];
-  // Eligibility (stage 1 + stage 2a) and the pending predicate (stage 2b) come
-  // from the shared `eligibility.ts` fragments, so the cost panel's coverage
-  // (`lib/db/llm-health.ts`) counts EXACTLY the population this query drains.
+  // Eligibility (stage 1 + stage 2a) and the pending predicate (stage 2b,
+  // NOW including the stage-2c parked-flow guard, #666/D-149 review finding
+  // 1) come from the shared `eligibility.ts` fragments, so the cost panel's
+  // coverage (`lib/db/llm-health.ts`) counts EXACTLY the population this
+  // query drains. See `pendingClause`'s doc for why the park guard has to
+  // live INSIDE the per-flow predicate rather than as an independent AND —
+  // a property parked only on `extract` (not a selection flow) must not
+  // stop being selected for otherwise-healthy occupancy/condition/redflags.
   const { valuesSql, params } = selectionFlowValues(1);
-  const limitParam = `$${params.length + 1}`;
+  const guard = parkGuardParams(params.length + 1);
+  const allParams = [...params, ...guard.params];
+  const limitParam = `$${allParams.length + 1}`;
   const rows = await sql<{ id: string }>(
     `WITH ${DISABLED_SOURCES_CTE}
      SELECT p.id
        FROM property p
       WHERE ${assessmentEligibleClause("p")}
-        AND ${missingCurrentVerdictClause("p", valuesSql)}
+        AND ${pendingClause("p", valuesSql, guard.maxFailuresParam, guard.decayDaysParam)}
       ORDER BY p.created_at ASC, p.id ASC
       LIMIT ${limitParam}`,
-    [...params, String(batchSize)],
+    [...allParams, String(batchSize)],
   );
   return rows.map((r) => Number(r.id));
 }
@@ -245,6 +253,17 @@ const DEFAULT_BATCH_SIZE = 5;
 const DEFAULT_CONCURRENCY = 1;
 
 /**
+ * Hard cap on `concurrency`, enforced HERE (not just by the scheduler's own
+ * `loadSchedulerConfig` clamp, #666/D-149 review finding) — a docstring that
+ * claims a cap a caller can trivially exceed isn't a cap. Bounds real host
+ * resources (one `claude` CLI child process per in-flight call, D-106) and
+ * the dedicated advisory-lock pool `cache.ts`'s `getLockPool()` sizes off
+ * this same number. Any direct caller of `runAssessmentBatch` (a future
+ * ad-hoc trigger, a script, a test) is capped exactly like the scheduler is.
+ */
+export const MAX_ASSESSMENT_CONCURRENCY = 8;
+
+/**
  * Run one bounded assessment pass. Safe to call repeatedly and concurrently:
  * the selection query and each flow's #30 advisory-locked cache make a re-run
  * over unchanged data a no-op with no wasted LLM spend.
@@ -258,7 +277,10 @@ export async function runAssessmentBatch(
   opts: RunAssessmentBatchOptions = {},
 ): Promise<AssessmentBatchResult> {
   const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
-  const concurrency = Math.max(1, Math.floor(opts.concurrency ?? DEFAULT_CONCURRENCY));
+  const concurrency = Math.min(
+    MAX_ASSESSMENT_CONCURRENCY,
+    Math.max(1, Math.floor(opts.concurrency ?? DEFAULT_CONCURRENCY)),
+  );
   const flows = opts.flows ?? DEFAULT_BATCH_FLOWS;
   const selectPropertyIds = opts.selectPropertyIds ?? selectPropertiesNeedingAssessment;
   const isCurrent = opts.isCurrent ?? isFlowCurrent;

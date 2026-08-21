@@ -13,19 +13,33 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mockSql = vi.fn();
 // getOrCompute now wraps its check-compute-save cycle in a Postgres advisory
-// lock (#30 review, stampede fix) via a DEDICATED client from `getPool()` —
-// separate from `sql()`'s pool.query() path. This module has no real DB, so
-// `getPool().connect()` is mocked to return a stub client whose `query()`
-// (the `pg_advisory_lock`/`_unlock` calls) resolves immediately: these tests
+// lock (#30 review, stampede fix) via a DEDICATED client from a DEDICATED
+// pool (#666/D-149 finding 2 — `getLockPool()`, a raw `new Pool(...)` from
+// "pg", separate from both `sql()`'s pool.query() path AND `db-write.ts`'s
+// general pool). This module has no real DB, so the "pg" module's `Pool`
+// constructor is mocked to return a stub client whose `connect()`/`query()`
+// (the `pg_advisory_lock`/`_unlock` calls) resolve immediately: these tests
 // are about the cache decision logic, not about the lock itself (that's
 // cache.integration.test.ts's job, since an advisory lock is a genuine
 // Postgres feature no mock can meaningfully fake).
 const mockClientQuery = vi.fn().mockResolvedValue({ rows: [] });
 const mockRelease = vi.fn();
 const mockConnect = vi.fn().mockResolvedValue({ query: mockClientQuery, release: mockRelease });
+const lockPoolConstructorCalls: unknown[] = [];
 vi.mock("@/lib/db-write", () => ({
   sql: (...a: unknown[]) => mockSql(...a),
-  getPool: () => ({ connect: mockConnect }),
+}));
+vi.mock("pg", () => ({
+  Pool: class {
+    connect = mockConnect;
+    constructor(config: unknown) {
+      lockPoolConstructorCalls.push(config);
+    }
+  },
+  // db-shared.ts registers the int8 type parser at module load — the mock
+  // needs a minimal stand-in so that import doesn't throw (mirrors
+  // db-write.test.ts's identical "pg" mock).
+  types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
 import { getOrCompute, getLatestAssessment, computeAssessmentContentHash } from "../cache";
@@ -312,5 +326,16 @@ describe("getOrCompute", () => {
     expect(lockParams[0]).toContain("7");
     expect(lockParams[0]).toContain("redflags");
     expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("#666/D-149: the advisory lock uses its OWN dedicated pool (max: 10), not db-write.ts's general pool", async () => {
+    mockSql.mockResolvedValueOnce([]);
+    const computeFn = vi.fn().mockResolvedValue({ result: { v: 1 }, model: "m1" });
+    const save = vi.fn().mockResolvedValue(undefined);
+
+    await getOrCompute(9, "condition", "v1", listings, computeFn, save);
+
+    expect(lockPoolConstructorCalls).toHaveLength(1);
+    expect((lockPoolConstructorCalls[0] as { max: number }).max).toBe(10);
   });
 });
