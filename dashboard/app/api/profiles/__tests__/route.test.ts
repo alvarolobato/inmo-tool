@@ -204,6 +204,71 @@ describe("POST /api/profiles", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  it("rejects an empty connectors array with 400 (shape validation, before any DB call)", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, connectors: [] },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/profiles — connector selection (issue #660)", () => {
+  it("400s naming an unknown connector rather than silently accepting it", async () => {
+    // unknownConnectorNames' SELECT ... WHERE connector_name = ANY($1) finds
+    // no matching row — every name in the selection is unknown.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "Novedades",
+        scope: { ...VALID_SCOPE, connectors: ["no_existe"] },
+      }),
+    );
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(String(json.error ?? json.message ?? JSON.stringify(json))).toContain("no_existe");
+    // The registry check ran, but createProfile's INSERT never did.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates the profile when every selected connector is registered", async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ connector_name: "fotocasa" }] }) // unknownConnectorNames
+      .mockResolvedValueOnce({ rows: [dbRow({ scope: { ...VALID_SCOPE, connectors: ["fotocasa"] } })] }); // INSERT
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "Solo Fotocasa",
+        scope: { ...VALID_SCOPE, connectors: ["fotocasa"] },
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO search_profile"),
+      expect.any(Array),
+    );
+  });
+
+  it("skips the registry check entirely for the default/'all' selection (no connector_registry query at all)", async () => {
+    // mockResolvedValue (repeating), not Once: D-040's post-create refresh
+    // (refreshProfileForScope) issues its own best-effort queries after the
+    // INSERT — irrelevant to what this test checks, so every call gets a
+    // harmless dbRow() rather than only the first.
+    mockQuery.mockResolvedValue({ rows: [dbRow()] });
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "Todas las fuentes",
+        scope: VALID_SCOPE,
+      }),
+    );
+    expect(res.status).toBe(201);
+    for (const call of mockQuery.mock.calls) {
+      expect(String(call[0])).not.toContain("connector_registry");
+    }
+  });
 });
 
 describe("DELETE /api/profiles/[id] (archive)", () => {
@@ -382,5 +447,39 @@ describe("PATCH /api/profiles/[id]", () => {
       { params: Promise.resolve({ id: "999999" }) },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/profiles/[id] — connector selection (issue #660)", () => {
+  it("400s naming an unknown connector, before ever loading/updating the profile", async () => {
+    // unknownConnectorNames' registry SELECT finds no match.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/1", "PATCH", {
+        scope: { ...VALID_SCOPE, connectors: ["typo_connector"] },
+      }),
+      { params: Promise.resolve({ id: "1" }) },
+    );
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(String(json.error)).toContain("typo_connector");
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a scope patch narrowing to a registered connector", async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ connector_name: "cimenta2" }] }) // unknownConnectorNames
+      .mockResolvedValueOnce({ rows: [dbRow()] }) // getProfileById inside updateProfile
+      .mockResolvedValueOnce({
+        rows: [dbRow({ scope: { ...VALID_SCOPE, connectors: ["cimenta2"] } })],
+      }); // UPDATE ... RETURNING
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/1", "PATCH", {
+        scope: { ...VALID_SCOPE, connectors: ["cimenta2"] },
+      }),
+      { params: Promise.resolve({ id: "1" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).scope.connectors).toEqual(["cimenta2"]);
   });
 });

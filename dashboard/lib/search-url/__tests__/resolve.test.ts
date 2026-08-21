@@ -458,3 +458,67 @@ describe("resolveSearchTasks — tier 0 owner-pinned overrides (issue #478)", ()
     );
   });
 });
+
+/**
+ * Issue #660: a profile's `scope.connectors` selection narrows its captura
+ * tasks — the same single enforcement point (`resolveSearchTasks`'s
+ * CAPTURE_PORTALS loop) serves both /captura and the search-urls API route,
+ * so nothing else needs its own filter. The decorative trap the issue warns
+ * about: a fixture that selects EVERY portal never actually exercises the
+ * exclusion — every case below selects only ONE portal while learned
+ * examples/overrides exist for others too, and asserts those others are
+ * ABSENT, not merely that the selected one is present.
+ */
+describe("resolveSearchTasks — connector selection (issue #660)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockOverrides.mockResolvedValue([]);
+    withExamples({});
+  });
+
+  it("a profile restricted to one connector gets tasks for ONLY that connector", async () => {
+    const tasks = await resolveSearchTasks(
+      scope(ESTEPONA, { price_max: 180000, connectors: ["idealista"] } as Partial<Scope>),
+      PROFILE_ID,
+    );
+    const portals = new Set(tasks.map((t) => t.portal));
+    expect(portals).toEqual(new Set(["idealista"]));
+    expect(tasks.length).toBeGreaterThan(0);
+  });
+
+  it("a profile restricted to one connector gets NO owner-pinned override task for an excluded connector", async () => {
+    // An override for aliseda exists, but the profile only selected idealista
+    // — the override must not resurrect an excluded portal's task.
+    mockOverrides.mockResolvedValue([overrideRow("aliseda", "https://alisedainmobiliaria.com/pinned")]);
+    const tasks = await resolveSearchTasks(
+      scope(ESTEPONA, { price_max: 180000, connectors: ["idealista"] } as Partial<Scope>),
+      PROFILE_ID,
+    );
+    expect(tasks.some((t) => t.portal === "aliseda")).toBe(false);
+  });
+
+  it("the explicit 'all' sentinel behaves exactly like an absent connectors field (every portal present)", async () => {
+    const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
+    const withAll = await resolveSearchTasks(
+      scope(ESTEPONA, { price_max: 180000, connectors: "all" } as Partial<Scope>),
+      PROFILE_ID,
+    );
+    expect(withAll).toEqual(
+      withCaptureUrls([
+        ...idealistaBuilder.build(canonical),
+        ...alisedaBuilder.build(canonical),
+        ...hipogesBuilder.build(canonical),
+      ]),
+    );
+  });
+
+  it("an empty selection intersection with a builder-less portal (altamira) yields nothing extra — no crash, no phantom task", async () => {
+    // altamira has no BUILDERS entry at all; excluding every OTHER connector
+    // must not somehow synthesize an altamira task out of nowhere.
+    const tasks = await resolveSearchTasks(
+      scope(ESTEPONA, { price_max: 180000, connectors: ["idealista"] } as Partial<Scope>),
+      PROFILE_ID,
+    );
+    expect(tasks.some((t) => t.portal === "altamira")).toBe(false);
+  });
+});

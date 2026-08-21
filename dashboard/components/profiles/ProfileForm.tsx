@@ -4,11 +4,14 @@ import { useEffect, useState } from "react";
 import {
   PROPERTY_TYPES,
   PROPERTY_TYPE_LABELS,
+  effectiveConnectors,
   type RadiusGeography,
   type Scope,
   type ThesisParams,
 } from "@/lib/profiles-schema";
 import { LocationPicker } from "./LocationPicker";
+import { isRentalOnlyConnector, type ConnectorView } from "@/lib/connectors-schema";
+import { isConnectorActive } from "@/lib/db/source-active";
 
 export interface ProfileFormValues {
   name: string;
@@ -33,6 +36,11 @@ export const DEFAULT_VALUES: ProfileFormValues = {
   scope: {
     geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },
     property_types: ["piso"],
+    // Issue #660: the form always writes `connectors` explicitly (never
+    // relies on the schema's "absent means all" default) — "all" is the
+    // stated starting point, same posture as property_types would be if it
+    // had a sentinel default too.
+    connectors: "all",
     hard_exclusions: {},
   },
   thesis_params: {},
@@ -205,11 +213,117 @@ export function ProfileForm({
     });
   };
 
+  // --- Connector selection (issue #660, part of #658) ---------------------
+  // The picker loads the live connector roster once (name + global on/off +
+  // corpus size, GET /api/etl/connectors — the same admin endpoint the
+  // Conectores page uses, task item 5's stated source). A load failure
+  // degrades to "no picker, still safe": the form keeps whatever selection
+  // it already had (default "all"), it just can't offer per-source
+  // checkboxes until the list loads.
+  const [connectorList, setConnectorList] = useState<ConnectorView[] | null>(null);
+  const [connectorListError, setConnectorListError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/etl/connectors");
+        if (!res.ok) throw new Error(String(res.status));
+        const body = await res.json();
+        if (!cancelled && Array.isArray(body.connectors)) {
+          setConnectorList(body.connectors as ConnectorView[]);
+        }
+      } catch {
+        if (!cancelled) setConnectorListError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const effectiveConnectorSelection = effectiveConnectors(values.scope);
+  const isAllConnectors = effectiveConnectorSelection === "all";
+  const currentSelection: string[] =
+    effectiveConnectorSelection === "all" ? [] : effectiveConnectorSelection;
+
+  // Biggest-first (Additional Context: "big three first, tail scannable
+  // below"), registered connectors only — an unregistered/removed
+  // connector isn't a real choice on the form even though a profile that
+  // already selected it degrades sensibly (scope-query.ts's ANY() just
+  // matches nothing for that name).
+  //
+  // Ordered by the SALE corpus only (#674 review L3): a `search_profile` is
+  // a sale thesis (D-016), so rental volume must not buy a connector a
+  // higher slot — counting it unfiltered ranked `fotocasa_rental` 6th of 18
+  // on 283 rental listings and 0 sale ones.
+  //
+  // A rental-only connector is dropped from the picker entirely: selecting
+  // it yields a permanently-empty profile with nothing on screen explaining
+  // why. It stays visible only when this profile ALREADY selected it, so an
+  // existing (or hand-edited) selection remains something the owner can see
+  // and untick rather than invisible state.
+  const orderedConnectors = (connectorList ?? [])
+    .filter((c) => c.registered)
+    .filter((c) => !isRentalOnlyConnector(c) || currentSelection.includes(c.name))
+    .slice()
+    .sort((a, b) => b.activeSaleListingCount - a.activeSaleListingCount);
+
+  // Remembered selection, so ticking "Todas las fuentes" and unticking it
+  // again returns the profile to the sources it had rather than wiping them.
+  //
+  // Seeded EMPTY, and deliberately so (#674 review H2). The old initializer
+  // read `... : orderedConnectors.map((c) => c.name)`, which was DEAD code:
+  // `connectorList` is null on the first render and a useState initializer
+  // runs exactly once, so that branch could only ever produce `[]`. The fix
+  // is to delete the pretence, not to implement it — "start from everything
+  // ticked" is the wrong default anyway. Someone unticking "Todas las
+  // fuentes" is narrowing, and making them untick 17 of 18 rows on a phone
+  // to express that is worse than having them tick the two they want. An
+  // empty start is also what the "Selecciona al menos un conector" submit
+  // guard already assumes: a positive choice, not a subtraction.
+  const [lastConnectorSelection, setLastConnectorSelection] =
+    useState<string[]>(currentSelection);
+  useEffect(() => {
+    const eff = effectiveConnectors(values.scope);
+    if (eff !== "all" && eff.length > 0) setLastConnectorSelection(eff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values.scope.connectors]);
+
+  const setAllConnectors = (all: boolean) => {
+    // Unticking with nothing remembered lands on `[]` — an intentionally
+    // empty picker for the owner to fill in. That state cannot be submitted
+    // (the "Selecciona al menos un conector" guard) but it is always
+    // RECOVERABLE, which is the part that was broken: the master toggle is
+    // never disabled, so re-ticking restores "all" even when the connector
+    // roster never loaded (#674 review H2).
+    setValues((v) => ({
+      ...v,
+      scope: {
+        ...v.scope,
+        connectors: all ? "all" : lastConnectorSelection,
+      },
+    }));
+  };
+
+  const toggleConnector = (name: string) => {
+    setValues((v) => {
+      const current = effectiveConnectors(v.scope) === "all" ? [] : (v.scope.connectors as string[]);
+      const has = current.includes(name);
+      const connectors = has ? current.filter((n) => n !== name) : [...current, name];
+      return { ...v, scope: { ...v.scope, connectors } };
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     if (values.scope.property_types !== "all" && values.scope.property_types.length === 0) {
       setError("Selecciona al menos un tipo de inmueble, o marca «Todos los tipos».");
+      return;
+    }
+    const connectorSelection = effectiveConnectors(values.scope);
+    if (connectorSelection !== "all" && connectorSelection.length === 0) {
+      setError("Selecciona al menos un conector, o marca «Todas las fuentes».");
       return;
     }
     setSubmitting(true);
@@ -424,6 +538,123 @@ export function ProfileForm({
             </label>
           ))}
         </div>
+      </fieldset>
+
+      {/* Issue #660: per-profile connector selection. "Todas las fuentes"
+          (default, D-055-neutral) matches today's behaviour exactly; ticking
+          off the master toggle reveals one checkbox per REGISTERED
+          connector, biggest corpus first (Additional Context). A connector
+          the owner has turned OFF globally (D-055) stays visible but greyed
+          + badged, never hidden — "why is X empty" needs an answer on
+          screen — but is still selectable-into-a-profile: the effective set
+          is the intersection (selection ∩ globally-active), computed at read
+          time, so nothing here needs to special-case that precedence. */}
+      <fieldset style={fieldsetStyle}>
+        <legend style={legendStyle}>Fuentes</legend>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 13,
+            color: "var(--fg)",
+            marginTop: 6,
+            minHeight: 44,
+          }}
+        >
+          {/* Never `disabled` (#674 review H2). The old guard read
+              `connectorList === null && !isAllConnectors`, which is exactly
+              backwards: while the roster loads the toggle is enabled, so
+              unticking it sets `connectors: []`, `isAllConnectors` flips
+              false, and the toggle DISABLES ITSELF. With a failed
+              /api/etl/connectors it never recovers — no checkboxes to tick,
+              submit blocked by the "Selecciona al menos un conector" guard,
+              scope preview 400ing on ScopeSchema's .min(1) — and only a
+              reload escapes, losing the whole form. On a phone that is the
+              end of the session.
+              Enabled-always is also the simpler invariant: re-selecting
+              "all" writes the literal string and needs no roster at all, so
+              there is nothing for a missing roster to make unsafe. */}
+          <input
+            type="checkbox"
+            data-testid="scope-all-connectors-toggle"
+            checked={isAllConnectors}
+            onChange={(e) => setAllConnectors(e.target.checked)}
+          />
+          Todas las fuentes
+        </label>
+        {!isAllConnectors && connectorList === null && !connectorListError && (
+          <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--fg-muted)" }}>
+            Cargando conectores…
+          </p>
+        )}
+        {!isAllConnectors && connectorListError && (
+          <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--down)" }}>
+            No se pudo cargar la lista de conectores. Inténtalo de nuevo más tarde.
+          </p>
+        )}
+        {!isAllConnectors && orderedConnectors.length > 0 && (
+          <div
+            style={{
+              marginTop: 8,
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+            }}
+          >
+            {orderedConnectors.map((c) => {
+              // Shared with DISABLED_SOURCES_CTE's SQL CASE (#674 review L2):
+              // this used to be a third private copy of D-055's discriminator.
+              const globallyActive = isConnectorActive(c);
+              const checked = Array.isArray(values.scope.connectors) && values.scope.connectors.includes(c.name);
+              return (
+                <label
+                  key={c.name}
+                  data-testid={`scope-connector-${c.name}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: 8,
+                    fontSize: 13,
+                    // Actually grey the row when the connector is globally
+                    // off (#674 review L1). D-152, the e2e spec and the PR
+                    // body all said "greyed", but only the badge was muted —
+                    // the name rendered at full `--fg` like every other row.
+                    // The checkbox stays interactive on purpose: D-055 says
+                    // grey it, never hide it, and a global off is a state the
+                    // owner can lift later.
+                    color: globallyActive ? "var(--fg)" : "var(--fg-muted)",
+                    opacity: globallyActive ? 1 : 0.65,
+                    minHeight: 44,
+                    padding: "2px 0",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleConnector(c.name)}
+                  />
+                  <span style={{ wordBreak: "break-word" }}>{c.name}</span>
+                  {!globallyActive && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        background: "var(--bg-2)",
+                        color: "var(--fg-muted)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      desactivado globalmente
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        )}
       </fieldset>
 
       {/* Issue #659/#663 (guardrail, not built here): visibility, not a

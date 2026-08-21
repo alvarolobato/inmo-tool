@@ -56,3 +56,26 @@ export const DISABLED_SOURCES_CTE = `disabled_sources AS (
 export function activeSourceClause(alias: string): string {
   return `${alias}.source NOT IN (SELECT source FROM disabled_sources)`;
 }
+
+/**
+ * The TypeScript twin of `DISABLED_SOURCES_CTE`'s `CASE`: is this connector
+ * currently ON, given the owner's single-toggle model?
+ *
+ * There must be exactly TWO copies of this discriminator — the SQL above (for
+ * queries that filter listings) and this one (for components rendering a
+ * connector's state). Issue #674's review found a THIRD had appeared
+ * (`ProfileForm`'s connector picker, alongside `ConnectorCard`'s); all three
+ * agreed at the time, which is precisely how this class of drift stays
+ * invisible until one of them is updated and the others aren't. Import this
+ * rather than re-deriving `supports_discovery ? enabled : capture_enabled`.
+ *
+ * Client-safe: this module imports nothing, so a `"use client"` component can
+ * pull it in without dragging a DB driver into the browser bundle.
+ */
+export function isConnectorActive(c: {
+  supports_discovery: boolean;
+  enabled: boolean;
+  capture_enabled: boolean;
+}): boolean {
+  return c.supports_discovery ? c.enabled : c.capture_enabled;
+}

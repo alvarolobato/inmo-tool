@@ -264,3 +264,79 @@ describe("buildScopeWhereClause — unfiltered sentinels (issue #659)", () => {
     expect(Math.max(...placeholders)).toBe(params.length);
   });
 });
+
+/**
+ * Issue #660: per-profile connector selection, folded into the SAME active-
+ * sale EXISTS as the unconditional status/operation gate — the single
+ * enforcement point the design calls for. Absent/`"all"` must produce byte-
+ * identical SQL to today (no clause, no param) so every pre-#660 profile is
+ * unaffected; a real selection must add `AND listing.source = ANY(...)`
+ * INSIDE the EXISTS, never as a separate top-level condition.
+ */
+describe("buildScopeWhereClause — connector selection (issue #660)", () => {
+  const SALE_EXISTS_PREFIX =
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale'";
+
+  it("omits the source clause entirely when connectors is absent (pre-#660 profiles, byte-identical SQL)", () => {
+    const { whereSql, params } = buildScopeWhereClause(baseScope({ property_types: "all" }));
+    expect(whereSql).toContain(
+      "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')",
+    );
+    expect(whereSql).not.toContain("listing.source");
+    expect(params).toEqual([40.4168, -3.7038, 5]);
+  });
+
+  it("omits the source clause entirely when connectors is the explicit 'all' sentinel", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({ property_types: "all", connectors: "all" }),
+    );
+    expect(whereSql).not.toContain("listing.source");
+    expect(params).toEqual([40.4168, -3.7038, 5]);
+  });
+
+  it("restricts to a single connector via AND listing.source = ANY(...) INSIDE the sale EXISTS", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({ property_types: "all", connectors: ["fotocasa"] }),
+    );
+    expect(whereSql).toContain(
+      SALE_EXISTS_PREFIX + " AND listing.source = ANY($4::text[]))",
+    );
+    expect(params).toEqual([40.4168, -3.7038, 5, ["fotocasa"]]);
+  });
+
+  it("restricts to several connectors as one text[] param, order preserved", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({ property_types: "all", connectors: ["cimenta2", "buildingcenter", "diglo"] }),
+    );
+    expect(whereSql).toContain("listing.source = ANY($4::text[])");
+    expect(params[3]).toEqual(["cimenta2", "buildingcenter", "diglo"]);
+  });
+
+  it("composes with 'everywhere' geography — no lat/lon params, source restriction is the only param", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({
+        geography: { type: "everywhere" },
+        property_types: "all",
+        connectors: ["hipoges"],
+      }),
+    );
+    expect(whereSql).not.toContain("property.lat");
+    expect(whereSql).toContain(SALE_EXISTS_PREFIX + " AND listing.source = ANY($1::text[]))");
+    expect(params).toEqual([["hipoges"]]);
+  });
+
+  it("every placeholder still maps 1:1 to a param with the source restriction stacked on price/size/exclusions", () => {
+    const { whereSql, params } = buildScopeWhereClause(
+      baseScope({
+        connectors: ["fotocasa", "milanuncios"],
+        price_min: 100000,
+        size_max: 90,
+        hard_exclusions: { excludes_ground_floor: true },
+      }),
+    );
+    const placeholders = [...whereSql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+    expect(new Set(placeholders).size).toBe(params.length);
+    expect(Math.max(...placeholders)).toBe(params.length);
+    expect(params[3]).toEqual(["fotocasa", "milanuncios"]);
+  });
+});

@@ -32,7 +32,7 @@
  *   3. NONE → the hand-written task, unchanged.
  */
 
-import type { Scope } from "@/lib/profiles-schema";
+import { scopeIncludesConnector, type Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { findExamplesForPortal, type SearchUrlExampleRow } from "@/lib/db/search-url-example";
 import {
@@ -243,6 +243,11 @@ export async function resolveSearchTasks(scope: Scope, profileId: number): Promi
     captureUrl: toCaptureUrl(t.portal, t.url),
   });
   for (const { portal } of CAPTURE_PORTALS) {
+    // Issue #660: a profile's connector selection narrows its captura tasks
+    // too — a portal the profile excludes gets NO task at all, not even a
+    // synthesized owner-override one (an override is still an explicit
+    // recall source, but the profile said this source shouldn't feed it).
+    if (!scopeIncludesConnector(scope, portal)) continue;
     const builder = BUILDERS[portal];
     // Issue #659/D-147: `canonical` is null for an "everywhere" geography
     // (canonicalScopeFromProfile — no center for a builder's grammar to

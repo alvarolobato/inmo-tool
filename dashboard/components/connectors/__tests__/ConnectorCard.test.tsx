@@ -66,6 +66,8 @@ function makeConnector(overrides: Partial<ConnectorView> = {}): ConnectorView {
       error_count: 0,
       error_msg: null,
     },
+    activeSaleListingCount: 0,
+    activeRentListingCount: 0,
     ...overrides,
   };
 }

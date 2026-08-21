@@ -145,3 +145,50 @@ describe("scopesEqual — everywhere/all sentinels (issue #659)", () => {
     expect(scopesEqual(a, b)).toBe(false);
   });
 });
+
+// Issue #660: per-profile connector selection. An absent `connectors` field
+// (every pre-#660 profile) and the explicit "all" sentinel are the SAME
+// effective scope (effectiveConnectors), so they must compare equal —
+// otherwise every existing profile would fire a spurious D-040 refresh the
+// first time it's re-saved with the form's now-explicit "all" write. A real
+// selection change (narrow/widen/swap sources) IS a scope change, same
+// treatment as property_types.
+describe("scopesEqual — connectors (issue #660)", () => {
+  it("absent connectors on both sides IS equal (both profiles pre-#660)", () => {
+    expect(scopesEqual(BASE, clone(BASE))).toBe(true);
+  });
+
+  it("absent connectors vs. explicit 'all' IS equal — same effective scope", () => {
+    const b: Scope = { ...clone(BASE), connectors: "all" };
+    expect(scopesEqual(BASE, b)).toBe(true);
+  });
+
+  it("absent connectors vs. a real selection is NOT equal", () => {
+    const b: Scope = { ...clone(BASE), connectors: ["fotocasa"] };
+    expect(scopesEqual(BASE, b)).toBe(false);
+  });
+
+  it("reordering a connector selection IS equal (order carries no meaning)", () => {
+    const a: Scope = { ...clone(BASE), connectors: ["fotocasa", "cimenta2"] };
+    const b: Scope = { ...clone(BASE), connectors: ["cimenta2", "fotocasa"] };
+    expect(scopesEqual(a, b)).toBe(true);
+  });
+
+  it("narrowing a connector selection is NOT equal", () => {
+    const a: Scope = { ...clone(BASE), connectors: ["fotocasa", "cimenta2"] };
+    const b: Scope = { ...clone(BASE), connectors: ["fotocasa"] };
+    expect(scopesEqual(a, b)).toBe(false);
+  });
+
+  it("swapping to a same-size, different-membership selection is NOT equal", () => {
+    const a: Scope = { ...clone(BASE), connectors: ["fotocasa"] };
+    const b: Scope = { ...clone(BASE), connectors: ["cimenta2"] };
+    expect(scopesEqual(a, b)).toBe(false);
+  });
+
+  it("a full connector list is NOT equal to 'all' — different STATED scopes, same as property_types", () => {
+    const a: Scope = { ...clone(BASE), connectors: "all" };
+    const b: Scope = { ...clone(BASE), connectors: ["fotocasa", "cimenta2", "milanuncios"] };
+    expect(scopesEqual(a, b)).toBe(false);
+  });
+});
