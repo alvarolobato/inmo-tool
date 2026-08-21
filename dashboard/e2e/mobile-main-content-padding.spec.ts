@@ -190,7 +190,7 @@ test.describe("phone width (iPhone 13 emulation)", () => {
   test("AdminChrome content div horizontal padding shrinks on phone (every /admin/* and /etl/* page)", async ({
     page,
   }) => {
-    await gotoAndSettle(page, "/etl/connectors", "connectors-page");
+    await gotoAndSettle(page, "/admin/fuentes", "fuentes-page");
     const padding = await elementPadding(page, ".admin-chrome-content");
     expect(padding.left, "left padding shrinks on phone").toBe("12px");
     expect(padding.right, "right padding shrinks on phone").toBe("12px");
@@ -222,7 +222,7 @@ test.describe("desktop (default project)", () => {
   });
 
   test("AdminChrome content div and route-shell padding are untouched at desktop width", async ({ page }) => {
-    await gotoAndSettle(page, "/etl/connectors", "connectors-page");
+    await gotoAndSettle(page, "/admin/fuentes", "fuentes-page");
     const adminPadding = await elementPadding(page, ".admin-chrome-content");
     expect(adminPadding.left).toBe("20px");
     expect(adminPadding.right).toBe("20px");

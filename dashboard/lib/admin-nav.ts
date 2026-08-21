@@ -16,6 +16,16 @@
  * routable as the modal's full-page deep link), and #511 removed Descubrimiento
  * (the aliseda static drift check moved to Salud de datos + a weekly scheduled
  * run). The strip is back to its intended tab set.
+ *
+ * Issue #642 P1 (part of #636's admin-IA deletion pass): "Conectores"
+ * (`/etl/connectors`) and "Captura (admin)" (`/etl/captura`) are merged into
+ * one "Fuentes" tab (`/admin/fuentes` list + `/admin/fuentes/[name]` detail —
+ * config controls, the worklist ledger, and per-source salud sections all
+ * live on the detail page now). Both old routes are deleted outright — no
+ * page.tsx, so no route-table entry — and 301-redirect to their new home via
+ * `next.config.js`'s `redirects()` (kept resolvable for old bookmarks/links,
+ * just off the nav strip and off the route table). `/etl/salud` and the rest
+ * of the `/etl` tree are untouched here; that is P2.
  */
 
 export interface AdminNavItem {
@@ -40,20 +50,16 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Estado de sincronización, ejecuciones recientes y estadísticas del proceso ETL.",
   },
-  // Connector management (#100) — an operator surface, gated via `/etl/:path*`.
+  // Fuentes (issue #642 P1) — merges the old "Conectores" (`/etl/connectors`)
+  // and "Captura (admin)" (`/etl/captura`) tabs into one per-source surface:
+  // a lean list (`/admin/fuentes`) linking to a detail page
+  // (`/admin/fuentes/[name]`) that carries connector config, the capture
+  // worklist ledger, and per-source quality/zero-result/drift sections.
   {
-    href: "/etl/connectors",
-    label: "Conectores",
-    description: "Configuración de los conectores de los portales y su estado.",
-  },
-  // Guided-capture worklist (#237) — the ledger of "places to visit one by one"
-  // for extension-only portals. Renamed from "Captura guiada": guided capture
-  // itself now lives at `/captura`; this admin surface is the worklist ledger.
-  {
-    href: "/etl/captura",
-    label: "Captura (admin)",
+    href: "/admin/fuentes",
+    label: "Fuentes",
     description:
-      "Registro de la captura asistida por extensión: qué portales visitar y el estado de cada tarea.",
+      "Cada fuente (conector o portal de captura): configuración, ejecución, captura y calidad.",
   },
   // Data-health observability (#272) — read-only capture/ETL health. Since #511
   // it also carries the "Deriva de portales" section (the aliseda static drift
@@ -120,8 +126,12 @@ function matchPrefixesFor(item: AdminNavItem): readonly string[] {
 
 /**
  * Returns the `href` of the nav item that owns `pathname`, or `null` when none
- * do. Longest-prefix wins, so `/etl/connectors` highlights Conectores (not
- * Monitor ETL) and `/admin/usage` highlights the LLM tab (not itself).
+ * do. Longest-prefix wins, so `/admin/fuentes/<name>` highlights Fuentes (not
+ * some shorter `/admin` prefix) and `/admin/usage` highlights the LLM tab (not
+ * itself). There is no Conectores item any more — `/etl/connectors` was
+ * deleted in issue #642 P1, and the stale `/etl/*` paths it left behind fall
+ * through to Monitor ETL by the same longest-prefix rule (pinned in
+ * `lib/__tests__/admin-nav.test.ts`).
  */
 export function activeAdminHref(pathname: string): string | null {
   let best: { href: string; len: number } | null = null;

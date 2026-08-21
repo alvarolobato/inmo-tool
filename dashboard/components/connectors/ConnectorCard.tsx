@@ -59,7 +59,14 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
+// minHeight 44 (issue #642 review): this card is now the primary control
+// surface on the Fuentes detail page (rendered expanded, not tucked behind a
+// disclosure) — the same class of 35-38px tap target #656 found in
+// moved-verbatim markup, caught here before relocating rather than after.
 const buttonStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 44,
   padding: "6px 12px",
   borderRadius: 6,
   border: "1px solid var(--border)",
@@ -375,10 +382,18 @@ export function ConnectorCard({
   onRunFinished?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  // Collapsed by default: the list must be browsable at a glance, so full
-  // config/scope/last-run detail is hidden until the operator expands a row
-  // (issue #264).
-  const [expanded, setExpanded] = useState(false);
+  // Starts EXPANDED. Issue #264's "collapsed by default" existed for the
+  // `/etl/connectors` list, where a dozen cards had to be browsable at a
+  // glance; that list is gone (issue #642 P1) and the card's only caller is
+  // the Fuentes detail page, which shows exactly one connector — hiding its
+  // configuration behind a click there is a wasted tap. A `defaultExpanded`
+  // prop briefly survived that deletion, but with one call site always
+  // passing it the prop was configurability nothing configured, alive only
+  // because unit tests exercised the other branch. Deleted.
+  //
+  // The toggle itself stays: on a phone (D-120/D-121) collapsing the config
+  // is the fastest way past it to the Captura queue below.
+  const [expanded, setExpanded] = useState(true);
   const [editingScope, setEditingScope] = useState(false);
   const [draftScope, setDraftScope] = useState<LocationPickerValue>(() => ({
     center: connector.geography_override?.center ?? [40.4168, -3.7038],

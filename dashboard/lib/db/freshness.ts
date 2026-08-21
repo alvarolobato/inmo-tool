@@ -312,7 +312,7 @@ export async function getConnectorFreshness(opts?: {
     const inScope = enabled || (captureOnly && captureEnabled);
 
     // Issue #586/D-125: the SAME helper `listConnectors()` calls for the
-    // /etl/connectors pill — one definition, so the two surfaces cannot
+    // /admin/fuentes pill — one definition, so the two surfaces cannot
     // structurally diverge on what "due" means.
     const f = resolveConnectorFreshnessState({
       connectorName: row.connector,

@@ -1,15 +1,22 @@
 ---
 id: D-045
-title: Guided-capture EXECUTION is a top-level page; SETUP stays under /etl (admin)
+title: Guided-capture EXECUTION is a top-level page; SETUP is a separate admin surface
 date: 2026-08-05
 group: Data / connectors
-rule: Guided-capture EXECUTION is the top-level `/captura` page (nav, next to Perfiles); SETUP stays under `/etl/*` (admin). It composes `/api/profiles/[id]/search-urls` + `/api/etl/worklist` via pure `lib/captura-view.ts`, never re-implements the batch loop, and surfaces loosened pre-filter flags.
+rule: "Guided-capture EXECUTION is the top-level `/captura` page (nav, next to Perfiles); SETUP is a separate admin-gated surface (location REVISED by D-154 — `/admin/fuentes`, not `/etl/*`). It composes `/api/profiles/[id]/search-urls` + `/api/etl/worklist` via pure `lib/captura-view.ts`, never re-implements the batch loop, and surfaces loosened pre-filter flags."
 order: 48
 ---
 
-# D-045: Guided-capture EXECUTION is a top-level page; SETUP stays under /etl (admin)
+# D-045: Guided-capture EXECUTION is a top-level page; SETUP is a separate admin surface
 
 *Decided: 2026-08-05*
+
+**Partially superseded (2026-08-21) by [D-154](D-154-fuentes-merges-connector-setup.md)**:
+issue #642 P1 moved SETUP from `/etl/connectors` + `/etl/captura` to
+`/admin/fuentes` + `/admin/fuentes/[name]` (both old routes now 301). Only
+this decision's *location* clause ("SETUP stays under `/etl/*`") is
+superseded — the EXECUTION-vs-SETUP split itself, and everything else below,
+still stands as written.
 
 **Context**: Issue #268 (capstone of #237). The guided-capture pieces landed
 under `/etl/*` as they were built: the worklist table page (`/etl/captura`,

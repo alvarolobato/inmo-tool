@@ -225,8 +225,11 @@ export default function EtlMonitorPage() {
               void fetchStats();
             }}
           />
+          {/* #642 P1: connector management merged into Fuentes
+              (/etl/connectors itself still 301s here, but nothing should
+              route through that extra hop). */}
           <Link
-            href="/etl/connectors"
+            href="/admin/fuentes"
             className="text-sm font-medium hover:underline"
             style={{ color: "var(--accent)" }}
           >

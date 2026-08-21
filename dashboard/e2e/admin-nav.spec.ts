@@ -21,8 +21,10 @@
  *   - no error surface anywhere (the D-041 bar).
  *
  * Extensión (#509) and Descubrimiento (#511) have now been removed — their
- * function moved to inline CTAs / Salud de datos. Diagnósticos (#671) was
- * added on top. The strip's exact tab set is asserted here, exhaustively.
+ * function moved to inline CTAs / Salud de datos. #642 P1 merges "Conectores"
+ * + "Captura (admin)" into one "Fuentes" tab, and Diagnósticos (#671) was
+ * added on top — an 8-tab intermediate state on the way to #636's 6-section
+ * end state (P2 retires Monitor ETL + Salud de datos). Asserted exhaustively.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -33,17 +35,13 @@ import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 // The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
-// were removed by #509 / #511; "URLs capturadas" was deleted outright by #653;
-// Diagnósticos was added by #671 (extension force-capture diagnostics, D-153).
-//
-// This list is EXHAUSTIVE — `toHaveText` below compares it against every link
-// in the strip, so adding an entry to `lib/admin-nav.ts` without adding it
-// here fails this spec. That is deliberate: the strip is the one surface where
-// a silently-appearing admin tab should be a conscious decision.
+ * function moved to inline CTAs / Salud de datos. #642 P1 merges "Conectores"
+ * + "Captura (admin)" into one "Fuentes" tab, and Diagnósticos (#671) was
+ * added on top — an 8-tab intermediate state on the way to #636's 6-section
+ * end state (P2 retires Monitor ETL + Salud de datos). Asserted exhaustively.
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
-  "Conectores",
-  "Captura (admin)",
+  "Fuentes",
   "Salud de datos",
   "Clasificación",
   "Duplicados",
@@ -64,6 +62,9 @@ const REMOVED_STRIP_LABELS = [
   // Removed by #509 / #511.
   "Extensión",
   "Descubrimiento",
+  // Merged into "Fuentes" by #642 P1.
+  "Conectores",
+  "Captura (admin)",
 ];
 
 function buildPool(): Pool {
@@ -119,6 +120,30 @@ test("EC-1: strip renders the consolidated nav from the shared source", async ({
   }
 
   // No error surface (D-041 bar).
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
+test("#642 P1: /etl/connectors and /etl/captura redirect to Fuentes, and the target actually renders", async ({
+  page,
+}) => {
+  // The #642 redirect trap: asserting the old path is unreachable proves
+  // nothing if it was already unreachable — assert the redirect TARGET
+  // renders. Both routes are deleted outright (no page.tsx) and redirect via
+  // `next.config.js`'s `redirects()` — a real wire-level 301, not the
+  // page-level `permanentRedirect()` caveat `/admin/usage/page.tsx`
+  // documents (client-side RSC redirect, not a 308 on the wire). Config-level
+  // was chosen over page-level here specifically so BOTH routes disappear
+  // from the route table (not just off the nav strip) — a page-level stub
+  // would still count as a route, repeating the "only added, never deleted"
+  // complaint this whole tracker exists to fix.
+  await page.goto("/etl/connectors");
+  await expect(page).toHaveURL(/\/admin\/fuentes$/);
+  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+
+  await page.goto("/etl/captura");
+  await expect(page).toHaveURL(/\/admin\/fuentes$/);
+  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
