@@ -1,8 +1,12 @@
 /**
  * E2E (issue #677): the cohort re-capture panel fits a phone.
  *
- * Separate file from recapture.spec.ts because `test.use({ ...devices[...] })`
- * forces a new worker and Playwright refuses it inside a `describe` block.
+ * Separate file from recapture.spec.ts so the phone-width fixture applies to
+ * the whole file and cannot leak into the desktop specs. (The earlier note
+ * here — that Playwright refuses `test.use({ ...devices[...] })` inside a
+ * `describe` — was only true while the spread still carried
+ * `defaultBrowserType`, which switches engines and so needs a fresh worker.
+ * That field is destructured out below, as it is in every sibling spec.)
  *
  * Device emulation gotcha (D-120, repeated in every mobile spec here so it is
  * not reintroduced): under `devices["iPhone 13"]`, `window.innerWidth` does
@@ -31,7 +35,13 @@ function buildPool(): Pool {
   });
 }
 
-test.use({ ...devices["iPhone 13"] });
+// Destructure out `defaultBrowserType` (webkit) before spreading — this
+// project's single Playwright project is chromium (playwright.config.ts) and
+// CI only installs that one browser, so leaving the field in switches the
+// worker to a webkit binary that does not exist on the runner (issue #681;
+// same block as every other mobile spec here, e.g. mobile-dedup.spec.ts).
+const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
+test.use({ ...iPhone13 });
 
 const MARK = "E2E-MRECAP";
 const HOST = "https://www.idealista.com";
