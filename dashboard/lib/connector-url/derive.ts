@@ -53,7 +53,10 @@ export function deriveGrammarPreview(
   grammar: SearchUrlGrammar,
   scope: Scope,
 ): DerivedPreview | null {
-  const center = scope.geography?.center;
+  // Issue #659/D-147: an "everywhere" scope has no center to resolve a
+  // province slug from — same "keep the honest pending note" fallback as
+  // an unresolvable center already had, not a crash on `.center`.
+  const center = scope.geography.type === "radius" ? scope.geography.center : null;
   if (!center) return null;
   const province = provinceForPoint(center);
   const geoSlug = province?.provincia ?? null;

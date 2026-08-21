@@ -258,6 +258,21 @@ export async function diagnoseZeroCandidates(profile: SearchProfileRow): Promise
 
   const geographyCount = await countProperties(geographyStage.whereSql, geographyStage.params);
   if (geographyCount === 0) {
+    // Issue #659/D-147: an "everywhere" scope has no center — there is
+    // nothing to measure "nearest property" or "area coverage" against.
+    // Zero matches here means literally no property in the whole pool has
+    // an active SALE listing, an edge case worth naming plainly rather than
+    // forcing it through center-shaped fields it cannot honestly fill.
+    if (profile.scope.geography.type === "everywhere") {
+      const connectorLastRunFinishedAt = await getConnectorLastRunFinishedAt();
+      return {
+        kind: "geography_empty",
+        radiusKm: null,
+        nearest: null,
+        connectorLastRunFinishedAt,
+        areaCoverage: null,
+      };
+    }
     const [nearest, connectorLastRunFinishedAt, areaCoverage] = await Promise.all([
       findNearestProperty(profile.scope.geography.center),
       getConnectorLastRunFinishedAt(),
@@ -274,7 +289,15 @@ export async function diagnoseZeroCandidates(profile: SearchProfileRow): Promise
 
   const typeCount = await countProperties(typeStage.whereSql, typeStage.params);
   if (typeCount === 0) {
-    return { kind: "type_empty", geographyCount, propertyTypes: profile.scope.property_types };
+    // Unreachable when property_types === "all" (the type stage adds no
+    // extra condition in that case, so typeCount === geographyCount, which
+    // is already > 0 by this point) — the Array.isArray guard is here only
+    // to keep this branch honestly typed rather than asserting it away.
+    return {
+      kind: "type_empty",
+      geographyCount,
+      propertyTypes: Array.isArray(profile.scope.property_types) ? profile.scope.property_types : [],
+    };
   }
 
   const priceSizeCount = await countProperties(priceSizeStage.whereSql, priceSizeStage.params);

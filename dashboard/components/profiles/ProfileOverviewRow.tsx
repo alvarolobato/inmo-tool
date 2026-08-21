@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
-import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
+import { formatGeographyLabel, formatPropertyTypesLabel } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { ZeroCandidatesDiagnostic } from "./ZeroCandidatesDiagnostic";
 
@@ -322,9 +322,7 @@ function ValidProfileRow({
   const { profile, metrics } = entry;
   const [showZeroDiagnostic, setShowZeroDiagnostic] = useState(false);
 
-  const typeLabels = profile.scope.property_types
-    .map((t) => (t in PROPERTY_TYPE_LABELS ? PROPERTY_TYPE_LABELS[t as (typeof PROPERTY_TYPES)[number]] : t))
-    .join(", ");
+  const typeLabels = formatPropertyTypesLabel(profile.scope.property_types);
 
   const priceRange =
     metrics.min_price !== null && metrics.max_price !== null
@@ -398,7 +396,7 @@ function ValidProfileRow({
         >
           <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{profile.name}</p>
           <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
-            {typeLabels} · radio {profile.scope.geography.radius_km} km
+            {typeLabels} · {formatGeographyLabel(profile.scope.geography)}
           </p>
         </Link>
 

@@ -23,12 +23,32 @@ import { z } from "zod";
  * Geography is radius-from-a-geocoded-point for now — a full polygon
  * map-drawing tool is a reasonable later-phase UI enhancement, not required
  * for the MVP filtering need (task 2.3 scope note).
+ *
+ * `{type: "everywhere"}` (issue #659, D-147) is the STATED sentinel for "no
+ * geographic filter" — an unfiltered "novedades" profile that takes small
+ * portals wholesale and filters in the list afterwards. This is NOT the same
+ * as making `geography` optional: D-013's whole point is that an ABSENT
+ * scope field fails loudly, never silently. Everything must still be a value
+ * someone explicitly wrote. See buildScopeFunnelStages (scope-query.ts) for
+ * what "everywhere" drops (the radius/haversine clause) and what it keeps
+ * (the unconditional active-SALE EXISTS, D-016).
  */
-const GeographySchema = z.object({
+const RadiusGeographySchema = z.object({
   type: z.literal("radius"),
   center: z.tuple([z.number().min(-90).max(90), z.number().min(-180).max(180)]),
   radius_km: z.number().positive().max(200),
 });
+
+const EverywhereGeographySchema = z.object({ type: z.literal("everywhere") }).strict();
+
+const GeographySchema = z.discriminatedUnion("type", [
+  RadiusGeographySchema,
+  EverywhereGeographySchema,
+]);
+
+export type RadiusGeography = z.infer<typeof RadiusGeographySchema>;
+export type EverywhereGeography = z.infer<typeof EverywhereGeographySchema>;
+export type Geography = z.infer<typeof GeographySchema>;
 
 // Must match etl/schema/init.sql's `property.property_type` CHECK constraint
 // exactly — a value here that isn't in that CHECK can never match a real row,
@@ -72,10 +92,24 @@ const HardExclusionsSchema = z
   .strict()
   .default({});
 
+/**
+ * `"all"` (issue #659, D-147) is the STATED sentinel for "every property
+ * type" — same rationale as `{type:"everywhere"}` above: a plain
+ * `.optional()` here would let `undefined` reach `scope-query.ts`'s
+ * `ANY($n::text[])` clause as a NULL array bind, which Postgres evaluates to
+ * NO ROWS — the exact silent-zero-matches failure D-013 exists to prevent.
+ * `"all"` is a real, explicit value that `buildScopeFunnelStages` reads and
+ * responds to by omitting the type condition entirely (never a NULL bind).
+ */
+const PropertyTypesSchema = z.union([
+  z.literal("all"),
+  z.array(z.enum(PROPERTY_TYPES)).min(1),
+]);
+
 export const ScopeSchema = z
   .object({
     geography: GeographySchema,
-    property_types: z.array(z.enum(PROPERTY_TYPES)).min(1),
+    property_types: PropertyTypesSchema,
     // Filters against property.m2_built specifically (not m2_useful) — built
     // area is published far more consistently across sources than useful
     // area, so it's the more reliable filter target. See data-model.md.
@@ -102,6 +136,30 @@ export const ScopeSchema = z
   );
 
 export type Scope = z.infer<typeof ScopeSchema>;
+
+/**
+ * Human-facing label for a scope's property_types — single source of truth
+ * shared by every display consumer (ProfileOverviewRow, the Perfiles
+ * degraded-row fallback) so "Todos los tipos" (issue #659's "all" sentinel)
+ * never has to be special-cased per call site.
+ */
+export function formatPropertyTypesLabel(propertyTypes: Scope["property_types"]): string {
+  if (propertyTypes === "all") return "Todos los tipos";
+  return propertyTypes
+    .map((t) => (t in PROPERTY_TYPE_LABELS ? PROPERTY_TYPE_LABELS[t] : t))
+    .join(", ");
+}
+
+/**
+ * Human-facing label for a scope's geography — "Sin filtro geográfico" for
+ * the `everywhere` sentinel (issue #659), the existing "radio N km" text
+ * otherwise. Single source of truth for the same reason as
+ * formatPropertyTypesLabel above.
+ */
+export function formatGeographyLabel(geography: Geography): string {
+  if (geography.type === "everywhere") return "Sin filtro geográfico";
+  return `radio ${geography.radius_km} km`;
+}
 
 /**
  * Semantic, order-insensitive equality of two scopes — the gate for issue
@@ -141,18 +199,33 @@ export interface ProfileRefreshResult {
 }
 
 export function scopesEqual(a: Scope, b: Scope): boolean {
-  // Geography (radius-from-a-point; center is an ordered [lat, lng] tuple).
+  // Geography — a radius<->everywhere transition IS a scope change (issue
+  // #659): it changes which properties can match (drops the haversine
+  // clause, plus the un-geocoded-property recall gain), so D-040's quick
+  // refresh must fire on it exactly like a real radius/center edit.
   if (a.geography.type !== b.geography.type) return false;
-  if (a.geography.center[0] !== b.geography.center[0]) return false;
-  if (a.geography.center[1] !== b.geography.center[1]) return false;
-  if (a.geography.radius_km !== b.geography.radius_km) return false;
+  if (a.geography.type === "radius" && b.geography.type === "radius") {
+    if (a.geography.center[0] !== b.geography.center[0]) return false;
+    if (a.geography.center[1] !== b.geography.center[1]) return false;
+    if (a.geography.radius_km !== b.geography.radius_km) return false;
+  }
+  // Both "everywhere": nothing else to compare, equal.
 
-  // property_types compared as a set (order carries no meaning).
-  const at = [...a.property_types].sort();
-  const bt = [...b.property_types].sort();
-  if (at.length !== bt.length) return false;
-  for (let i = 0; i < at.length; i++) {
-    if (at[i] !== bt[i]) return false;
+  // property_types — the "all" sentinel is compared as a first-class value,
+  // never unwrapped into (or confused with) an explicit list, even one that
+  // happens to name every type: "all" and a fully-enumerated list are
+  // different STATED scopes (one tracks future new types automatically, the
+  // other doesn't), so switching between them is a real scope change too.
+  if (a.property_types === "all" || b.property_types === "all") {
+    if (a.property_types !== b.property_types) return false;
+  } else {
+    // Compared as a set (order carries no meaning).
+    const at = [...a.property_types].sort();
+    const bt = [...b.property_types].sort();
+    if (at.length !== bt.length) return false;
+    for (let i = 0; i < at.length; i++) {
+      if (at[i] !== bt[i]) return false;
+    }
   }
 
   // Numeric bounds — an absent bound must equal an absent bound.

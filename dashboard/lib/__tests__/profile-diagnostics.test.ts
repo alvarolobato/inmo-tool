@@ -79,6 +79,43 @@ describe("diagnoseZeroCandidates", () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 
+  // Issue #659/D-147: an "everywhere" scope has no center — this must not
+  // crash trying to dereference `.center` for findNearestProperty/
+  // getAreaCoverage, and must not fabricate a radius or a coverage claim.
+  describe("everywhere geography — no center to diagnose against (issue #659)", () => {
+    const everywhereProfile = profile({
+      scope: { geography: { type: "everywhere" }, property_types: "all", hard_exclusions: {} },
+    });
+
+    it("returns geography_empty with null radiusKm/nearest/areaCoverage, never crashes on a missing center", async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ count: 0 }] }) // matched count
+        .mockResolvedValueOnce({ rows: [{ count: 0 }] }) // geography-stage count (sale EXISTS only)
+        .mockResolvedValueOnce({ rows: [{ max: "2026-08-10T00:00:00.000Z" }] }); // connector last run
+
+      const diagnosis = await diagnoseZeroCandidates(everywhereProfile);
+
+      expect(diagnosis).toEqual({
+        kind: "geography_empty",
+        radiusKm: null,
+        nearest: null,
+        connectorLastRunFinishedAt: "2026-08-10T00:00:00.000Z",
+        areaCoverage: null,
+      });
+    });
+
+    it("never calls findNearestProperty/getAreaCoverage (only 3 queries total: matched, geography count, connector recency)", async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+        .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+        .mockResolvedValueOnce({ rows: [{ max: null }] });
+
+      await diagnoseZeroCandidates(everywhereProfile);
+
+      expect(mockQuery).toHaveBeenCalledTimes(3);
+    });
+  });
+
   it("exclusion_empty names BOTH exclusions when neither alone zeroes the count but the combination does (interaction effect)", async () => {
     const p = profile({
       scope: {

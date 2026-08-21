@@ -2230,7 +2230,12 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
     [lat, lon], "radius_km": ...}` (dashboard/lib/profiles-schema.ts). A
     profile with a missing/malformed geography is skipped with a warning
     rather than raising — one bad row shouldn't block discovery for every
-    other active profile.
+    other active profile. `{"type": "everywhere"}` (issue #659/D-147) is a
+    DIFFERENT case — a deliberately unfiltered profile, not a malformed one
+    — and is skipped quietly (debug log, no warning): this function only
+    knows how to turn a radius into a crawl scope, so "everywhere"
+    contributes nothing here until a dedicated everywhere-crawl mechanism
+    exists.
     """
     with conn.cursor() as cur:
         # ORDER BY id (issue #217/D-030): a plain SELECT gives no row-order
@@ -2247,6 +2252,24 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
     seen: dict[tuple[float, float, float], ConnectorScope] = {}
     for profile_id, scope_json in rows:
         geography = (scope_json or {}).get("geography")
+        if isinstance(geography, dict) and geography.get("type") == "everywhere":
+            # Issue #659/D-147: "everywhere" is a deliberate, valid sentinel
+            # (dashboard/lib/profiles-schema.ts) — not a malformed scope.
+            # This connector-scope derivation only knows how to turn a
+            # radius into a ConnectorScope; an everywhere profile
+            # contributes NO crawl scope here until the crawl follow-up
+            # (issue #658's sequence) defines "everywhere" semantics for
+            # connectors. That's expected and quiet, not a warning-worthy
+            # anomaly — materialization over already-ingested data still
+            # works today, which is most of the value for a full-inventory
+            # small portal.
+            logger.debug(
+                "search_profile id=%s: scope.geography is 'everywhere' — "
+                "contributes no discovery scope yet (handled by "
+                "everywhere-crawl semantics once built)",
+                profile_id,
+            )
+            continue
         if not isinstance(geography, dict) or geography.get("type") != "radius":
             logger.warning(
                 "search_profile id=%s: scope.geography missing/not type "

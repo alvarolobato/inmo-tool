@@ -9,7 +9,7 @@ import {
   canonicalScopeFromProfile,
   SEARCH_URL_PORTALS,
 } from "@/lib/search-url";
-import type { Scope } from "@/lib/profiles-schema";
+import { PROPERTY_TYPES, type Scope } from "@/lib/profiles-schema";
 
 const SCOPE: Scope = {
   geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 8 },
@@ -24,15 +24,16 @@ const SCOPE: Scope = {
 describe("canonicalScopeFromProfile", () => {
   it("flattens a profile scope into portal-neutral criteria", () => {
     const c = canonicalScopeFromProfile(SCOPE);
-    expect(c.center).toEqual([40.4168, -3.7038]);
-    expect(c.radiusKm).toBe(8);
-    expect(c.propertyTypes).toEqual(["piso", "chalet"]);
-    expect(c.priceMin).toBe(90000);
-    expect(c.priceMax).toBe(250000);
-    expect(c.sizeMin).toBe(55);
-    expect(c.sizeMax).toBe(140);
+    expect(c).not.toBeNull();
+    expect(c!.center).toEqual([40.4168, -3.7038]);
+    expect(c!.radiusKm).toBe(8);
+    expect(c!.propertyTypes).toEqual(["piso", "chalet"]);
+    expect(c!.priceMin).toBe(90000);
+    expect(c!.priceMax).toBe(250000);
+    expect(c!.sizeMin).toBe(55);
+    expect(c!.sizeMax).toBe(140);
     // Profile scope carries no rooms field today.
-    expect(c.roomsMin).toBeUndefined();
+    expect(c!.roomsMin).toBeUndefined();
   });
 
   it("leaves absent optional bounds undefined", () => {
@@ -42,10 +43,34 @@ describe("canonicalScopeFromProfile", () => {
       hard_exclusions: {},
     };
     const c = canonicalScopeFromProfile(minimal);
-    expect(c.priceMin).toBeUndefined();
-    expect(c.priceMax).toBeUndefined();
-    expect(c.sizeMin).toBeUndefined();
-    expect(c.sizeMax).toBeUndefined();
+    expect(c).not.toBeNull();
+    expect(c!.priceMin).toBeUndefined();
+    expect(c!.priceMax).toBeUndefined();
+    expect(c!.sizeMin).toBeUndefined();
+    expect(c!.sizeMax).toBeUndefined();
+  });
+
+  // Issue #659/D-147: an "everywhere" geography has no center any portal
+  // builder's grammar could work from — "no derived tasks" (null) is the
+  // honest answer, not a crash on `.center`.
+  it("returns null for an everywhere geography — no center to derive a builder scope from", () => {
+    const everywhere: Scope = {
+      geography: { type: "everywhere" },
+      property_types: ["piso"],
+      hard_exclusions: {},
+    };
+    expect(canonicalScopeFromProfile(everywhere)).toBeNull();
+  });
+
+  it('expands property_types "all" to every known type', () => {
+    const allTypes: Scope = {
+      geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },
+      property_types: "all",
+      hard_exclusions: {},
+    };
+    const c = canonicalScopeFromProfile(allTypes);
+    expect(c).not.toBeNull();
+    expect(c!.propertyTypes).toEqual(PROPERTY_TYPES);
   });
 });
 
@@ -67,6 +92,15 @@ describe("buildSearchUrl", () => {
 
   it("returns null for a portal with no builder", () => {
     expect(buildSearchUrl("fotocasa", SCOPE)).toBeNull();
+  });
+
+  it("returns null for a portal WITH a builder when the scope is everywhere", () => {
+    const everywhere: Scope = {
+      geography: { type: "everywhere" },
+      property_types: ["piso"],
+      hard_exclusions: {},
+    };
+    expect(buildSearchUrl("idealista", everywhere)).toBeNull();
   });
 });
 
@@ -101,5 +135,17 @@ describe("buildSearchUrls", () => {
     const tasks = buildSearchUrls(SCOPE);
     const aliseda = tasks.filter((t) => t.portal === "aliseda");
     expect(aliseda.every((t) => t.loosened.some((l) => l.constraint === "geography"))).toBe(true);
+  });
+
+  // Issue #659: "no derived tasks" for an everywhere scope, not a crash —
+  // guided-capture behaviour for an unfiltered profile is the captura
+  // follow-up's job (#662), not something to invent here.
+  it("returns an empty list for an everywhere scope", () => {
+    const everywhere: Scope = {
+      geography: { type: "everywhere" },
+      property_types: "all",
+      hard_exclusions: {},
+    };
+    expect(buildSearchUrls(everywhere)).toEqual([]);
   });
 });

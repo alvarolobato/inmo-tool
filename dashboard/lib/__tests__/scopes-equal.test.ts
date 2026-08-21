@@ -103,3 +103,41 @@ describe("scopesEqual — hard_exclusions (false == absent)", () => {
     expect(scopesEqual(BASE, b)).toBe(false);
   });
 });
+
+// Issue #659/D-147: the unfiltered-scope sentinels. A radius<->everywhere or
+// list<->"all" transition IS a scope change — it changes which properties
+// can match (drops the haversine clause / the ANY() clause), so D-040's
+// quick refresh (re-materialize + full sweep) must fire on it exactly like
+// a real radius/center/type-list edit does above.
+describe("scopesEqual — everywhere/all sentinels (issue #659)", () => {
+  it("radius -> everywhere is NOT equal", () => {
+    const b: Scope = { ...clone(BASE), geography: { type: "everywhere" } };
+    expect(scopesEqual(BASE, b)).toBe(false);
+  });
+
+  it("everywhere -> everywhere (identical) IS equal", () => {
+    const a: Scope = { geography: { type: "everywhere" }, property_types: ["piso"], hard_exclusions: {} };
+    const b: Scope = { geography: { type: "everywhere" }, property_types: ["piso"], hard_exclusions: {} };
+    expect(scopesEqual(a, b)).toBe(true);
+  });
+
+  it("explicit types -> 'all' is NOT equal", () => {
+    const b: Scope = { ...clone(BASE), property_types: "all" };
+    expect(scopesEqual(BASE, b)).toBe(false);
+  });
+
+  it("'all' -> 'all' (identical) IS equal", () => {
+    const a: Scope = { ...clone(BASE), property_types: "all" };
+    const b: Scope = { ...clone(BASE), property_types: "all" };
+    expect(scopesEqual(a, b)).toBe(true);
+  });
+
+  it("'all' is NOT equal to an explicit list naming every single type — different STATED scopes", () => {
+    const a: Scope = { ...clone(BASE), property_types: "all" };
+    const b: Scope = {
+      ...clone(BASE),
+      property_types: ["piso", "chalet", "atico", "local", "nave", "garaje", "terreno", "edificio"],
+    };
+    expect(scopesEqual(a, b)).toBe(false);
+  });
+});

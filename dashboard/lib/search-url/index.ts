@@ -16,7 +16,7 @@
  * lib/worklist). No `pg`.
  */
 
-import type { Scope } from "@/lib/profiles-schema";
+import { PROPERTY_TYPES, type Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { idealistaBuilder } from "./portals/idealista";
 import { alisedaBuilder } from "./portals/aliseda";
@@ -67,12 +67,23 @@ export function codeMappingForPortal(portal: string): CodeMappingAxes | null {
  * Reduce a profile `Scope` to the portal-neutral criteria the builders
  * consume. Geography is a radius around a geocoded point; there is no rooms
  * field in the scope today (so `roomsMin` is never set — see types.ts).
+ *
+ * Returns `null` for an `everywhere` geography (issue #659/D-147): every
+ * builder's grammar is built around a center point (idealista draws a
+ * polygon from it, aliseda maps it to a province, hipoges to a locality),
+ * and "no derived tasks" is the honest answer here — what an unfiltered
+ * profile's guided-capture behaviour SHOULD be is the captura follow-up's
+ * job (#662), not something to guess at in this enabler PR. A `"radius"`
+ * scope whose `property_types` is `"all"` is fully supported: it expands to
+ * every known type, so builders keep fanning out one task per type exactly
+ * as they do for an explicit full list today.
  */
-export function canonicalScopeFromProfile(scope: Scope): CanonicalSearchScope {
+export function canonicalScopeFromProfile(scope: Scope): CanonicalSearchScope | null {
+  if (scope.geography.type !== "radius") return null;
   return {
     center: scope.geography.center,
     radiusKm: scope.geography.radius_km,
-    propertyTypes: scope.property_types,
+    propertyTypes: scope.property_types === "all" ? PROPERTY_TYPES : scope.property_types,
     priceMin: scope.price_min,
     priceMax: scope.price_max,
     sizeMin: scope.size_min,
@@ -82,13 +93,16 @@ export function canonicalScopeFromProfile(scope: Scope): CanonicalSearchScope {
 
 /**
  * Build the pre-filtered search TASKS for ONE portal from a profile scope, or
- * null if that portal has no builder registered. A portal can yield several
- * tasks (one per searchable section — see SearchTask).
+ * null if that portal has no builder registered OR the scope has no derivable
+ * tasks (an `everywhere` geography — see canonicalScopeFromProfile). A portal
+ * can yield several tasks (one per searchable section — see SearchTask).
  */
 export function buildSearchUrl(portal: string, scope: Scope): SearchTask[] | null {
   const builder = BUILDERS[portal];
   if (!builder) return null;
-  return builder.build(canonicalScopeFromProfile(scope));
+  const canonical = canonicalScopeFromProfile(scope);
+  if (!canonical) return null;
+  return builder.build(canonical);
 }
 
 /**
@@ -97,9 +111,13 @@ export function buildSearchUrl(portal: string, scope: Scope): SearchTask[] | nul
  * …). Each task is one openable, pre-filtered URL for a single (portal ×
  * section). This is what the API route returns for a profile; the Captura UI
  * renders each task as its own "Abrir búsqueda" button.
+ *
+ * An `everywhere` scope (issue #659/D-147) yields an empty list, not a crash
+ * — see canonicalScopeFromProfile.
  */
 export function buildSearchUrls(scope: Scope): SearchTask[] {
   const canonical = canonicalScopeFromProfile(scope);
+  if (!canonical) return [];
   const out: SearchTask[] = [];
   for (const { portal } of CAPTURE_PORTALS) {
     const builder = BUILDERS[portal];

@@ -6475,3 +6475,42 @@ class TestScopeProfileAttribution:
         a = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1,))
         b = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1, 2, 3))
         assert base.scope_key(a) == base.scope_key(b)
+
+
+class TestActiveProfileScopesEverywhereSentinel:
+    """Issue #659/D-147: an `everywhere` geography is a deliberate,
+    explicitly-stated sentinel — never a malformed-scope warning. This
+    connector-scope derivation only knows how to turn a radius into a
+    ConnectorScope, so an everywhere profile contributes nothing here, but
+    it must do so QUIETLY (debug, not warning) and must never take down
+    discovery for any other, real radius profile in the same batch."""
+
+    def test_everywhere_scope_contributes_no_connector_scope(self):
+        rows = [(1, {"geography": {"type": "everywhere"}, "property_types": "all"})]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert scopes == []
+
+    def test_everywhere_scope_logs_no_warning(self, caplog):
+        rows = [(1, {"geography": {"type": "everywhere"}, "property_types": "all"})]
+        with caplog.at_level("WARNING", logger="etl.orchestrator"):
+            orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert caplog.records == []
+
+    def test_everywhere_scope_does_not_block_a_real_radius_profile_in_the_same_batch(
+        self,
+    ):
+        rows = [
+            (1, {"geography": {"type": "everywhere"}, "property_types": "all"}),
+            (2, _radius_geo(40.4168, -3.7038, 10)),
+        ]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert len(scopes) == 1
+        assert scopes[0].profile_ids == (2,)
+
+    def test_a_genuinely_malformed_geography_still_warns(self):
+        # Regression guard: the everywhere branch must not swallow the
+        # warning for a TRULY malformed/missing geography — only the
+        # deliberate "everywhere" sentinel is quiet.
+        rows = [(1, {"geography": {"type": "polygon"}})]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert scopes == []

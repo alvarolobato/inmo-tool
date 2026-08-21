@@ -389,7 +389,8 @@ CREATE TABLE IF NOT EXISTS search_profile (
 -- Issue #113: `scope`'s own DB-level default of '{}' is guaranteed to fail
 -- ScopeSchema (geography/property_types are both required, non-optional
 -- fields) -- there is no schema-valid "empty" scope to default to instead
--- (property_types requires >=1 element). Every real write path
+-- (property_types requires >=1 element, OR the "all" sentinel -- issue
+-- #659/D-147 below -- but never nothing at all). Every real write path
 -- (createProfile) already supplies an explicit, validated scope, so the
 -- column default was never anything but a trap reachable only via a manual
 -- SQL insert, a seed script, or a future migration that forgets to set it --
@@ -397,6 +398,14 @@ CREATE TABLE IF NOT EXISTS search_profile (
 -- NULL violation at INSERT time, instead of silently persisting a row that
 -- toSearchProfileRowSafe (lib/db/profiles.ts) can only detect after the fact.
 -- See docs/decisions/D-013-search-profile-scope-no-default.md.
+--
+-- Issue #659/D-147 extends this: an unfiltered "novedades" profile does NOT
+-- get there by making geography/property_types optional (that would
+-- resurrect exactly the "no schema-valid empty scope" trap this comment
+-- describes, via ANY(NULL::text[]) silently matching zero rows). It writes
+-- an explicit, stated value instead -- `geography: {type: "everywhere"}` /
+-- `property_types: "all"` -- so "no filter" is still something someone
+-- typed, not something that was left out. See D-147.
 ALTER TABLE search_profile ALTER COLUMN scope DROP DEFAULT;
 
 -- Issue #191 (design: docs comment on #176 §1/§4). Two facts the redesigned
