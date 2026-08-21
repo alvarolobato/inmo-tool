@@ -46,6 +46,7 @@ function metrics(overrides: Partial<ProfileOverviewMetrics> = {}): ProfileOvervi
   return {
     matched_count: 24,
     new_count: 3,
+    new_since: "2026-08-01T00:00:00.000Z",
     accepted_count: 0,
     rejected_count: 0,
     min_price: 142000,
@@ -123,6 +124,34 @@ describe("ProfileOverviewRow (issue #193)", () => {
     // "Con alertas" filter already active (F2 URL-state reads ?alerts=1).
     expect(flags.tagName).toBe("A");
     expect(flags).toHaveAttribute("href", "/profiles/13?alerts=1");
+  });
+
+  it("issue #667: renders 'Ver novedades' as a link to the profile's onlyNew-filtered feed, with the FROZEN anchor (D-148 B1 fix)", () => {
+    const entry: ProfileOverviewEntry = {
+      ok: true,
+      profile: profile({ id: 13 }),
+      metrics: metrics({ new_count: 5, new_since: "2026-08-01T00:00:00.000Z" }),
+    };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    const link = screen.getByTestId("profile-ver-novedades");
+    expect(link.tagName).toBe("A");
+    // newSince MUST be present and URL-encoded — a bare ?onlyNew=true with no
+    // snapshot re-derives the anchor live on the server and can silently
+    // disagree with this exact new_count (D-148 B1).
+    expect(link).toHaveAttribute(
+      "href",
+      "/profiles/13?onlyNew=true&newSince=2026-08-01T00%3A00%3A00.000Z",
+    );
+  });
+
+  it("issue #667: hides 'Ver novedades' entirely when new_count is 0 (no disabled/zero state)", () => {
+    const entry: ProfileOverviewEntry = {
+      ok: true,
+      profile: profile(),
+      metrics: metrics({ new_count: 0 }),
+    };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    expect(screen.queryByTestId("profile-ver-novedades")).not.toBeInTheDocument();
   });
 
   it("omits the price chip entirely when no matched property has a priced active listing (absence, not 0 EUR)", () => {

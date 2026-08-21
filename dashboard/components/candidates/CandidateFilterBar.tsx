@@ -329,6 +329,19 @@ export function CandidateFilterBar({
       label: "Sin alertas (evaluadas)",
       clear: () => set("alerts", ""),
     });
+  // Issue #667: "Ver novedades" landed here via the per-profile row button (or
+  // a deep link). One chip so the filter is visibly active and clearable
+  // without back-navigation — same pattern as every other primary-row filter.
+  if (values.onlyNew)
+    chips.push({
+      key: "onlyNew",
+      label: "Solo nuevos",
+      // Clears newSince too (issue #667 B1 fix) — a stale frozen anchor
+      // sitting in state with onlyNew off is inert (serialize never emits
+      // it standalone), but clearing both keeps the filter object itself
+      // clean rather than relying on that inertness.
+      clear: () => onChange({ ...values, onlyNew: false, newSince: "" }),
+    });
 
   return (
     <div data-testid="candidate-filter-bar">

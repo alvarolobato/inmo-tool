@@ -127,6 +127,7 @@
 | [D-126](docs/decisions/D-126-triage-vote-advance.md) | A vote (accept/reject) advances the property-detail triage bar to the next candidate ONLY after the feedback POST is server-confirmed — never on the optimistic write. `clear` (re-tapping the active toggle) and `note` never advance. `adjacent` is snapshotted on mount, before the vote, so a just-rejected property's own next stays valid; it only drops out of the NEXT page's chain. |
 | [D-127](docs/decisions/D-127-alerts-filter-tristate-unassessed-excluded.md) | The alerts filter's negative ("sin alertas") is the SAME UNION predicate as the positive, compared via equality against a tri-state param (never a second predicate); a candidate with no ai_assessment rows is EXCLUDED from BOTH values, consistent with D-059. |
 | [D-147](docs/decisions/D-147-unfiltered-scope-sentinels.md) | An unfiltered profile scope is a STATED sentinel, never an absent field: `geography {type:"everywhere"}` / `property_types "all"` (extends D-013). `everywhere` drops the radius clause but keeps the unconditional active-sale EXISTS; `"all"` omits the ANY clause — never a NULL array bind. |
+| [D-148](docs/decisions/D-148-ver-novedades-onlynew-filter.md) | The onlyNew filter (issue #667) freezes previous_viewed_at into the link as newSince (never re-derives it live) and lib/db/profile-overview.ts's new_count excludes rejected candidates — both required for the "Ver novedades" button's promised count to equal what the destination feed shows. |
 
 ## AI layer
 

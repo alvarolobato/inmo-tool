@@ -27,6 +27,7 @@ function metrics(newCount: number): ProfileOverviewMetrics {
   return {
     matched_count: Math.max(newCount, 1),
     new_count: newCount,
+    new_since: "2026-08-01T00:00:00.000Z",
     accepted_count: 0,
     rejected_count: 0,
     min_price: null,

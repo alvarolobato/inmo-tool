@@ -214,6 +214,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -261,7 +263,39 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
+  });
+
+  it("issue #667 (D-148 B1 fix): the onlyNew/newSince WHERE clause binds $26/$27 and never re-derives ranked.is_new when a frozen anchor is supplied", async () => {
+    await listCandidates(7, { onlyNew: true, newSince: "2026-02-10T00:00:00.000Z" });
+
+    const [sql, params] = mainCall();
+    // A typo'd placeholder number here would only be caught by the DB-gated
+    // integration test — asserting the exact SQL text closes that gap in a
+    // plain mocked-pool unit test too.
+    expect(sql).toContain("$26::boolean IS NOT TRUE");
+    expect(sql).toContain("$27::timestamptz IS NOT NULL");
+    // The frozen-anchor branch is a FRESH correlated aggregate against the
+    // bound $27 literal — never ranked.is_new (which is tied to the live,
+    // possibly-already-shifted previous_viewed_at; see D-148).
+    expect(sql).toContain("FROM listing lnew");
+    expect(sql).toContain("> $27::timestamptz");
+    // The live-anchor fallback branch is still present for a caller with no
+    // snapshot (ranked.is_new = true), but is reached only when $27 IS NULL.
+    expect(sql).toContain("ELSE ranked.is_new = true");
+    expect(params[25]).toBe(true);
+    expect(params[26]).toBe("2026-02-10T00:00:00.000Z");
+  });
+
+  it("issue #667: onlyNew without newSince passes $27 = null, and normalises an unparseable newSince to null", async () => {
+    await listCandidates(7, { onlyNew: true, newSince: "not-a-real-timestamp" });
+    expect(mainParams()[26]).toBeNull();
+
+    mockPoolQuery.mockClear();
+    await listCandidates(7, { onlyNew: true });
+    expect(mainParams()[26]).toBeNull();
   });
 
   it("#416: maps is_new true/false straight from the ranked row onto the candidate", async () => {
@@ -321,6 +355,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -428,6 +464,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE2,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
 
     mockPoolQuery.mockClear();
@@ -443,6 +481,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -462,6 +502,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
     expect(sql).toContain("EXISTS");
     expect(sql).toContain("lf.source = $5");
@@ -480,6 +522,8 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 

@@ -608,6 +608,52 @@ export interface CandidateFilters {
    * ordering (`ts_rank_cd`) is a deliberately deferred optional phase.
    */
   q?: string | null;
+  /**
+   * Issue #667 ("Ver novedades" button on `/profiles`): keep only candidates
+   * that are effectively new right now. `null`/undefined = off (default,
+   * byte-identical to before).
+   *
+   * When `newSince` (below) is ALSO supplied, the filter evaluates against
+   * that FROZEN anchor, not the live `ranked.is_new` — see `newSince`'s doc
+   * for why this is required (D-148, opus review B1). Only when `newSince`
+   * is absent does it fall back to `ranked.is_new` VERBATIM (the same
+   * `COALESCE(nov.is_new, false)` column the NUEVO badge is derived from) —
+   * a best-effort path for a caller with no snapshot to freeze (a hand-typed
+   * `onlyNew=true` with no `newSince`), NOT race-free the way the frozen
+   * path is.
+   */
+  onlyNew?: boolean | null;
+  /**
+   * Issue #667 (B1 fix, D-148): the FROZEN visit-anchor timestamp `onlyNew`
+   * should filter against, an ISO string. `null`/undefined = no snapshot
+   * (falls back to the live anchor, see `onlyNew`'s doc).
+   *
+   * Why frozen at all: `lib/db/profile-overview.ts`'s `new_count` (what the
+   * "Ver novedades" button promises) is computed against
+   * `search_profile.previous_viewed_at` at the moment `/profiles` renders.
+   * Clicking through navigates to `/profiles/[id]`, whose OWN
+   * `GET /api/profiles/[id]` runs `touchProfileViewedAt` — which SHIFTS
+   * `previous_viewed_at` forward — BEFORE the candidate feed's fetch ever
+   * reaches this function. Re-deriving the anchor live here (reading
+   * `search_profile.previous_viewed_at` fresh, the way `ranked.is_new`
+   * does) would therefore read the already-shifted value and silently
+   * disagree with the count the button just showed (measured live: 937
+   * promised, 0 returned). The caller (`ProfileOverviewRow.tsx`) snapshots
+   * `ProfileOverviewMetrics.new_since` — the exact anchor `new_count` used —
+   * into the link BEFORE that shift can happen, and this field threads it
+   * straight through to the WHERE clause instead of the `ranked` CTE's own
+   * (live, badge-driving) anchor.
+   *
+   * When set, evaluates `MIN(active-source listing.first_seen_at) >
+   * newSince` per candidate — the SAME aggregate shape as the `novelty`
+   * CTE's `is_new`, just against this bound timestamp instead of the live
+   * `(SELECT ts FROM anchor)`. Does NOT touch `ranked.is_new`/`novelty_tier`
+   * themselves (the NUEVO badge and the fresh-first sort stay anchored to
+   * the LIVE visit timestamp, unaffected by this filter) — `onlyNew` is a
+   * pure WHERE-clause narrowing, never a second definition of "new" for
+   * ranking/display purposes.
+   */
+  newSince?: string | null;
 }
 
 /**
@@ -1900,6 +1946,20 @@ export async function listCandidates(
   // a parameter to websearch_to_tsquery, never interpolated.
   const q: string | null =
     typeof opts.q === "string" && opts.q.trim() !== "" ? opts.q.trim() : null;
+  // Issue #667 "Ver novedades" hard filter — a plain boolean toggle (unlike
+  // isVpo/hasAlerts, this has no bidirectional/negative form): only an
+  // explicit `true` turns it on; anything else (including `false`) collapses
+  // to off, matching heritageZone's normalisation.
+  const onlyNew: boolean = opts.onlyNew === true;
+  // Issue #667 (B1 fix, D-148): the frozen anchor onlyNew should evaluate
+  // against, when supplied. Validated as a genuinely parseable timestamp
+  // here (not just at the API boundary) so an unparseable value degrades to
+  // "no snapshot" (the live-anchor fallback) rather than reaching
+  // `$27::timestamptz` as a literal and erroring the whole query.
+  const newSince: string | null =
+    typeof opts.newSince === "string" && !Number.isNaN(Date.parse(opts.newSince))
+      ? opts.newSince
+      : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -2295,6 +2355,42 @@ export async function listCandidates(
               AND psd.doc @@ websearch_to_tsquery('es_unaccent', $25::text)
          )
        )
+       -- Issue #667 "Ver novedades" hard filter ($26/$27, D-148 opus-review
+       -- B1 fix). $26=false (default) = off. $26=true:
+       --   - $27 (newSince) IS NOT NULL: evaluates against that FROZEN
+       --     anchor via a fresh MIN(first_seen_at) over this candidate's
+       --     active-source listings — NEVER ranked.is_new, which is tied to
+       --     the LIVE previous_viewed_at and can have already SHIFTED by the
+       --     time this query runs (the profile detail page's own
+       --     GET /api/profiles/[id] touches it first — see
+       --     CandidateFilters.newSince's doc for the exact race and its
+       --     measured live repro: 937 promised, 0 returned, before this
+       --     fix). Same aggregate shape as the novelty CTE's own is_new,
+       --     just against this bound literal instead of the live
+       --     (SELECT ts FROM anchor) subquery.
+       --   - $27 IS NULL: falls back to ranked.is_new (the RAW
+       --     COALESCE(nov.is_new,false) value — see CandidateFilters.onlyNew's
+       --     doc) — best-effort only, for a caller with no snapshot to
+       --     freeze; every real "Ver novedades" click always supplies $27.
+       -- Applied in the OUTER query like every other #310/#392/#398/#593
+       -- filter — never inside pool, so it can't move the below-market
+       -- median; the keyset key/cursor are untouched (a FILTER, not a
+       -- re-sort). Never touches ranked.is_new/novelty_tier themselves — the
+       -- NUEVO badge and the fresh-first sort stay anchored to the LIVE
+       -- visit timestamp, unaffected by this filter.
+       AND (
+         $26::boolean IS NOT TRUE
+         OR (
+           CASE
+             WHEN $27::timestamptz IS NOT NULL THEN
+               (SELECT MIN(lnew.first_seen_at)
+                  FROM listing lnew
+                 WHERE lnew.property_id = ranked.property_id
+                   AND ${activeSourceClause("lnew")}) > $27::timestamptz
+             ELSE ranked.is_new = true
+           END
+         )
+       )
      -- #425 fresh-first: novelty tier leads, then the #309 blended score, then
      -- id as the deterministic tiebreak. MUST match the keyset WHERE above AND
      -- getAdjacentCandidates' ordering, or prev/next silently desyncs (D-057 cl.4).
@@ -2334,6 +2430,12 @@ export async function listCandidates(
       // #470 free-text search term ($25). NULL = off; otherwise bound verbatim
       // to websearch_to_tsquery in the OUTER WHERE's FTS EXISTS (never interpolated).
       q,
+      // Issue #667 "Ver novedades" onlyNew toggle ($26). false = off (default).
+      onlyNew,
+      // Issue #667 (B1 fix, $27). NULL = no frozen snapshot (live-anchor
+      // fallback); otherwise the exact timestamp new_count was computed
+      // against, bound verbatim, never interpolated.
+      newSince,
     ],
   );
 
@@ -2499,14 +2601,17 @@ export interface AdjacentCandidates {
  * behaviour. A snapshot would page you through a ranking the model has
  * already moved on from.
  *
- * **Content filters (incl. #470 `q`) are NOT threaded here.** prev/next already
- * ignores every content filter the feed applies — `source`, occupancy,
- * condition, playa, the #386/#392/#398 assessment filters — and honours only
- * `includeRejected`; a user who filters the list and opens a card navigates the
- * GLOBAL ordering. The #470 free-text `q` follows that exact precedent and is
- * deliberately not applied to the adjacency. If this ever grates in practice,
- * the correct fix is a follow-up that threads ALL filters through the adjacency
- * uniformly (owner decision 5), not `q` in isolation.
+ * **Content filters (incl. #470 `q` and #667 `onlyNew`) are NOT threaded
+ * here.** prev/next already ignores every content filter the feed applies —
+ * `source`, occupancy, condition, playa, the #386/#392/#398 assessment
+ * filters — and honours only `includeRejected`; a user who filters the list
+ * and opens a card navigates the GLOBAL ordering. The #470 free-text `q` and
+ * #667's `onlyNew`/`newSince` follow that exact precedent and are
+ * deliberately not applied to the adjacency — opening a "Ver novedades" card
+ * and hitting "next" steps through every candidate, not just the new ones.
+ * If this ever grates in practice, the correct fix is a follow-up that
+ * threads ALL filters through the adjacency uniformly (owner decision 5),
+ * not one filter in isolation.
  */
 export async function getAdjacentCandidates(
   profileId: number,

@@ -20,8 +20,19 @@ export interface ProfileThumbnail {
 
 export interface ProfileOverviewMetrics {
   matched_count: number;
-  /** Matched properties with property.created_at >= COALESCE(last_viewed_at, created_at - 1 day) — "seen since your last visit", or "first-seen in the last 24h" for a never-visited profile. */
+  /** Matched, non-rejected properties with property.created_at >= COALESCE(last_viewed_at, created_at - 1 day) — "seen since your last visit", or "first-seen in the last 24h" for a never-visited profile. Excludes the current profile's rejected candidates (issue #667 B2) so this count matches what the default (includeRejected=false) feed actually shows. */
   new_count: number;
+  /**
+   * Issue #667 (B1 fix): the EXACT anchor timestamp `new_count` was computed
+   * against — `COALESCE(previous_viewed_at, created_at - interval '1 day')`,
+   * ISO string. Snapshotted here so the "Ver novedades" link can freeze it
+   * into `?newSince=`: `previous_viewed_at` SHIFTS the moment the profile
+   * detail page's own `GET /api/profiles/[id]` runs
+   * (`touchProfileViewedAt`), so re-deriving the anchor live on the feed
+   * request (rather than reusing this snapshot) would silently disagree
+   * with the count this page just showed.
+   */
+  new_since: string;
   /** Properties whose latest verdict is `accept` — i.e. the "en seguimiento" (tracked) working set (#422). */
   accepted_count: number;
   rejected_count: number;

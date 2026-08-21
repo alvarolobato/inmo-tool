@@ -155,6 +155,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -189,6 +191,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 });
@@ -276,6 +280,8 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -593,6 +599,81 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       expect(res.status).toBe(400);
       expect(mockQuery).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("GET /api/profiles/[id]/candidates — onlyNew 'Ver novedades' filter (issue #667)", () => {
+  it("passes onlyNew=true to listCandidates as $26", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?onlyNew=true"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $26 (index 25) is the onlyNew toggle.
+    expect(candidatesParams()[25]).toBe(true);
+  });
+
+  it("leaves onlyNew off ($26 = false) when absent, and rejects any value other than 'true' with 400", async () => {
+    // Absent → off (false), DB touched.
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const off = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates"),
+      ctx("3"),
+    );
+    expect(off.status).toBe(200);
+    expect(candidatesParams()[25]).toBe(false);
+
+    // A plain boolean toggle (unlike hasAlerts/isVpo, no negative form): any
+    // non-empty value other than the exact "true" → 400 before the DB.
+    for (const raw of ["1", "false", "TRUE", "yes"]) {
+      mockQuery.mockClear();
+      queue = [];
+      const res = await GET(
+        makeRequest(`http://localhost/api/profiles/3/candidates?onlyNew=${raw}`),
+        ctx("3"),
+      );
+      expect(res.status).toBe(400);
+      expect(mockQuery).not.toHaveBeenCalled();
+    }
+  });
+
+  it("issue #667 (B1 fix): passes newSince to listCandidates as $27, and rejects an unparseable timestamp with 400", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const anchor = "2026-02-10T00:00:00.000Z";
+    const res = await GET(
+      makeRequest(
+        `http://localhost/api/profiles/3/candidates?onlyNew=true&newSince=${encodeURIComponent(anchor)}`,
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $27 (index 26) is the frozen newSince anchor.
+    expect(candidatesParams()[26]).toBe(anchor);
+
+    mockQuery.mockClear();
+    queue = [];
+    const bad = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?onlyNew=true&newSince=not-a-date"),
+      ctx("3"),
+    );
+    expect(bad.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("leaves newSince off ($27 = null) when absent", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?onlyNew=true"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(candidatesParams()[26]).toBeNull();
   });
 });
 

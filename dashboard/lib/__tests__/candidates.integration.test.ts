@@ -1872,6 +1872,106 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("'Ver novedades' onlyNew hard filter (issue #667)", () => {
+    // Seeds a matched candidate whose earliest (only) listing's
+    // `first_seen_at` is set to an exact timestamp, so a test can place it
+    // deterministically before/after the profile's visit anchor.
+    async function seedWithFirstSeen(
+      pool: Pool,
+      propertyId: number,
+      firstSeenIso: string,
+    ): Promise<void> {
+      const listingId = await insertListing(pool, propertyId, { source: "fotocasa" });
+      await pool.query(`UPDATE listing SET first_seen_at = $1::timestamptz WHERE id = $2`, [
+        firstSeenIso,
+        listingId,
+      ]);
+    }
+
+    it("keeps only the candidate whose earliest listing is newer than the visit anchor — the SAME predicate ranked.is_new/new_count use", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const anchor = "2026-02-10T00:00:00Z";
+        // Visited before, both anchor slots set explicitly (mirrors the
+        // #447 e2e fixture) — a real visit anchor, not the never-visited
+        // cold-start path (covered separately below).
+        await pool.query(
+          `UPDATE search_profile SET previous_viewed_at = $1::timestamptz, last_viewed_at = $1::timestamptz WHERE id = $2`,
+          [anchor, profileId],
+        );
+
+        const freshId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, freshId, "2026-02-11T00:00:00Z"); // after anchor
+        await markMatched(pool, profileId, freshId);
+
+        const staleId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, staleId, "2026-02-01T00:00:00Z"); // before anchor
+        await markMatched(pool, profileId, staleId);
+
+        const filtered = await listCandidates(profileId, { onlyNew: true, limit: 50 });
+        expect(filtered.items.map((i) => i.property_id)).toEqual([freshId]);
+        expect(filtered.items.map((i) => i.property_id)).not.toContain(staleId);
+        // The returned card also carries its own NUEVO badge — no suppression
+        // in play for a genuinely-visited, non-cold-start profile.
+        expect(filtered.items[0].is_new).toBe(true);
+
+        // Sanity: unfiltered, both come back — the exclusion is onlyNew's
+        // doing, not a broken feed.
+        const unfiltered = await listCandidates(profileId, { limit: 50 });
+        expect(unfiltered.items).toHaveLength(2);
+      });
+    });
+
+    it("absent onlyNew (default) does not narrow the feed", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        await pool.query(
+          `UPDATE search_profile SET previous_viewed_at = $1::timestamptz WHERE id = $2`,
+          ["2026-02-10T00:00:00Z", profileId],
+        );
+        const freshId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, freshId, "2026-02-11T00:00:00Z");
+        await markMatched(pool, profileId, freshId);
+        const staleId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, staleId, "2026-02-01T00:00:00Z");
+        await markMatched(pool, profileId, staleId);
+
+        const absent = await listCandidates(profileId, { limit: 50 });
+        expect(absent.items).toHaveLength(2);
+      });
+    });
+
+    // The count-matching design decision (see CandidateFilters.onlyNew's
+    // doc): onlyNew reads the RAW ranked.is_new, not the cold-start-
+    // suppressed value the card's own NUEVO badge falls back to — so on a
+    // never-visited profile (cold start), onlyNew still returns exactly the
+    // candidates whose first_seen_at is after the fallback anchor
+    // (created_at - 1 day), even though those SAME rows' `is_new` field
+    // (what the badge reads) comes back suppressed (false). This is what
+    // keeps the Perfiles row's raw "N nuevos" count and this filter's result
+    // count equal by construction, regardless of cold-start.
+    it("still filters correctly on a never-visited (cold-start) profile, even though the returned rows' own NUEVO badge is suppressed", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Never visited: previous_viewed_at stays NULL (createProfile's
+        // default) — the fallback anchor is created_at - 1 day.
+        const freshId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, freshId, new Date().toISOString()); // now — after the fallback anchor
+        await markMatched(pool, profileId, freshId);
+        const staleId = await insertProperty(pool);
+        await seedWithFirstSeen(pool, staleId, "2020-01-01T00:00:00Z"); // long before any anchor
+        await markMatched(pool, profileId, staleId);
+
+        const filtered = await listCandidates(profileId, { onlyNew: true, limit: 50 });
+        expect(filtered.items.map((i) => i.property_id)).toEqual([freshId]);
+        // Cold-start (never-visited) suppresses the per-card badge — the
+        // trade-off this filter's doc calls out explicitly.
+        expect(filtered.coldStart).toBe(true);
+        expect(filtered.items[0].is_new).toBe(false);
+      });
+    });
+  });
+
   describe("beach-proximity + heritage-zone filters and soft boost (#392, Fase 4 of #385)", () => {
     // A matched, priced candidate carrying an optional `location` assessment —
     // seeded through the SAME ai_assessment row the ranking CTE reads for both

@@ -113,6 +113,24 @@ describe("CandidateFilterBar active chips", () => {
     renderBar();
     expect(screen.queryByTestId("active-filter-chips")).toBeNull();
   });
+
+  it("issue #667: onlyNew renders a 'Solo nuevos' chip, and its ✕ clears only that filter", () => {
+    const { onChange } = renderBar({ onlyNew: true, source: "fotocasa" });
+    expect(screen.getByTestId("filter-chip-onlyNew")).toHaveTextContent(
+      "Solo nuevos",
+    );
+    fireEvent.click(screen.getByTestId("filter-chip-clear-onlyNew"));
+    expect(onChange).toHaveBeenCalledWith({
+      ...DEFAULT_CANDIDATE_FILTERS,
+      source: "fotocasa", // untouched
+      onlyNew: false, // cleared
+    });
+  });
+
+  it("onlyNew off (default) shows no 'Solo nuevos' chip", () => {
+    renderBar();
+    expect(screen.queryByTestId("filter-chip-onlyNew")).toBeNull();
+  });
 });
 
 describe("CandidateFilterBar #470 free-text search box", () => {
