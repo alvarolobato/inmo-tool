@@ -588,6 +588,8 @@ class TestNormalize:
         assert c.status == "active"
         # Servicer disposing of bank-owned stock, never a private seller.
         assert c.listing_kind == "agency"
+        # Issue #628 (D-141): constant selling-entity name, not per-listing.
+        assert c.contact_raw == "Solvia"
 
     def test_superset_geography_fields_are_populated(self):
         c = self._normalized()

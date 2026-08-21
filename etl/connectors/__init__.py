@@ -108,8 +108,13 @@ def register_all() -> None:
         CONNECTORS.append(UnicajaConnector())
     # Issue #79: pisos.com (Vocento), a mainstream generalist portal — scope
     # expansion beyond the original Fotocasa/Milanuncios set. Search-payload-
-    # primary (rich ad-preview cards + per-card JSON-LD geo, no detail fetch),
-    # publishes lat/lon. Born disabled (#100). See pisos.py's docstring / D-071.
+    # primary (rich ad-preview cards + per-card JSON-LD geo) for every field
+    # except reference_code/contact_raw, which need one detail request per
+    # listing (issue #628, D-141 — revises the original "no detail fetch"
+    # design). Publishes lat/lon. See pisos.py's docstring / D-071/D-141 —
+    # and check `connector_config.enabled` for this connector's actual
+    # current state rather than trusting a hard-coded "born disabled" claim
+    # here, which has already gone stale once.
     if PisosConnector.name not in registered_names:
         CONNECTORS.append(PisosConnector())
     # Issue #79: habitaclia.com (Adevinta), Spain's #4 portal — scope

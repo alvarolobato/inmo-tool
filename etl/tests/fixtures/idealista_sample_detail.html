@@ -23,6 +23,23 @@
   capture); the connector prefixes them with the img host. 10 PICTUREs + 1
   PLAN here: only PICTUREs become photos, the PLAN (floor plan) is excluded.
   No PII — image hash paths and generic room labels only.
+
+  The `advertiser-info`/`advertiser-name` block below (issue #628) is a
+  SYNTHETIC addition, NOT from the MIT source — "Inmobiliaria Ejemplo" is
+  fabricated. Its class-name SHAPE (`#module-contact-container` >
+  `.module-contact` > `.advertiser-info` > `p.advertiser-name`) mirrors a
+  real Idealista page's primary contact box, verified 2026-08 against a
+  full page fetched from the same MIT-licensed fixture repo (never
+  committed here — see `_advertiser_name`'s docstring in idealista.py).
+
+  Opus review (B3): the `about-advertiser`/`about-advertiser-name` block
+  right after it is ALSO synthetic, added deliberately so this fixture
+  carries BOTH competing blocks at once — a real page does too (a second,
+  differently-classed "about the professional" widget that can name a
+  different office/branch of the same firm). "Other Office Branch" is a
+  distinct fabricated name from "Inmobiliaria Ejemplo" specifically so a
+  selector that picks the wrong block is a distinguishable test failure,
+  not silently correct because the fixture only ever offered one answer.
 -->
 <html lang="en">
 <head>
@@ -48,6 +65,21 @@
 <div class="info-data">
 <span class="info-data-price"><span class="txt-bold">3,600,000</span> €</span>
 </div>
+
+<aside id="side-content">
+<div id="module-contact-container">
+<section class="module-contact">
+<div class="advertiser-info">
+<p class="advertiser-name">Inmobiliaria Ejemplo</p>
+</div>
+</section>
+<div class="about-advertiser">
+<div class="advertiser-name-container">
+<a class="about-advertiser-name">Other Office Branch</a>
+</div>
+</div>
+</div>
+</aside>
 
 <div class="adCommentsLanguage expandable is-expandable with-expander-button" data-compressed-max-length="1650">
 Currently being renovated, this spacious home has six bedrooms and four bathrooms.

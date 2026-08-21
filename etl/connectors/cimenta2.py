@@ -665,6 +665,14 @@ class Cimenta2Connector(Connector):
             current_price=d("current_price"),
             description=None,
             photo_urls=(),
+            # Issue #628 considered a constant selling-entity name here
+            # (the pattern solvia.py/servihabitat.py now use) and rejected
+            # it: unlike Solvia/Servihabitat, this connector's ONLY data
+            # path is the public sitemap (D-033/D-034) — it never renders
+            # or fetches a page a "selling entity" could honestly be read
+            # off of, and D-033 is explicit ("don't build on it, even
+            # scoped") about not reaching for anything beyond that
+            # sitemap. Left None, matching every other detail-only field.
             contact_raw=None,
             address=d("address"),
             lat=d("lat"),

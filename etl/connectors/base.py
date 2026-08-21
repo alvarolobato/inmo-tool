@@ -834,6 +834,28 @@ class Connector(ABC):
     # class-attribute default) — see etl.orchestrator._scopes_for_connector.
     min_refetch_interval_seconds: int = 0
 
+    # Issue #628/#629 (Opus review, B4): does fetch_detail() do real work to
+    # backfill `listing.reference_code` for an already-captured listing
+    # (a real request, not just re-parsing a stash) when it is still NULL?
+    # False (default) preserves every existing connector's behaviour.
+    # `etl.orchestrator._should_skip_fetch` reads this: when True AND the
+    # stored reference_code is NULL, the #435 unchanged-list-price skip
+    # (D-099) and the staleness window are both bypassed so the backfill
+    # actually gets a chance to run — without this, a connector whose
+    # `discovered_prices()` also participates in #435 (pisos does) would
+    # otherwise skip every already-known listing forever on unchanged
+    # price, permanently NULL despite fetch_detail() now being able to
+    # populate it (the exact gap a live production check found: 331/331
+    # existing pisos listings, all D-099-skip-eligible, never re-fetched).
+    # Keeps forcing a real fetch every run for as long as reference_code
+    # stays NULL — no separate "already tried, give up" bit. Simple, and
+    # bounded in practice for the connector this landed for (pisos:
+    # roughly 300 listings, moderate rate limit). A listing that
+    # genuinely has no published reference stays NULL forever and gets
+    # re-tried forever; revisit with a give-up counter if that cost ever
+    # matters for a larger connector.
+    backfills_missing_reference_code: bool = False
+
     def discovered_prices(self) -> dict[str, Decimal]:
         """Prices observed as a side effect of the most recent discover() call.
 

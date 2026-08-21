@@ -16,9 +16,20 @@ It IS encoded as the first path token of every listing URL
 (`/comprar/<type-token>-<slug>-<id>/`), e.g. `piso`, `duplex`,
 `casa_adosada` — live-observed 2026-08 on a real madrid search page across
 7 distinct tokens. That URL token is the signal used here.
+
+`extract_reference_and_agency` (issue #628) is the one exception to
+"everything comes from the search card" (D-071's original framing): the
+seller's reference code and agency name are NOT in the search card or its
+JSON-LD (confirmed live 2026-08 — 0/30 cards on a real madrid search page
+carry either), only on the DETAIL page, inside a `features__feature` block
+labelled "Referencia:" and an `owner-info__name` block respectively — see
+D-141 for why `fetch_detail` now makes one real request per listing for
+these two fields where it previously made none.
 """
 
 from __future__ import annotations
+
+from bs4 import BeautifulSoup
 
 # The first path token of a pisos.com listing URL
 # (`/comprar/<type-token>-...`) -> property.property_type (schema CHECK
@@ -81,3 +92,69 @@ def map_property_type(url: str | None) -> str | None:
     if not token:
         return None
     return URL_TYPE_TOKEN_MAP.get(token)
+
+
+def _clean(text: str | None) -> str | None:
+    if text is None:
+        return None
+    cleaned = " ".join(text.split())
+    return cleaned or None
+
+
+def extract_reference_code(html: str) -> str | None:
+    """The seller's reference code from a pisos.com DETAIL page (issue #628).
+
+    Markup SHAPE confirmed against a real page during the issue #628
+    spike (2026-08) — the value below is a placeholder, not the real
+    capture (see AGENTS.md's no-scraped-content rule; the actual test
+    fixture, `etl/tests/fixtures/pisos_sample_detail.html`, is fully
+    synthetic and exercises this exact selector):
+
+        <div class="features__feature">
+          <span class="features__icon icon-reference"></span>
+          <div>
+            <span class="features__label">Referencia: </span>
+            <span class="features__value">EXAMPLE-1234/AB</span>
+          </div>
+        </div>
+
+    Scoped to the `features__feature` block whose label text starts with
+    "referencia" (case-insensitive) — pisos.com's features list carries many
+    other label/value pairs (conservation state, heating, ...) using the
+    identical markup shape, so matching on the label text (not just the
+    class) is what picks out the right one.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for feature in soup.select("div.features__feature"):
+        label = feature.select_one(".features__label")
+        if label is None:
+            continue
+        label_text = (label.get_text(strip=True) or "").rstrip(":").strip().lower()
+        if label_text != "referencia":
+            continue
+        value = feature.select_one(".features__value")
+        return _clean(value.get_text(" ", strip=True)) if value is not None else None
+    return None
+
+
+def extract_agency_name(html: str) -> str | None:
+    """The advertiser/agency name from a pisos.com DETAIL page (issue #628).
+
+    Markup SHAPE confirmed against a real page during the issue #628
+    spike (2026-08) — the agency name below is a placeholder, not the
+    real capture (same no-scraped-content rule as above):
+
+        <div class="owner-info">
+          <div class="owner-info__header">
+            <div>
+              <p class="owner-info__name">
+                <a href="/inmobiliaria-<slug>/" rel="nofollow">Example Realty</a>
+              </p>
+
+    `.owner-info__name` is unique on the page (one contact box per
+    listing) — no need to disambiguate against other blocks the way
+    `extract_reference_code` does.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    el = soup.select_one(".owner-info__name")
+    return _clean(el.get_text(" ", strip=True)) if el is not None else None

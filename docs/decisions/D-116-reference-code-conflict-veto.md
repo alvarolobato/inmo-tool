@@ -3,12 +3,30 @@ id: D-116
 title: Same-agency differing reference codes veto a merge outright
 date: 2026-08-19
 group: Data / connectors
-rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both normalize to real, DIFFERING values (plain inequality, no prefix/fuzzy tolerance) is never a duplicate — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`. Measured reach against the live corpus today is ZERO (no connector combination populates both `contact_raw` and `reference_code` on both sides of a reachable pair yet) — a forward-looking guard, not yet an active rule.'
+rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both clear `_normalize` and are NOT `codes_equivalent` (D-140: exact equality, or a trailing unit/variant suffix on exactly one side — never a bare `!=`, never wider fuzziness) is never a duplicate — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`. Measured reach against the live corpus is ZERO as of 2026-08-20 (issues #628/#629 widened `contact_raw` capture to idealista/solvia/servihabitat, so multiple connectors now populate both fields — but no reachable cross-source pair happens to share matching values yet, not because no connector combination can) — see D-140 for the full measurement.'
 ---
 
 # D-116: Same-agency differing reference codes veto a merge outright
 
 *Decided: 2026-08-19*
+
+> ## REVISED (2026-08-20) — see [D-140](D-140-reference-code-relaxed-normalizer.md)
+>
+> The "plain inequality, no prefix/fuzzy tolerance" claim in point 7 below
+> is no longer exactly true: `reference_codes_conflict` now compares
+> through `codes_equivalent`, which tolerates a trailing unit/variant
+> suffix (`-1`, `/2`, `_A`) on exactly one side — the owner's own flagged
+> example (issue #629). The veto's placement, cadastral exemption, and
+> pending-row re-evaluation (points 1-5 below) are unchanged and still
+> accurate. Point 6's connector-population TABLE below is a HISTORICAL
+> snapshot from 2026-08-19 (only fotocasa/milanuncios populated
+> `contact_raw` then) — issue #628 has since widened capture to
+> idealista/solvia/servihabitat, so that table and its "only fotocasa and
+> milanuncios ever supply it" claim are now stale. The reach conclusion
+> (ZERO) still holds today, but for the reason D-140's own fresh
+> measurement explains, not the one this table gives — read D-140's
+> measurement table as the current one, this section as archaeology of
+> why the veto was first written.
 
 **Context**: Issue #564, raised by the owner: *"en la gestión de
 duplicados si hay una referencia, de la misma inmobiliaria y es
@@ -83,9 +101,12 @@ genuinely different flats an agency lists side by side.
    keying) and deserves an explicit human decision, not a silent
    reversal the moment this rule lands.
 
-6. **Measured reach against the live corpus today: ZERO. State this
-   plainly — do not read the numbers below as evidence the rule is
-   doing anything yet.** `engine._run` never calls `evaluate_pair` on a
+6. **Measured reach against the live corpus AS OF 2026-08-19: ZERO. State
+   this plainly — do not read the numbers below as evidence the rule was
+   doing anything yet.** (See the top-of-file REVISED note: this point's
+   connector-population table is a historical snapshot, now stale —
+   D-140 carries the current one.) `engine._run` never calls
+   `evaluate_pair` on a
    same-source pair (issue #197, `etl/dedup/engine.py`) or on a pair
    already sharing a `property_id` — so the veto can only ever fire on a
    pair that is cross-source AND not-yet-merged. As populated by every

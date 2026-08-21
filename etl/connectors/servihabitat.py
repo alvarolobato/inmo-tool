@@ -539,7 +539,12 @@ class ServihabitatConnector(Connector):
             current_price=price,
             description=description,
             photo_urls=photo_urls,
-            contact_raw=None,
+            # Issue #628 (D-141): a constant, not extracted from any
+            # per-listing field — every Servihabitat listing is the same
+            # selling entity (see the listing_kind comment above), so
+            # "Servihabitat" is as honest a `contact_raw` as any other
+            # connector's per-listing agency name. Mirrors solvia.py.
+            contact_raw="Servihabitat",
             address=_address(city, province),
             # No coordinates published anywhere on this site — see module
             # docstring. Asserted in tests so a future change surfaces.

@@ -912,6 +912,27 @@ class MilanunciosConnector(Connector):
             # discover() covers those categories too.
             features=extra_features(attributes),
             operation=infer_operation(category.get("slug")),
+            # Issue #628: 0/115 coverage — investigated, not just unmapped.
+            # `ad.attributes` (the source contact_raw/rooms/bathrooms/etc.
+            # all read above) has no "reference"-shaped entry across every
+            # sampled listing this connector was built against (Phase 2.1
+            # spike + issue #78's follow-up, 20 listings combined) or in
+            # this session's re-check of the same fixtures; the RealEstate-
+            # WebTools/property_web_scraper reference repo this project
+            # already reuses (see browser-extension/NOTICE.md) has no
+            # Milanuncios mapping at all to cross-check against either
+            # (Milanuncios was never one of its ~18 supported portals). A
+            # live re-verification against a fresh real listing was
+            # attempted this session and hit Milanuncios' GeeTest soft-
+            # block (D-047) on two separate detail-page requests, so this
+            # is evidence-based-absence, not a confirmed-absence: a
+            # plausible next step is a real captured `__INITIAL_PROPS__`
+            # payload (from a normal, rate-limited connector run, not ad
+            # hoc research fetches) to check for a "reference" attribute
+            # type or a "Ref:"-style token in free-text `description` —
+            # left unimplemented here rather than guessing a selector this
+            # project's own "don't fabricate precision" rule would reject.
+            reference_code=None,
             # Not cross-checked against raw.raw["url"] (Opus review, PR #85,
             # considered and rejected): fetch_detail()'s request URL is the
             # fully generic "/x/x-<id>.htm" (the title/category slug is a
