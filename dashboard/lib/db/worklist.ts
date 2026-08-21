@@ -38,6 +38,13 @@ export interface AddWorklistResult {
  * (`CAPTURE_PORTAL_NAMES`, issue #454): rows for an ETL-fetched connector (e.g.
  * cimenta2) are vestigial — the extension never drains them — so they are
  * filtered out here rather than shown as a misleading "0/N pending forever".
+ *
+ * Ordering (issue #677): rows requeued for re-capture drain in `requeue_rank`
+ * order — the value ordering frozen when the cohort was queued — AFTER every
+ * row that was never requeued, which keeps its existing newest-first position
+ * (`NULLS FIRST`). The extension's manual batch driver consumes this array
+ * verbatim (`background.js fetchPendingUrls`), so value-ordering a re-capture
+ * queue is entirely a server-side change: no extension redeploy.
  */
 export async function listWorklist(
   portal?: string,
@@ -46,18 +53,24 @@ export async function listWorklist(
   const rows = portal
     ? await sql<WorklistRow>(
         `SELECT id, url, source_portal, status, added_via, external_id, note,
-                matched_capture_id, created_at, updated_at
+                matched_capture_id, requeued_at, requeue_reason, requeue_rank,
+                created_at, updated_at
            FROM capture_worklist
           WHERE source_portal = $1 AND source_portal = ANY($2)
-          ORDER BY created_at DESC, id DESC`,
+          ORDER BY (CASE WHEN status = 'pending' THEN requeue_rank END)
+                     ASC NULLS FIRST,
+                   created_at DESC, id DESC`,
         [portal, capturePortals],
       )
     : await sql<WorklistRow>(
         `SELECT id, url, source_portal, status, added_via, external_id, note,
-                matched_capture_id, created_at, updated_at
+                matched_capture_id, requeued_at, requeue_reason, requeue_rank,
+                created_at, updated_at
            FROM capture_worklist
           WHERE source_portal = ANY($1)
-          ORDER BY created_at DESC, id DESC`,
+          ORDER BY (CASE WHEN status = 'pending' THEN requeue_rank END)
+                     ASC NULLS FIRST,
+                   created_at DESC, id DESC`,
         [capturePortals],
       );
 
@@ -122,6 +135,16 @@ export interface PendingWorklistItem {
  * `{ url, portal, createdAt }`. Backs the auto-capture continuous driver (issue
  * #424): the API route re-ranks these due-first then hands the extension the next
  * ≤N to drain. Oldest-first here is the stable tiebreak once due-priority ties.
+ *
+ * NOT value-ordered by `requeue_rank` (issue #677), deliberately. This list is
+ * re-ranked downstream by `selectNextPendingUrls` (portal due-rank, then
+ * createdAt asc), which is documented as the server mirror of
+ * `browser-extension/batch.js selectNextPending` — the two must stay in step,
+ * so a rank tiebreak here would either be silently overridden by the createdAt
+ * sort or require an extension redeploy to honour. A deliberate bulk
+ * re-capture is drained through the MANUAL batch path ("Capturar todas" →
+ * `listWorklist`), which does order by rank. Auto mode drains a requeued
+ * cohort oldest-first, correctly but not value-first.
  */
 export async function listPendingWorklist(
   portal?: string,

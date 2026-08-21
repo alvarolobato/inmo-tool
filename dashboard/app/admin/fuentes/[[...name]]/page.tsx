@@ -55,8 +55,9 @@ import { DriftReport } from "@/components/etl/DriftReport";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { ConnectorConfigPatch, ConnectorView } from "@/lib/connectors-schema";
-import { firstPendingUrl, isCapturePortal, WORKLIST_STATUSES } from "@/lib/worklist";
+import { firstPendingUrl, isCapturePortal, isRequeued, WORKLIST_STATUSES } from "@/lib/worklist";
 import type { WorklistPortalSummary, WorklistRow, WorklistStatus } from "@/lib/worklist";
+import { RecapturePanel } from "@/components/worklist/RecapturePanel";
 import type { DataHealthResponse } from "@/lib/data-health";
 import { LOW_PHOTO_THRESHOLD, isLowPhotoCoverage, isStuckPending, captureSuccessRate } from "@/lib/data-health";
 import type { PortalDriftStatus } from "@/lib/search-url/drift-check";
@@ -382,13 +383,41 @@ function formatNum(n: number | null): string {
   return n.toFixed(1);
 }
 
-function WorklistStatusBadge({ status, id }: { status: WorklistStatus; id: number }) {
+function WorklistStatusBadge({ row }: { row: WorklistRow }) {
+  // A requeued row and a never-captured row are both 'pending' — the whole
+  // point of `requeued_at` (issue #677) is that they stay tellable apart, in
+  // the UI as well as in the database, including halfway through an
+  // interrupted re-capture pass.
+  const requeued = isRequeued(row);
   return (
     <span
-      data-testid={`worklist-status-${id}`}
-      style={{ fontSize: 12, fontWeight: 600, color: WORKLIST_STATUS_COLOR[status], whiteSpace: "nowrap" }}
+      data-testid={`worklist-status-${row.id}`}
+      style={{ fontSize: 12, fontWeight: 600, color: WORKLIST_STATUS_COLOR[row.status], whiteSpace: "nowrap" }}
     >
-      {WORKLIST_STATUS_LABEL[status]}
+      {WORKLIST_STATUS_LABEL[row.status]}
+      {requeued && (
+        <span
+          data-testid={`worklist-requeued-${row.id}`}
+          title={
+            row.requeue_reason
+              ? `Recaptura: ${row.requeue_reason}`
+              : "Marcada para recaptura"
+          }
+          style={{
+            marginLeft: 6,
+            fontSize: 11,
+            fontWeight: 600,
+            color: "var(--accent)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: "1px 6px",
+            whiteSpace: "nowrap",
+          }}
+        >
+          recaptura
+          {row.requeue_rank !== null ? ` #${row.requeue_rank}` : ""}
+        </span>
+      )}
     </span>
   );
 }
@@ -855,6 +884,9 @@ function FuenteDetail({ name }: { name: string }) {
             </div>
           </section>
 
+          {/* ── Cohort re-capture (issue #677) ─────────────────────────── */}
+          <RecapturePanel portal={name} onRequeued={fetchWorklist} />
+
           {rows.length > 0 && (
             <section
               data-testid="worklist-filters"
@@ -929,7 +961,7 @@ function FuenteDetail({ name }: { name: string }) {
                           </a>
                         </td>
                         <td style={{ padding: "6px 8px" }}>
-                          <WorklistStatusBadge status={r.status} id={r.id} />
+                          <WorklistStatusBadge row={r} />
                         </td>
                         <td style={{ padding: "6px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
                           {r.status !== "skipped" && r.status !== "captured" && r.status !== "stale" && (

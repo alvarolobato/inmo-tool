@@ -1292,3 +1292,140 @@ body {
     padding-right: var(--pad-x, 12px);
   }
 }
+
+/* ── Re-capture cohort panel (issue #677) ────────────────────────────────────
+   Mobile-first per D-121: every value that differs below 768px lives in a
+   class here, never as an inline style on the component — the component's
+   inline styles carry only colour/border, which do not vary by breakpoint.
+   Stacking is done with an explicit `flex-direction: column` (D-124: a
+   `flex-wrap` with basis-0 children never actually wraps). */
+.recapture-panel {
+  padding: 16px;
+}
+.recapture-fields {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  margin-top: 14px;
+  align-items: flex-end;
+}
+.recapture-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.recapture-field-narrow {
+  flex: 0 0 120px;
+}
+.recapture-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.recapture-input {
+  /* `appearance: none` is load-bearing, not cosmetic. Under a mobile UA
+     Chromium renders a `menulist` <select> as a platform control and IGNORES
+     height and padding entirely — an explicit `min-height: 44px`, even
+     `!important`, still measured 22px on an emulated iPhone 13 until the
+     native appearance was switched off. Dropping it silently reintroduces a
+     half-size tap target that only mobile-recapture.spec.ts would catch. */
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 44px; /* D-124's tap-target floor */
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--fg);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* `appearance: none` also removes the dropdown arrow, so draw one back —
+   without it a <select> is indistinguishable from a text input. */
+select.recapture-input {
+  padding-right: 32px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg-muted) 50%),
+    linear-gradient(135deg, var(--fg-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) calc(50% + 2px),
+    calc(100% - 12px) calc(50% + 2px);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+.recapture-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  line-height: 1.45;
+  cursor: pointer;
+}
+.recapture-check input {
+  width: 20px;
+  height: 20px;
+  margin: 12px 0 0 0; /* centres the box against the 44px row it sits in */
+  flex: 0 0 auto;
+}
+.recapture-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.recapture-btn {
+  min-height: 44px; /* D-124's tap-target floor */
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.recapture-btn:disabled {
+  cursor: not-allowed;
+}
+.recapture-estimate {
+  margin-top: 14px;
+  padding: 14px;
+}
+.recapture-cost-list {
+  margin: 10px 0 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--fg);
+  line-height: 1.55;
+}
+.recapture-cost-list li + li {
+  margin-top: 6px;
+}
+
+@media (max-width: 767px) {
+  .recapture-panel {
+    padding: 14px var(--pad-x, 12px);
+  }
+  /* Stack, rather than shrink: three controls side by side overflow 390px. */
+  .recapture-fields,
+  .recapture-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .recapture-field,
+  .recapture-field-narrow {
+    flex: 0 0 auto;
+  }
+  .recapture-btn {
+    width: 100%;
+  }
+  .recapture-estimate {
+    padding: 12px;
+  }
+}

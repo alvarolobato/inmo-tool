@@ -1984,6 +1984,57 @@ ALTER TABLE capture_worklist ADD CONSTRAINT capture_worklist_status_check
 DELETE FROM capture_worklist
  WHERE source_portal NOT IN ('idealista', 'aliseda', 'altamira', 'hipoges');
 
+-- ── Re-capture requeue metadata (issue #677) ────────────────────────────────
+-- A parser bug can leave a whole cohort of listings holding bad data (the case
+-- that prompted this: every Idealista listing stored ≤3 photos because the
+-- portal truncates its gallery preview server-side — #625, fixed by #654).
+-- Those listings already have a worklist row, already `captured`, so the
+-- existing extension batch driver (D-043) is the transport: flipping the row
+-- back to 'pending' re-captures it. What that flip destroys, in place, is the
+-- fact that the row already produced data once — so after an interrupted pass
+-- a half-drained cohort would be indistinguishable from one that was never
+-- captured at all.
+--
+-- These three columns carry that distinction OUTSIDE `status`, which stays a
+-- single lifecycle value with its existing five members. A sixth status
+-- ('requeued') was rejected: `status` is read by four independent consumers
+-- (dashboard/lib/db/worklist.ts's list + pending queries, the worklist
+-- roll-ups, etl/worklist_seed.py's 'stale' reconciliation, and
+-- etl/capture.py's correlation) and — decisively — the extension filters
+-- `r.status === 'pending'` client-side in background.js, so a new status
+-- would sit in a state nothing drives: a queue that looks busy and never
+-- drains. Orthogonal metadata needs no consumer to change.
+--
+--   never captured        → status='pending' AND requeued_at IS NULL
+--   deliberately requeued → status='pending' AND requeued_at IS NOT NULL
+--
+-- `matched_capture_id` is deliberately NOT cleared on requeue: it stays
+-- pointing at the capture that satisfied the row last time until a new
+-- capture replaces it, so the prior evidence survives the requeue.
+ALTER TABLE capture_worklist ADD COLUMN IF NOT EXISTS requeued_at    TIMESTAMPTZ;
+ALTER TABLE capture_worklist ADD COLUMN IF NOT EXISTS requeue_reason TEXT;
+-- Drain order within a requeued cohort, 1 = most valuable (see
+-- dashboard/lib/db/recapture.ts). Frozen at requeue time rather than joined
+-- live: the worklist ↔ listing correlation is `worklistMatchKey`, which exists
+-- in exactly two places (TS + Python) kept byte-identical by a shared test
+-- fixture, and a live ORDER BY join would need a third copy of it in SQL.
+ALTER TABLE capture_worklist ADD COLUMN IF NOT EXISTS requeue_rank   INTEGER;
+
+-- The drain queries order by
+--   (CASE WHEN status = 'pending' THEN requeue_rank END) ASC NULLS FIRST,
+--   created_at DESC, id DESC
+-- NULLS FIRST so every row that was never requeued keeps exactly the position
+-- it has today, and a requeued cohort drains after them in value order. The
+-- rank is gated on `status = 'pending'` inside the ORDER BY rather than being
+-- cleared when the row leaves 'pending': clearing it would need a write in
+-- both etl/capture.py (which flips the row to 'captured' on correlation) and
+-- every dashboard status writer, and the two would drift. Gating in the sort
+-- needs no cleanup anywhere and keeps the rank as a record of what the row was
+-- worth last time it was queued.
+--
+-- No index: `capture_worklist` is a few thousand rows per portal and the sort
+-- is over a CASE expression that a plain column index could not serve anyway.
+
 -- ── Worklist sitemap-seed trigger (issue #260) ──────────────────────────────
 -- The same "queue table, not a synchronous call" transport the dashboard uses
 -- for ad-hoc connector runs (etl_manual_trigger) and extension captures: the

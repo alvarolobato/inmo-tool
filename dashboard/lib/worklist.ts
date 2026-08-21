@@ -17,8 +17,31 @@ export interface WorklistRow {
   external_id: string | null;
   note: string | null;
   matched_capture_id: number | null;
+  /**
+   * Set when this row was deliberately queued for capture AGAIN after having
+   * already produced data (issue #677). This is what keeps a requeued row
+   * distinguishable from one that was never captured, both of which sit at
+   * status 'pending' — including halfway through an interrupted pass.
+   */
+  requeued_at: string | null;
+  /** Why the cohort was requeued, as typed by the operator. */
+  requeue_reason: string | null;
+  /** Drain order within a requeued cohort, 1 = most valuable. */
+  requeue_rank: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * True when the row is queued but has already produced data once — i.e. it is
+ * a re-capture, not a first capture. The two are the same `status`; only
+ * `requeued_at` separates them.
+ */
+export function isRequeued(row: {
+  status: WorklistStatus;
+  requeued_at: string | null;
+}): boolean {
+  return row.status === "pending" && row.requeued_at !== null;
 }
 
 // 'stale' (issue #273): a sitemap-seeded row whose listing has since dropped
