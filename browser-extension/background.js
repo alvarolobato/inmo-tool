@@ -29,6 +29,12 @@ importScripts("capture-search-url.js");
 // normalize an Idealista search/results URL and shape the observe payload.
 // Side-effect-free at load; publishes self.InmoObserve.
 importScripts("observe-search-url.js");
+// Pure redaction/truncation/shaping helpers for network capture (issue #671
+// follow-up) — loaded here too (not just in the MAIN-world page recorder) so
+// disarmNetworkRecording's entry-capping uses the SAME NR.capEntries the page
+// recorder's own MAX_ENTRIES accounting mirrors, one implementation only.
+// Side-effect-free at load; publishes self.InmoNetworkRecorder.
+importScripts("network-recorder.js");
 
 /**
  * Supported capture hosts are BACKEND-DRIVEN (issue #237): the dashboard's
@@ -380,6 +386,78 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .then(sendResponse)
       .catch(() => sendResponse(null));
     return true; // async
+  }
+
+  // "Forzar captura + diagnóstico" (issue #671). The popup already asked the
+  // content script for {html, url, title, diagnostic}; this sends it to the
+  // dashboard's dedicated diagnostic endpoint — NEVER /api/extension/capture,
+  // a completely separate table/route that no ingest path reads (see
+  // sendDiagnostic's docstring). If a network recording was armed for this
+  // tab, the buffered redacted entries ride along and the recorder is torn
+  // down (STOP_NETWORK_RECORDING semantics, inlined) regardless of send
+  // success — a recorder must never keep running after the owner asked to
+  // send what it had.
+  if (msg.type === 'SEND_DIAGNOSTIC') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    (async () => {
+      const network = await disarmNetworkRecording(tabId);
+      try {
+        const res = await sendDiagnostic({
+          url: msg.url,
+          html: msg.html,
+          title: msg.title,
+          diagnostic: msg.diagnostic,
+          network,
+        });
+        sendResponse(res);
+      } catch (err) {
+        sendResponse({ success: false, error: { message: err.message } });
+      }
+    })();
+    return true; // async
+  }
+
+  // "Grabar red y recargar" (issue #671 follow-up): arm the MAIN-world
+  // fetch/XHR recorder for this tab's origin, then the popup reloads it. The
+  // host-permission grant (chrome.permissions.request) MUST happen in the
+  // popup itself — a service worker has no user-activation signal, so
+  // permissions.request would silently fail here (Chrome requires a real
+  // user gesture on an extension page). This handler only registers the
+  // dynamic content scripts once the popup confirms permission was granted.
+  if (msg.type === 'ARM_NETWORK_RECORDING') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    armNetworkRecording(tabId, msg.origin)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async
+  }
+
+  if (msg.type === 'GET_NETWORK_RECORDING_STATE') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    sendResponse(getNetworkRecordingState(tabId));
+    return true;
+  }
+
+  // Explicit stop without sending (owner changed their mind) — tears the
+  // recorder down and discards the buffer, same lifecycle guarantee as
+  // SEND_DIAGNOSTIC's implicit disarm.
+  if (msg.type === 'STOP_NETWORK_RECORDING') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    disarmNetworkRecording(tabId)
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async
+  }
+
+  // The MAIN-world recorder → ISOLATED-world relay → here. Buffer per tab,
+  // capped (network-recorder.js NR.capEntries at flush time keeps the MOST
+  // RECENT MAX_ENTRIES — recording only happens while a session is actively
+  // armed, so an entry arriving for a tab with no active session is dropped
+  // silently (a race on disarm, or a stray postMessage from a stale page).
+  if (msg.type === 'NETWORK_ENTRY') {
+    const tabId = _sender.tab && _sender.tab.id;
+    recordNetworkEntry(tabId, msg.entry);
+    return false; // fire-and-forget
   }
 });
 
@@ -2738,6 +2816,171 @@ async function handleCheckStatus(captureId) {
   return data;
 }
 
+// ═══ Diagnostics: "forzar captura + diagnóstico" (issue #671) ══════════════
+//
+// A DIAGNOSTIC channel, never an ingest path: sendDiagnostic POSTs to
+// /api/extension/diagnostic — a dedicated route/table `/api/extension/capture`
+// never touches and etl/capture.py's poller never reads (see the route's own
+// docstring and the D-1xx record for this feature). Works on ANY page —
+// content-script.js's CAPTURE_DIAGNOSTIC handler degrades every field to
+// null/false for a page detect.js doesn't recognise, by construction.
+//
+// Network capture (opt-in, owner-initiated reload) is a small state machine
+// layered on top:
+//   armNetworkRecording   — register the MAIN-world recorder + ISOLATED relay
+//                            for one origin, scoped to one tab.
+//   recordNetworkEntry    — buffer a redacted entry relayed from that tab.
+//   disarmNetworkRecording— unregister + return the buffered (capped) entries.
+// The buffer is in-memory only (lost on a service-worker eviction — an
+// acceptable limitation for a manual, short-lived diagnostic session); the
+// ARMED bookkeeping is persisted to chrome.storage.session so a restart can
+// still tell "was I supposed to be recording tab N" rather than leaving an
+// orphaned recorder with no record of it existing.
+
+const networkBuffers = new Map(); // tabId -> raw entry[] (pre-cap)
+
+async function getArmedRecordings() {
+  const { diagArmed } = await chrome.storage.session.get('diagArmed');
+  return diagArmed && typeof diagArmed === 'object' ? diagArmed : {};
+}
+
+async function setArmedRecordings(armed) {
+  await chrome.storage.session.set({ diagArmed: armed });
+}
+
+function networkScriptIds(tabId) {
+  const base = `inmo-diag-${tabId}`;
+  return [`${base}-main`, `${base}-relay`];
+}
+
+/**
+ * Register the MAIN-world fetch/XHR recorder + its ISOLATED-world relay for
+ * `origin`, scoped to exactly that origin — never `<all_urls>` — so a
+ * recording session only ever sees traffic for the page being diagnosed. The
+ * host permission for `origin` must ALREADY be granted: `chrome.permissions
+ * .request` requires a real user-activation signal, which only the popup (an
+ * extension PAGE) has — a service worker does not, so requesting it here
+ * would silently fail. popup.js requests it directly, then sends this.
+ */
+async function armNetworkRecording(tabId, origin) {
+  if (tabId == null || !origin) {
+    return { success: false, error: { message: 'Falta la pestaña o el origen.' } };
+  }
+  let has = false;
+  try {
+    has = await chrome.permissions.contains({ origins: [origin + '/*'] });
+  } catch (err) {
+    return { success: false, error: { message: err.message } };
+  }
+  if (!has) {
+    return {
+      success: false,
+      error: { message: 'Falta el permiso de host para grabar red en este origen.' },
+    };
+  }
+  const [mainId, relayId] = networkScriptIds(tabId);
+  try {
+    // Idempotent re-arm: clear any stale registration for this tab first.
+    await chrome.scripting.unregisterContentScripts({ ids: [mainId, relayId] }).catch(() => {});
+    await chrome.scripting.registerContentScripts([
+      {
+        id: mainId,
+        matches: [origin + '/*'],
+        js: ['network-recorder.js', 'network-recorder-main.js'],
+        world: 'MAIN',
+        runAt: 'document_start',
+        allFrames: false,
+      },
+      {
+        id: relayId,
+        matches: [origin + '/*'],
+        js: ['network-recorder-relay.js'],
+        world: 'ISOLATED',
+        runAt: 'document_start',
+        allFrames: false,
+      },
+    ]);
+  } catch (err) {
+    return { success: false, error: { message: err.message } };
+  }
+  networkBuffers.set(tabId, []);
+  const armed = await getArmedRecordings();
+  armed[tabId] = { origin, armedAt: Date.now() };
+  await setArmedRecordings(armed);
+  return { success: true };
+}
+
+/** Current recording state for `tabId`, for the popup's status line. */
+function getNetworkRecordingState(tabId) {
+  const entries = networkBuffers.get(tabId);
+  return { armed: networkBuffers.has(tabId), entryCount: entries ? entries.length : 0 };
+}
+
+/** Buffer one relayed entry. Drops it silently if `tabId` isn't armed (a
+ * disarm race, or a stray message from a stale page) — never throws. */
+function recordNetworkEntry(tabId, entry) {
+  if (tabId == null || !networkBuffers.has(tabId) || !entry) return;
+  const list = networkBuffers.get(tabId);
+  list.push(entry);
+  // Independent of the storage-time cap (NR.MAX_ENTRIES) applied at flush —
+  // just keeps this in-memory buffer itself from growing unboundedly between
+  // flushes on a very chatty page.
+  const HARD_CAP = 1000;
+  if (list.length > HARD_CAP) list.shift();
+}
+
+/**
+ * Unregister the dynamic content scripts for `tabId` and return its buffered
+ * entries, redaction-capped to NR.MAX_ENTRIES (keeping the MOST RECENT —
+ * network-recorder.js `capEntries`). Returns null when nothing was armed for
+ * this tab. ALWAYS safe to call, even with nothing armed — SEND_DIAGNOSTIC
+ * calls this unconditionally so a recorder can never outlive the diagnostic
+ * send it exists for.
+ */
+async function disarmNetworkRecording(tabId) {
+  if (tabId == null || !networkBuffers.has(tabId)) return null;
+  const raw = networkBuffers.get(tabId) || [];
+  networkBuffers.delete(tabId);
+  const [mainId, relayId] = networkScriptIds(tabId);
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: [mainId, relayId] });
+  } catch {
+    /* best-effort — a stale registration only ever matches this one origin
+       and reinstalling on next arm overwrites it; must not block sending */
+  }
+  try {
+    const armed = await getArmedRecordings();
+    if (armed[tabId]) {
+      delete armed[tabId];
+      await setArmedRecordings(armed);
+    }
+  } catch {
+    /* storage.session best-effort */
+  }
+  const NR = self.InmoNetworkRecorder;
+  if (!NR) return { entries: raw, droppedCount: 0 };
+  return NR.capEntries(raw);
+}
+
+/**
+ * POST the diagnostic payload to the dashboard's dedicated route. `network`
+ * is null when no recording was armed for this tab's session, or
+ * `{entries, droppedCount}` (already redacted/capped) otherwise.
+ */
+async function sendDiagnostic({ url, html, title, diagnostic, network }) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(`${apiUrl}/api/extension/diagnostic`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify({ url, html, title, diagnostic, network }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `API error: ${response.status}`);
+  }
+  return response.json();
+}
+
 // ═══ CommonJS export for tests (issue #554 review N8) ══════════════════════
 //
 // background.js is the imperative shell around Chrome's extension APIs and
@@ -2795,5 +3038,12 @@ if (typeof module !== 'undefined' && module.exports) {
     enumerationStopped,
     runEnumerationThenCapture,
     runBatchStateExclusive,
+    // Diagnostics / network capture (issue #671)
+    armNetworkRecording,
+    disarmNetworkRecording,
+    recordNetworkEntry,
+    getNetworkRecordingState,
+    sendDiagnostic,
+    networkBuffers,
   };
 }

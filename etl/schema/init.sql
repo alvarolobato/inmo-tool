@@ -3181,6 +3181,56 @@ CREATE TABLE IF NOT EXISTS extension_block_episode (
 CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
     ON extension_block_episode (detected_at DESC);
 
+-- "Forzar captura + diagnóstico" (issue #671) — a DIAGNOSTIC channel, NOT an
+-- ingest path. Deliberately a table of its own, not a flag/status value
+-- inside `extension_capture`: `extension_capture` is polled by
+-- etl/capture.py (a 'pending' row there gets parsed and upserted into
+-- `listing`/`property`) — this table is read by NOTHING that path or any
+-- other processing job touches. No FK from capture_worklist, no trigger, no
+-- poller. POST /api/extension/diagnostic (the only writer) inserts directly
+-- here; the extension never calls /api/extension/capture for this flow.
+--
+-- Retention is the whole point of this feature (three real investigations
+-- this week depended on page HTML surviving by accident — see the D-1xx
+-- record for this table). It ALWAYS keeps the HTML, regardless of connector
+-- calibration state or #670's `etl.retain_capture_html_for` config (which
+-- only governs `extension_capture.html`, a completely different column on a
+-- completely different table). Pruning is manual, via the /admin/diagnostics
+-- surface's delete button — no automatic expiry.
+--
+-- `detection` mirrors browser-extension/diagnostic.js's buildDiagnosticBlock
+-- output verbatim (detailPortal/listingPortal/pageRole, the isRenderReady
+-- verdict + WHICH selector satisfied it, anchor/extractDetailUrls counts,
+-- the D-142 block-signal verdict, and whether auto-capture would have
+-- fired) — read as opaque JSONB, never parsed by any Python/SQL job.
+--
+-- `network` is NULL unless the owner armed the opt-in network-capture reload
+-- (issue #671 follow-up) — {entries:[{url,method,status,...}], droppedCount}
+-- with credentials already stripped and bodies already size-capped in the
+-- BROWSER before the request that stores this row (network-recorder.js
+-- summarizeEntry) — this table is not a second place to redact.
+--
+-- Personal data note (AGENTS.md "no scraped personal data in committed
+-- files"): `html`/`network` can carry owner names, phone numbers, and
+-- contact-form markup off the captured page. That's fine IN THE PRODUCTION
+-- DB (not public) — it must never reach a committed file (a fixture built
+-- from a row here needs its own scrubbing pass first).
+CREATE TABLE IF NOT EXISTS extension_diagnostic (
+    id                 BIGSERIAL    PRIMARY KEY,
+    url                TEXT         NOT NULL,
+    html               TEXT         NOT NULL,
+    html_bytes         INTEGER      NOT NULL,
+    title              TEXT,
+    extension_version  TEXT,
+    detection          JSONB,
+    network            JSONB,
+    network_dropped_count INTEGER,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_diagnostic_created_at
+    ON extension_diagnostic (created_at DESC);
+
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)
 -- ============================================================
@@ -3218,3 +3268,4 @@ ANALYZE observed_search_urls;
 ANALYZE profile_connector_filter;
 ANALYZE property_search_doc;
 ANALYZE extension_block_episode;
+ANALYZE extension_diagnostic;

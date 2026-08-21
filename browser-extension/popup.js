@@ -1228,6 +1228,130 @@ $('#copy-json-btn').addEventListener('click', async () => {
   }, 2000);
 });
 
+// ─── "Forzar captura + diagnóstico" (issue #671) ──────────────────
+//
+// ALWAYS reachable (the footer sits outside every #state-* panel showState()
+// toggles), independent of whatever detection/mode init() chose to show —
+// that's the whole point: a page the popup currently REFUSES to handle (an
+// unsupported host used to just fall through to manual single capture; a
+// blocked/challenge page has no other escape hatch at all) must still be
+// diagnosable in one click.
+
+function setDiagnosticStatus(text, kind) {
+  const el = $('#diagnostic-status');
+  el.textContent = text;
+  el.classList.remove('hidden');
+  el.style.color = kind === 'error' ? '#ef4444' : kind === 'success' ? '#16a34a' : '#64748b';
+}
+
+async function activeTabOrNull() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
+}
+
+/** Ask the content script for {html, url, title, diagnostic}, injecting it
+ * first (detect.js → diagnostic.js → content-script.js, same dependency
+ * order as manifest.json's static content_scripts) if it isn't loaded yet —
+ * mirrors detectPage()/runSingleCapture()'s own on-demand-injection fallback,
+ * which is what already lets manual capture work on an unsupported host. */
+async function captureDiagnosticFromTab(tab) {
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+  } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['detect.js', 'diagnostic.js', 'content-script.js'],
+    });
+    res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+  }
+  if (!res || !res.html) throw new Error('No se recibió contenido de la página.');
+  return res;
+}
+
+$('#diagnostic-btn').addEventListener('click', async () => {
+  const btn = $('#diagnostic-btn');
+  btn.disabled = true;
+  setDiagnosticStatus('Capturando diagnóstico…');
+  try {
+    const tab = await activeTabOrNull();
+    if (!tab || !tab.id) throw new Error('No se pudo acceder a la pestaña actual.');
+    const captured = await captureDiagnosticFromTab(tab);
+    const res = await chrome.runtime.sendMessage({
+      type: 'SEND_DIAGNOSTIC',
+      tabId: tab.id,
+      url: captured.url,
+      html: captured.html,
+      title: captured.title,
+      diagnostic: captured.diagnostic,
+    });
+    if (!res || !res.success) {
+      throw new Error((res && res.error && res.error.message) || 'No se pudo enviar el diagnóstico.');
+    }
+    setDiagnosticStatus('Diagnóstico enviado ✓', 'success');
+  } catch (err) {
+    setDiagnosticStatus(err.message || 'No se pudo enviar el diagnóstico.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// "Grabar red y recargar" (issue #671 follow-up): the owner explicitly asked
+// for XHR/fetch capture too, because a DOM snapshot can never contain data
+// that only arrives by network call after render (Hipoges' Angular shell,
+// idealista's lazy photo gallery). The reload this requires is EXPLICIT and
+// owner-initiated — never silent — hence the confirm() naming it plainly.
+$('#network-record-btn').addEventListener('click', async () => {
+  const confirmed = window.confirm(
+    'Esto recargará la pestaña activa para instalar el grabador de red antes de que ' +
+      'la página arranque (necesario para ver las llamadas de Angular/React). ' +
+      'Después de que la página cargue, vuelve a abrir el popup y pulsa ' +
+      '"Forzar captura + diagnóstico" para enviar lo grabado.',
+  );
+  if (!confirmed) return;
+  const btn = $('#network-record-btn');
+  btn.disabled = true;
+  setDiagnosticStatus('Solicitando permiso…');
+  try {
+    const tab = await activeTabOrNull();
+    if (!tab || !tab.id || !tab.url) throw new Error('No se pudo acceder a la pestaña actual.');
+    if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) {
+      throw new Error('Esta pestaña no es una página http(s).');
+    }
+    const origin = new URL(tab.url).origin;
+    // MUST be requested from the popup itself (a real user-activation
+    // signal) — chrome.permissions.request from the service worker has none
+    // and would silently fail. Uses the SAME optional_host_permissions
+    // (http(s)://*/*) options.js already relies on for the API-URL origin.
+    let granted = false;
+    try {
+      granted = await chrome.permissions.request({ origins: [origin + '/*'] });
+    } catch {
+      granted = false;
+    }
+    if (!granted) {
+      throw new Error('Permiso denegado para este origen — no se ha activado la grabación.');
+    }
+    const res = await chrome.runtime.sendMessage({
+      type: 'ARM_NETWORK_RECORDING',
+      tabId: tab.id,
+      origin,
+    });
+    if (!res || !res.success) {
+      throw new Error((res && res.error && res.error.message) || 'No se pudo activar la grabación de red.');
+    }
+    await chrome.tabs.reload(tab.id);
+    setDiagnosticStatus(
+      'Grabando red… espera a que cargue y pulsa "Forzar captura + diagnóstico".',
+      'success',
+    );
+  } catch (err) {
+    setDiagnosticStatus(err.message || 'No se pudo activar la grabación de red.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 init();
 
 // Publish for the unit tests (Node/vitest) — same pattern as
@@ -1243,5 +1367,6 @@ if (typeof module !== 'undefined' && module.exports) {
     formatClockTime,
     formatElapsed,
     blockSignatureLabelEs,
+    setDiagnosticStatus,
   };
 }
