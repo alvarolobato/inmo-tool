@@ -117,7 +117,9 @@
  * LLM. A double-click no longer doubles spend.
  */
 
-import { sql, getPool } from "@/lib/db-write";
+import { sql } from "@/lib/db-write";
+import { Pool } from "pg";
+import { buildPgPoolConfig } from "@/lib/db-shared";
 import { createHash } from "node:crypto";
 import type { ListingSnapshot } from "@/lib/llm-context";
 import { getSystemConfig } from "@/lib/system-config/loader";
@@ -256,8 +258,44 @@ export async function getLatestAssessment<T>(
  * pure function of its input, so the lock/unlock calls always agree on the
  * key even though they're computed twice.
  */
+/**
+ * #666/D-149 finding 2 — a DEDICATED pool for advisory-lock-holding
+ * connections, separate from `db-write.ts`'s general pool.
+ *
+ * `withAdvisoryLock` below holds a connection for the ENTIRE duration of
+ * `fn`, which spans a real network LLM call — potentially many seconds, and
+ * up to `dashboard.assessment_concurrency` of these run at once
+ * (`batch.ts`'s `MAX_ASSESSMENT_CONCURRENCY`, currently 8). Sharing
+ * `db-write.ts`'s general pool meant that many concurrent assessment workers
+ * could starve EVERY OTHER db-write consumer (dashboard CRUD, materialize,
+ * dedup, scoring, every API route) of connections for as long as the
+ * slowest in-flight LLM call took — reproduced directly: 8 concurrent
+ * `getOrCompute` calls plus 4 ordinary long-running write-pool queries
+ * caused every one of the 8 to fail (or, if the contention landed on
+ * `save()`, to pay for the LLM call and then lose the result to a
+ * connection-acquire timeout). Isolating lock-holding into its own pool
+ * removes that cross-talk structurally instead of just widening a shared
+ * budget everyone still competes over. Sized to the concurrency hard cap
+ * (8) plus headroom for any other advisory-lock caller.
+ */
+let _lockPool: Pool | null = null;
+function getLockPool(): Pool {
+  if (!_lockPool) {
+    _lockPool = new Pool(buildPgPoolConfig({ max: 10 }));
+  }
+  return _lockPool;
+}
+
+/** Test-only: reset the dedicated advisory-lock pool. */
+export async function resetLockPool(): Promise<void> {
+  if (_lockPool) {
+    await _lockPool.end();
+    _lockPool = null;
+  }
+}
+
 async function withAdvisoryLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+  const client = await getLockPool().connect();
   try {
     await client.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [key]);
     try {
@@ -319,7 +357,14 @@ export class AssessmentParkedError extends Error {
 /** How many failures on an UNCHANGED input before the flow stops being retried. */
 export const DEFAULT_MAX_ASSESSMENT_FAILURES = 3;
 
-function maxAssessmentFailures(): number {
+/**
+ * #666/D-149 — exported so `eligibility.ts` can build a SELECTION-time
+ * "not actively parked" predicate that reads the SAME threshold this module
+ * enforces at spend-time, rather than a second hand-kept copy drifting from
+ * it (the same #330 shared-fragment principle the rest of eligibility.ts
+ * already follows).
+ */
+export function maxAssessmentFailures(): number {
   try {
     const raw = getSystemConfig()["dashboard.assessment_max_failures"]?.value;
     if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
@@ -348,7 +393,10 @@ interface FailureRow {
  * something we have since fixed. One cheap retry a fortnight is a rounding
  * error against the 96/day it replaced.
  */
-const PARK_DECAY_DAYS = 14;
+// #666/D-149 — exported for the same reason as `maxAssessmentFailures`: the
+// eligibility selection-time approximation must decay a park on the SAME
+// clock this module does.
+export const PARK_DECAY_DAYS = 14;
 
 /**
  * Current strike count for this exact input, or null when never failed.
@@ -480,6 +528,21 @@ function isEnvironmentalError(err: unknown): boolean {
 
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code === "string" && TRANSIENT_CLI_CODES.has(code)) return true;
+  // #666/D-149 finding 3 — a Postgres pool CONNECTION failure (the DB is
+  // momentarily out of connections, or unreachable) is exactly as
+  // environmental as an upstream 429/5xx: it says nothing about whether
+  // THIS listing's text is assessable, it can hit EVERY in-flight worker at
+  // once under real concurrency, and unlike the CLI codes above it has no
+  // stable `.code` to match on for the pg-pool "no free connection within
+  // connectionTimeoutMillis" case — that one only has a message. Matched by
+  // network error `.code` where pg/Node does set one (`ECONNREFUSED`,
+  // `ETIMEDOUT`), and by the literal pg-pool timeout message otherwise.
+  // Before #666 this landed just outside `getOrCompute`'s try/catch by
+  // accident of where the failure occurred, not by a guard — real
+  // concurrency (finding 2) made it a live, non-accidental path.
+  if (code === "ECONNREFUSED" || code === "ETIMEDOUT") return true;
+  const message = err instanceof Error ? err.message : "";
+  if (message.includes("timeout exceeded when trying to connect")) return true;
 
   // Upstream rate-limit / server errors, however they surface.
   const status = (err as { status?: unknown; innerErrorCode?: unknown } | null);

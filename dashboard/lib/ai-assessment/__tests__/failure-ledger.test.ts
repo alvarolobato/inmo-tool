@@ -15,12 +15,25 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mockSql = vi.fn();
+// #666/D-149 finding 2: `withAdvisoryLock` now holds its connection on a
+// DEDICATED pool (`cache.ts`'s `getLockPool()`, a raw `new Pool(...)` from
+// "pg"), separate from `db-write.ts`'s general pool. Mocking only
+// `@/lib/db-write` here (as before #666) left this file silently depending
+// on a REAL Postgres connection for the lock — passing only by accident
+// under `npm test`'s isolated-DB wrapper, and failing/hanging under a plain
+// `vitest run` with no reachable DB. "pg" is mocked directly so this stays a
+// genuine no-live-DB unit test.
 const mockClientQuery = vi.fn().mockResolvedValue({ rows: [] });
 const mockRelease = vi.fn();
 const mockConnect = vi.fn().mockResolvedValue({ query: mockClientQuery, release: mockRelease });
 vi.mock("@/lib/db-write", () => ({
   sql: (...a: unknown[]) => mockSql(...a),
-  getPool: () => ({ connect: mockConnect }),
+}));
+vi.mock("pg", () => ({
+  Pool: class {
+    connect = mockConnect;
+  },
+  types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
 import { getOrCompute, AssessmentParkedError } from "../cache";
@@ -244,4 +257,50 @@ describe("quota / kill-switch never strike the ledger", () => {
       expect(issued()).not.toContain("record-failure");
     },
   );
+});
+
+describe("#666/D-149 review finding 3: a Postgres pool CONNECTION failure never strikes the ledger", () => {
+  // Before #666, real concurrency (finding 2) didn't exist, so a pool
+  // connection failure here was luck of where it happened to land in
+  // `getOrCompute` — outside its try/catch by accident, not by a guard. Real
+  // concurrency makes it a live path: several workers can all hit "no free
+  // connection" at the same instant, exactly like the quota case above —
+  // striking each one would park perfectly healthy properties for
+  // PARK_DECAY_DAYS on a transient infrastructure blip, not a property of
+  // their listing text.
+  it("does NOT strike on the exact pg-pool 'timeout exceeded when trying to connect' message", async () => {
+    stubDb();
+    // The literal message node-postgres/pg-pool 3.x raises when
+    // `connectionTimeoutMillis` elapses waiting for a free connection — no
+    // stable `.code`, so this is matched on message text (see cache.ts's
+    // `isEnvironmentalError`).
+    const err = new Error("timeout exceeded when trying to connect");
+    await expect(
+      getOrCompute(1, "condition", "v1", listings, vi.fn().mockRejectedValue(err), vi.fn()),
+    ).rejects.toBe(err);
+    expect(issued()).not.toContain("record-failure");
+  });
+
+  it.each([["ECONNREFUSED"], ["ETIMEDOUT"]])(
+    "does NOT strike on a network error with code %s",
+    async (code) => {
+      stubDb();
+      const err = Object.assign(new Error("connect failed"), { code });
+      await expect(
+        getOrCompute(1, "condition", "v1", listings, vi.fn().mockRejectedValue(err), vi.fn()),
+      ).rejects.toBe(err);
+      expect(issued()).not.toContain("record-failure");
+    },
+  );
+
+  it("a DIFFERENT message containing similar words still strikes — this is a message-text match, not a blanket 'any Postgres-flavoured error' exemption", async () => {
+    stubDb();
+    // A genuine content-shaped failure must not accidentally slip through
+    // the new carve-out just because its text happens to mention Postgres.
+    const err = new Error("relation \"ai_assessment\" does not exist");
+    await expect(
+      getOrCompute(1, "condition", "v1", listings, vi.fn().mockRejectedValue(err), vi.fn()),
+    ).rejects.toBe(err);
+    expect(issued()).toContain("record-failure");
+  });
 });

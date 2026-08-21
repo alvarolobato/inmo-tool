@@ -267,6 +267,55 @@ describe.runIf(dbAvailable)("assessment batch — real Postgres", () => {
     });
   });
 
+  // #666/D-149 review finding 1: the exact scenario the review reproduced —
+  // a parked head-of-queue property (created_at ASC, LIMIT) must NOT block
+  // every property behind it from ever being selected, forever.
+  it("a property parked on ALL selection flows is excluded, and does NOT block a healthy property behind it in created_at order", async () => {
+    await withRealDb(async (pool) => {
+      // `parked` seeded FIRST (older created_at) so it would normally be the
+      // head of the `created_at ASC` queue — exactly the failure mode.
+      const parked = await seedUnassessedProperty(pool, "park-head");
+      const healthy = await seedUnassessedProperty(pool, "park-behind");
+
+      for (const flow of ["occupancy", "condition", "redflags"]) {
+        await pool.query(
+          `INSERT INTO ai_assessment_failure
+             (property_id, assessment_type, prompt_version, content_hash, fail_count, last_failed_at)
+           VALUES ($1, $2, 'any-version', 'test-hash', 3, now())`,
+          [parked, flow],
+        );
+      }
+
+      // batchSize = 1: with the pre-fix bug, `parked` (older, head of queue)
+      // would win the LIMIT every time and `healthy` would NEVER be reached.
+      const selected = await selectPropertiesNeedingAssessment(1);
+      expect(selected).not.toContain(parked);
+      expect(selected).toEqual([healthy]);
+    });
+  });
+
+  it("a property parked ONLY on a non-selection flow (extract) is still selected for its healthy selection flows", async () => {
+    await withRealDb(async (pool) => {
+      const propertyId = await seedUnassessedProperty(pool, "park-extract-only");
+
+      // `extract` is not a selection flow (eligibility.ts's
+      // ASSESSMENT_SELECTION_FLOWS) — an EARLIER, broader version of the
+      // park guard excluded a property from selection if it had ANY parked
+      // failure row for ANY assessment type, which would have wrongly
+      // stalled this property's perfectly healthy occupancy/condition/
+      // redflags forever just because of an unrelated parked `extract`.
+      await pool.query(
+        `INSERT INTO ai_assessment_failure
+           (property_id, assessment_type, prompt_version, content_hash, fail_count, last_failed_at)
+         VALUES ($1, 'extract', 'any-version', 'test-hash', 3, now())`,
+        [propertyId],
+      );
+
+      const selected = await selectPropertiesNeedingAssessment(1000);
+      expect(selected).toContain(propertyId);
+    });
+  });
+
   // #326 stage-1 gate: only profile-matched candidates of an ACTIVE profile are
   // ever eligible for the (expensive) LLM assessment.
   it("stage 1: an ingested property matching NO active profile is NOT selected; a matched one IS", async () => {

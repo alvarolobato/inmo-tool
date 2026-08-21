@@ -16,7 +16,13 @@ vi.mock("@/lib/ai-assessment/scheduler", () => ({
     enabled: true,
     batchSize: 5,
     intervalSeconds: 900,
+    concurrency: 4,
+    drainIntervalSeconds: 5,
   })),
+  // #666/D-149: no productive tick observed in this test process — the
+  // projection falls back to `drainIntervalSeconds` alone, same as before
+  // this fix.
+  getLastProductiveTickDurationMs: vi.fn(() => null),
 }));
 vi.mock("@/lib/system-config/loader", () => ({
   getSystemConfig: vi.fn(() => ({})),
@@ -32,6 +38,7 @@ vi.mock("@/lib/ai-assessment/redflags", () => ({
 }));
 
 import { getLlmHealth } from "../llm-health";
+import { getLastProductiveTickDurationMs } from "@/lib/ai-assessment/scheduler";
 
 /** Helper: a rowMode-array QueryResult. */
 function result(rows: unknown[][]): { columns: string[]; rows: unknown[][] } {
@@ -144,8 +151,8 @@ describe("getLlmHealth", () => {
     expect(r.coverage.covered).toBe(60);
     expect(r.coverage.coverage_fraction).toBeCloseTo(0.6, 6);
     expect(r.coverage.projected_ticks).toBe(8);
-    // (8-1) ticks * 900s = 6300
-    expect(r.coverage.projected_seconds).toBe(6300);
+    // (8-1) ticks * 5s (the #666 drain interval, not the idle interval) = 35
+    expect(r.coverage.projected_seconds).toBe(35);
     // Only 'occupancy' is an assessment endpoint. Assessment share of 7d tokens
     // = 20000 / (20000+6000) = 0.769...; assessment € = 21 * that; per property
     // = / 8. Just assert it's a positive projection derived from that.
@@ -161,6 +168,20 @@ describe("getLlmHealth", () => {
         { code: "TIMEOUT", count: 1 },
       ],
     });
+  });
+
+  it("#666/D-149 review 'also': folds the scheduler's observed real tick duration into the backlog ETA, not just the drain interval", async () => {
+    queueReads({ coverage: [[100, 40]] }); // pending=40, batchSize=5 -> 8 ticks
+    vi.mocked(getLastProductiveTickDurationMs).mockReturnValueOnce(45_000); // a real 45s tick
+
+    const r = await getLlmHealth();
+
+    expect(r.coverage.projected_ticks).toBe(8);
+    // (8-1) ticks * (drainIntervalSeconds=5 + observed tick duration=45) = 350.
+    // Without folding in the observed duration this would read 35 (the
+    // drain interval alone) — wildly optimistic against a tick that takes
+    // tens of seconds for real.
+    expect(r.coverage.projected_seconds).toBe(350);
   });
 
   it("flags an unpriced non-CLI model", async () => {

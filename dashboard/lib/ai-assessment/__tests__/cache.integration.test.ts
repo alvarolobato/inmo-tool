@@ -20,6 +20,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { sql, resetPool } from "@/lib/db-write";
 import { getOrCompute, getLatestAssessment, AssessmentParkedError } from "../cache";
 import { CliRunnerError } from "@/lib/llm-provider/cli/errors";
+import { LlmQuotaExceededError } from "@/lib/llm-enabled";
 import {
   saveConditionAssessment,
   getConditionAssessment,
@@ -468,6 +469,146 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
         [propertyId],
       );
       expect(Number(rows[0].n)).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // #666 — the failure ledger under REAL concurrency, real DB, Promise.all.
+  //
+  // batch.test.ts already proves — with a fast in-memory mock — that the
+  // worker pool never attempts the same (property, flow) pair twice in one
+  // pass. What it CANNOT prove is what happens at the actual write site: does
+  // the `ai_assessment_failure` upsert (or the environmental-error carve-out
+  // that skips it) hold up when several `getOrCompute` calls for DIFFERENT
+  // properties are genuinely in flight on the DB at the same time, the way
+  // #666's concurrent flow round puts them? These two tests answer that
+  // against real Postgres with `Promise.all`, not a sequential `for` loop.
+  // ---------------------------------------------------------------------
+
+  it("#666: concurrent getOrCompute failures for DIFFERENT properties strike EXACTLY once each — no cross-talk on the shared pool", async () => {
+    await withRealDb(async (pool) => {
+      // 6 properties, deliberately more than the pre-#666 db-write pool's
+      // max (5) — see D-149 — so this also stands as a regression test for
+      // the pool-size bump: before it, the 6th concurrent `getOrCompute`
+      // would just queue for a free connection rather than fail, so this
+      // test would still pass slower, not red. Its real job is proving no
+      // double-strike, not proving the pool size.
+      const propertyIds = await Promise.all(
+        Array.from({ length: 6 }, () => seedProperty(pool)),
+      );
+      const listings: ListingSnapshot[] = [{ listingId: 1, description: "texto que rompe" }];
+
+      await Promise.all(
+        propertyIds.map((propertyId) =>
+          getOrCompute(
+            propertyId,
+            "condition",
+            CONDITION_PROMPT_VERSION,
+            listings,
+            vi.fn().mockRejectedValue(new CliRunnerError("LLM_CLI_PARSE", "unparseable JSON")),
+            saveConditionAssessment,
+          ).catch(() => undefined), // each call is expected to reject — only the ledger matters here
+        ),
+      );
+
+      const { rows } = await pool.query<{ property_id: string; fail_count: number }>(
+        `SELECT property_id, fail_count FROM ai_assessment_failure
+          WHERE property_id = ANY($1::bigint[]) AND assessment_type = 'condition'`,
+        [propertyIds],
+      );
+      expect(rows).toHaveLength(propertyIds.length); // one row per property, none missing
+      for (const row of rows) {
+        expect(Number(row.fail_count)).toBe(1); // exactly one strike, not two or three
+      }
+    });
+  });
+
+  it("#666: concurrent LlmQuotaExceededError failures across several properties strike NONE of them", async () => {
+    // The scenario cache.ts's own `isEnvironmentalError` doc warns about: the
+    // subscription quota cap tripping for every property in a tick. Proven
+    // here under REAL concurrency rather than a sequential loop — several
+    // properties hit the cap at (as close to) the same instant as Promise.all
+    // can arrange, and the ledger must end up untouched for every one of
+    // them, not just the first.
+    await withRealDb(async (pool) => {
+      const propertyIds = await Promise.all(
+        Array.from({ length: 4 }, () => seedProperty(pool)),
+      );
+      const listings: ListingSnapshot[] = [{ listingId: 1, description: "texto cualquiera" }];
+
+      await Promise.all(
+        propertyIds.map((propertyId) =>
+          getOrCompute(
+            propertyId,
+            "condition",
+            CONDITION_PROMPT_VERSION,
+            listings,
+            vi.fn().mockRejectedValue(new LlmQuotaExceededError(97, "session", 80)),
+            saveConditionAssessment,
+          ).catch(() => undefined),
+        ),
+      );
+
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ai_assessment_failure WHERE property_id = ANY($1::bigint[])`,
+        [propertyIds],
+      );
+      expect(Number(rows[0].n)).toBe(0); // NOT one strike per property — zero
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // #666/D-149 finding 2 — the exact scenario the review reproduced against
+  // the write-pool-shared design: 8 concurrent assessment workers plus
+  // ordinary long-running write-pool traffic (a real materialize/dedup
+  // query's shape) starved EVERY worker, or lost an already-paid-for LLM
+  // call at `save()`. `getLockPool()` isolating lock-holding into its own
+  // pool is what this proves against real Postgres, real concurrency.
+  // ---------------------------------------------------------------------
+
+  it("#666/D-149 finding 2: 8 concurrent getOrCompute calls all succeed alongside 4 ordinary long-running write-pool queries", async () => {
+    await withRealDb(async (pool) => {
+      const propertyIds = await Promise.all(
+        Array.from({ length: 8 }, () => seedProperty(pool)),
+      );
+      const listings: ListingSnapshot[] = [{ listingId: 1, description: "texto cualquiera" }];
+
+      // 4 ordinary long write-pool queries, started first and left running
+      // for the whole test — the review's repro used plain `pg_sleep` calls
+      // "well inside statement_timeout — the shape of a real materialize or
+      // dedup query"; same shape here, on the SAME `sql()` helper the rest
+      // of the dashboard's write traffic uses.
+      const longQueries = Array.from({ length: 4 }, () => sql("SELECT pg_sleep(2)"));
+
+      // 8 concurrent assessment workers — `computeFn` sleeps briefly to
+      // simulate a real network LLM round trip overlapping the long queries
+      // above, not resolving instantly.
+      const results = await Promise.all(
+        propertyIds.map((propertyId) =>
+          getOrCompute(
+            propertyId,
+            "condition",
+            CONDITION_PROMPT_VERSION,
+            listings,
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              return { result: parseConditionResult(A_REFORMAR), model: "test-model" };
+            },
+            saveConditionAssessment,
+          ),
+        ),
+      );
+
+      await Promise.all(longQueries); // let the long queries actually finish
+
+      expect(results).toHaveLength(8);
+      for (const r of results) expect(r.fromCache).toBe(false);
+
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ai_assessment WHERE property_id = ANY($1::bigint[])`,
+        [propertyIds],
+      );
+      expect(Number(rows[0].n)).toBe(8); // every worker's save() actually persisted
     });
   });
 });

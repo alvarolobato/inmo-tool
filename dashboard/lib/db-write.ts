@@ -42,7 +42,24 @@ let _pool: Pool | null = null;
 
 export function getPool(): Pool {
   if (!_pool) {
-    _pool = new Pool(buildPgPoolConfig({ max: 5 }));
+    // #666/D-149: an EARLIER version of this comment raised `max` here to 12
+    // reasoning that `cache.ts`'s advisory-lock-holding connection (the #30
+    // stampede guard, held for the ENTIRE duration of an assessment call
+    // including the LLM round trip) needed headroom on THIS pool. That was
+    // wrong in a way a live-Postgres review reproduction caught: sharing one
+    // pool between lock-holding and ordinary short queries meant up to 8
+    // concurrent assessment workers could starve every OTHER db-write
+    // consumer (dashboard CRUD, materialize, dedup, scoring, every API
+    // route) for as long as the slowest in-flight LLM call took — up to and
+    // including the assessment workers' OWN nested queries losing to their
+    // own held connections. The fix: `cache.ts`'s `getLockPool()` is now a
+    // SEPARATE, dedicated pool for advisory-lock-holding connections only —
+    // this pool never holds a connection across an LLM call. `max: 10` here
+    // is headroom for the (now purely transient/short) nested queries up to
+    // `dashboard.assessment_concurrency` workers can issue near-simultaneously
+    // (`getLatestAssessment`/failure-ledger reads/`save()`), plus this pool's
+    // many other ordinary callers — not for anything held long-term.
+    _pool = new Pool(buildPgPoolConfig({ max: 10 }));
   }
   return _pool;
 }
