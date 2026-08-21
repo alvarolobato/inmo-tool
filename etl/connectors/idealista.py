@@ -45,6 +45,7 @@ behind a CAPTCHA/bot wall that a burst would trip. Don't remove that pacing.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -67,6 +68,8 @@ from etl.connectors.idealista_mapping import (
     parse_year_built,
     split_address,
 )
+
+logger = logging.getLogger("etl.connectors.idealista")
 
 _REFERENCE_INPUT_RE = re.compile(
     r'<input[^>]+name=["\']adId["\'][^>]+value=["\'](\d+)["\']', re.IGNORECASE
@@ -293,6 +296,40 @@ class IdealistaConnector(Connector):
             main_image = _og_meta(soup, "og:image")
             photo_urls = (main_image,) if main_image else ()
 
+        # Did we get everything the page says it has? Every way the
+        # full-gallery parse can break degrades to the carousel's 3-item
+        # preview — which is exactly the bug this connector just fixed, and
+        # it would come back silently the next time Idealista renames a key
+        # (Opus review, PR #678). _declared_photo_total is parsed
+        # independently of the gallery itself, so it survives that.
+        declared_photo_total = _declared_photo_total(html)
+        gallery_health: dict[str, Any] = {}
+        if declared_photo_total is None:
+            # No expected count to compare against — the check is blind on
+            # this page, which is itself worth knowing (both sources gone
+            # would mean a page shape this connector has never seen).
+            logger.warning(
+                "idealista %s: page declares no photo total "
+                "(neither multimediaCarrousel.totalMultimedias nor "
+                "picturesWithoutPlans is readable) — parsed %d photo(s), "
+                "cannot verify the gallery is complete",
+                raw.external_id,
+                len(photo_urls),
+            )
+        else:
+            gallery_health["photo_gallery_declared_total"] = declared_photo_total
+            truncated = len(photo_urls) < declared_photo_total
+            gallery_health["photo_gallery_truncated"] = truncated
+            if truncated:
+                logger.warning(
+                    "idealista %s: parsed %d photo(s) but the page declares "
+                    "%d — the full-gallery parse has degraded (see D-155); "
+                    "flagged raw_extra.photo_gallery_truncated",
+                    raw.external_id,
+                    len(photo_urls),
+                    declared_photo_total,
+                )
+
         coordinates = _coordinates_from_staticmap(html)
         lat, lon = coordinates if coordinates is not None else (None, None)
 
@@ -368,6 +405,11 @@ class IdealistaConnector(Connector):
                 # the extension popup's result card without inventing a
                 # new canonical field just for that one UI need.
                 "title": title,
+                # Gallery-completeness check (#654 / D-155): present as a
+                # {declared_total, truncated} pair whenever the page states
+                # a photo total, absent when it states none. Absence and
+                # `truncated: true` are both queryable health signals.
+                **gallery_health,
             },
         )
 
@@ -554,6 +596,65 @@ def _photo_gallery(html: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
+def _declared_photo_total(html: str) -> int | None:
+    """How many real (non-plan) photos the page says it has, or None if it
+    doesn't say.
+
+    This is the page's own answer to "did we parse everything?", and it is
+    what makes a silent parser degradation loud (issue #654, Opus review of
+    PR #678). Every one of `_gallery_from_fullscreen`'s failure modes —
+    `fullScreenGalleryPics` renamed, a trailing comma or a single-quoted
+    value making `json.loads` reject the literal, `isPlan: undefined`,
+    `imageDataService` renamed — returns an empty tuple, and the carousel
+    fallback then quietly yields exactly the 3-item preview that was the
+    original bug. Nothing about that is distinguishable from a genuine
+    3-photo advert without an independently-parsed expected count.
+
+    Two independent sources, both observed on capture 3627, so a rename of
+    either one alone still leaves the check armed:
+
+      * `config.multimediaCarrousel.totalMultimedias` — pure JSON,
+        `[{"type":"PICTURE","total":18},{"type":"PLAN","total":2},...]`.
+        PICTURE is photos; PLAN/MAP/VIDEO/VIRTUAL_TOUR_360/HOME_STAGING are
+        not and are excluded, matching what `photo_urls` stores.
+      * `picturesWithoutPlans` — the sibling of `fullScreenGalleryPics`
+        holding exactly the entries whose `isPlan` is false (18 on capture
+        3627, corroborating the PICTURE total). Its LENGTH is used; its URLs
+        are deliberately not read, so this stays a check and not a third
+        extraction path.
+
+    The larger of whatever is readable is returned: an expected count that
+    is too low would mask a shortfall, which is the whole thing being
+    guarded against.
+    """
+    totals: list[int] = []
+
+    raw_carousel = _extract_js_object(html, "multimediaCarrousel")
+    if raw_carousel:
+        try:
+            data = json.loads(raw_carousel)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            for entry in data.get("totalMultimedias") or []:
+                if not isinstance(entry, dict) or entry.get("type") != "PICTURE":
+                    continue
+                total = entry.get("total")
+                if isinstance(total, int) and not isinstance(total, bool):
+                    totals.append(total)
+
+    raw_pictures = _extract_js_array(html, "picturesWithoutPlans")
+    if raw_pictures:
+        try:
+            pictures = json.loads(_js_object_literal_to_json(raw_pictures))
+        except (ValueError, TypeError):
+            pictures = None
+        if isinstance(pictures, list):
+            totals.append(len(pictures))
+
+    return max(totals) if totals else None
+
+
 def _gallery_from_fullscreen(html: str) -> tuple[str, ...]:
     """Every non-plan photo from the `fullScreenGalleryPics` array, in page
     order, as its `imageDataService` (.jpg) URL.
@@ -565,10 +666,14 @@ def _gallery_from_fullscreen(html: str) -> tuple[str, ...]:
     bucket as the photos, so a URL-shape check would not catch them.
 
     Array order is used deliberately in preference to the entries' own
-    `absolutePosition` field: on the real sample (capture 3627) the two
-    most recently added items carry their multimedia id there instead of a
-    position (a 10-digit id where a 1-18 index belongs), so sorting on it
-    would throw them to the end and, worse, imply an ordering the page never had.
+    `absolutePosition` field, because on the real sample (capture 3627)
+    that field IS NOT A POSITION for 2 of the 20 entries: the two most
+    recently added items carry their own 10-digit `multimediaId` there,
+    where a 1-18 index belongs. Sorting ascending on it happens to produce
+    the same order on this one sample — the objection is not that the
+    result would differ here, it is that the field does not mean what its
+    name says and the next page with a differently-numbered late item
+    would reorder the gallery. Array order needs no such assumption.
     """
     raw = _extract_js_array(html, "fullScreenGalleryPics")
     if not raw:
