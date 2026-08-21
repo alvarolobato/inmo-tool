@@ -64,6 +64,14 @@ PREAMBLE = """# DECISIONS.md — Decision index
 > **On the `archive/` directory**: this repo was bootstrapped from powershop-analytics, a 4D/PowerShop retail-analytics project with no relevance to inmo-tool's actual domain (real-estate investment sourcing). Its decision history (`docs/decisions/archive/D-0XX-*.md`) is kept for git archaeology — some of those decisions' *reasoning* still applies here and has been re-recorded fresh below (at new IDs, re-read rather than copied verbatim) — but none of the archived files themselves are active for this project."""
 
 _FILENAME_RE = re.compile(r"^(D-(\d+))-[A-Za-z0-9-]+\.md$")
+# A `|` inside a `rule:` value ends the GFM table cell it is rendered into, so
+# everything after it silently vanishes from the index every session loads.
+# D-152 shipped that way: its rule read "(`"all"` default | non-empty ...)" and
+# the rendered row lost the enforcement point, the D-055 intersection and the
+# precedence clause — while the drift guard stayed green, because the file WAS
+# what the generator produced. The convention (D-079) is to escape it as `\|`;
+# this matches any `|` not already escaped.
+_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 _ID_NUM_RE = re.compile(r"^D-(\d+)$")
 
 
@@ -120,6 +128,18 @@ def load_record(path: Path) -> dict | None:
         return None
     if not isinstance(rule, str) or not rule.strip():
         return None
+    if _UNESCAPED_PIPE_RE.search(rule):
+        # Loud, not silent: an unescaped pipe truncates the rendered row and
+        # the drift guard cannot see it (the index still matches generator
+        # output). Raising here fails both the build and `--check`.
+        raise ValueError(
+            f"{path.name}: `rule:` contains an unescaped '|', which would end "
+            "its DECISIONS.md table cell and silently drop everything after "
+            "it. Escape it as '\\|' (see D-079) or reword to avoid the pipe. "
+            "Note: '\\|' is only valid inside a SINGLE-quoted YAML scalar — "
+            "in a double-quoted one it is an unknown escape and fails to "
+            "parse."
+        )
 
     decision_id = fm.get("id") if isinstance(fm.get("id"), str) else m.group(1)
     order = fm.get("order")
@@ -181,7 +201,19 @@ def render(records: list[dict]) -> str:
         lines = [f"## {name}", "", "| ID | Binding rule |", "|----|--------------|"]
         for rec in recs:
             link = f"docs/decisions/{rec['filename']}"
-            lines.append(f"| [{rec['id']}]({link}) | {rec['rule']} |")
+            row = f"| [{rec['id']}]({link}) | {rec['rule']} |"
+            # Defence in depth behind load_record's `rule:` check: assert the
+            # row GFM will actually parse has exactly the 2 cells this table
+            # declares, whatever the pipe came from (rule, id or filename).
+            # 2 cells == 3 unescaped delimiters: leading, separator, trailing.
+            n_delims = len(_UNESCAPED_PIPE_RE.findall(row))
+            if n_delims != 3:
+                raise ValueError(
+                    f"{rec['filename']}: renders a {n_delims - 1}-cell table "
+                    f"row, expected 2 (| ID | Binding rule |). An unescaped "
+                    f"'|' would make GFM drop the trailing cells. Row: {row!r}"
+                )
+            lines.append(row)
         sections.append("\n".join(lines))
     return PREAMBLE + "\n\n" + "\n\n".join(sections) + "\n"
 

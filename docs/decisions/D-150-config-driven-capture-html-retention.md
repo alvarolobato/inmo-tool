@@ -40,13 +40,24 @@ capture, inspect the gallery-expand control's real DOM, and hand it to
 issue #654.
 
 This is a **temporary, reversible, config-only** knob:
-- **Enable for Idealista**: set `ETL_RETAIN_CAPTURE_HTML_FOR=idealista` in
-  `~/.config/inmo-tool/.env` (or `config.yaml`'s `etl.retain_capture_html_for:
-  idealista`) and restart the ETL container. The captured HTML for the next
-  Idealista capture(s) survives processing instead of being nulled.
-- **Turn off again**: unset the env var (or set it back to empty) and
+- **Enable for Idealista**: in `/admin/config`, "ETL" section, set
+  `etl.retain_capture_html_for` = `idealista`, save, then restart the ETL
+  container. The captured HTML for the next Idealista capture(s) survives
+  processing instead of being nulled.
+- **Turn off again**: clear that same value in `/admin/config`, save, and
   restart. New captures resume the pre-existing nulling behaviour
   immediately — nothing to clean up in code, no migration.
+- **Do not set `ETL_RETAIN_CAPTURE_HTML_FOR` as an environment variable** —
+  see [D-151](D-151-config-yaml-canonical-for-etl-tunables.md). This
+  paragraph originally read "set `ETL_RETAIN_CAPTURE_HTML_FOR=idealista` in
+  `~/.config/inmo-tool/.env` (or `config.yaml`'s …)", which is wrong twice
+  over: the `etl` service's compose `environment:` block is a bootstrap-only
+  allowlist that deliberately carries no `etl.*` tunable, so the env var
+  never reaches the container; and wiring it in would leave the admin UI —
+  which runs in the dashboard container and would not see the var — showing
+  a value etl ignores, making the turn-off step above a **silent no-op** for
+  a knob whose whole point is being reversible. config.yaml is the only
+  route.
 - Existing rows already holding retained HTML are **not** auto-purged when
   the flag turns off (no code touches historical rows) — the owner deletes
   them by hand (`UPDATE extension_capture SET html = NULL WHERE ...`) once
@@ -75,7 +86,9 @@ calibrated), while giving the owner a narrow, named, temporary lever for
 the one connector under live investigation — on by one env var, off by
 removing it, with no code change either direction.
 
-**See**: issue #654, issue #625, D-145 (root-cause investigation),
+**See**: [D-151](D-151-config-yaml-canonical-for-etl-tunables.md) (corrects
+this record's operator instructions: config.yaml only, never the env var),
+issue #654, issue #625, D-145 (root-cause investigation),
 D-146 (Hipoges calibration-triggered retention this is additive to),
 D-111 (Hipoges "unvalidated until a real capture" pattern this mirrors),
 `etl/capture.py` (`_process_one`), `etl/config.py`

@@ -24,6 +24,7 @@ import {
   touchProfileViewedAt,
   updateProfile,
 } from "@/lib/db/profiles";
+import { unknownConnectorNames } from "@/lib/db/connectors";
 import { refreshProfileForScope } from "@/lib/filtering/profile-refresh";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -127,7 +128,27 @@ export async function PATCH(
   try {
     const patch: { name?: string; scope?: import("@/lib/db/profiles").Scope; thesis_params?: import("@/lib/db/profiles").ThesisParams } = {};
     if (body.name !== undefined) patch.name = (body.name as string).trim();
-    if (body.scope !== undefined) patch.scope = ScopeSchema.parse(body.scope);
+    if (body.scope !== undefined) {
+      const scope = ScopeSchema.parse(body.scope);
+      // Issue #660: same registry check as POST /api/profiles — see that
+      // route's comment for why an unknown name 400s rather than silently
+      // degrading to "matches nothing".
+      if (Array.isArray(scope.connectors)) {
+        const unknown = await unknownConnectorNames(scope.connectors);
+        if (unknown.length > 0) {
+          return NextResponse.json(
+            formatApiError(
+              `Conector${unknown.length > 1 ? "es" : ""} desconocido${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}.`,
+              "VALIDATION",
+              undefined,
+              requestId,
+            ),
+            { status: 400 },
+          );
+        }
+      }
+      patch.scope = scope;
+    }
     if (body.thesis_params !== undefined) patch.thesis_params = ThesisParamsSchema.parse(body.thesis_params);
 
     const result = await updateProfile(id, patch);

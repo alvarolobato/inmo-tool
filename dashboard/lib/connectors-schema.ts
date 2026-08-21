@@ -216,4 +216,45 @@ export interface ConnectorView {
   freshness: ConnectorFreshnessState;
 
   lastRun: ConnectorLastRun | null;
+
+  /**
+   * Counts of this connector's currently-active `listing` rows, SPLIT BY
+   * `operation` (issue #660; split added by #674 review L3).
+   *
+   * `activeSaleListingCount` orders the profile-form connector picker by
+   * corpus size ("big three first, tail scannable below" per the issue). It
+   * must be sale-only: a `search_profile` is a SALE-candidate thesis
+   * (D-016 / scope-query.ts), so a rental connector's volume is corpus a
+   * profile can never match. Counting it unfiltered ranked
+   * `fotocasa_rental` mid-table on 283 rental listings and 0 sale ones.
+   *
+   * `activeRentListingCount` exists so "is this a rental-only connector?"
+   * is answered from the DATA rather than a `_rental` name suffix — see
+   * `isRentalOnlyConnector` below. Deriving it keeps a brand-new sale
+   * connector (0 sale AND 0 rent) OUT of that bucket, which a
+   * `saleCount === 0` test alone would not.
+   */
+  activeSaleListingCount: number;
+  activeRentListingCount: number;
+}
+
+/**
+ * True when every active listing this connector has ever contributed is a
+ * rental — i.e. it can never supply a sale candidate.
+ *
+ * Data-derived on purpose (issue #674 review L3). The registry has no
+ * `operation` column and the Python side marks rentals only by class
+ * (`FotocasaRentalConnector.name = "fotocasa_rental"`), so the alternative
+ * was a `_rental` name-suffix heuristic in TypeScript — a fourth private
+ * copy of a discriminator that already lives elsewhere, which is exactly the
+ * duplication L2 of the same review flagged.
+ *
+ * The `rent > 0` half matters: a connector with no listings at all is NEW,
+ * not rental, and must stay offerable.
+ */
+export function isRentalOnlyConnector(c: {
+  activeSaleListingCount: number;
+  activeRentListingCount: number;
+}): boolean {
+  return c.activeRentListingCount > 0 && c.activeSaleListingCount === 0;
 }

@@ -12,7 +12,7 @@
  * Node-built-ins-in-browser-bundle break documented in profiles-schema.ts.
  */
 
-import type { Scope } from "@/lib/profiles-schema";
+import { effectiveConnectors, type Scope } from "@/lib/profiles-schema";
 
 export interface ScopeQuery {
   /** SQL boolean expression referencing the `property` table alias `property`. */
@@ -246,8 +246,30 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   // so it's the one place this filter is load-bearing; the price-band
   // subquery below gets the same filter for the same reason, but a
   // profile with no price filter set relies on THIS EXISTS alone.
+  //
+  // `AND listing.source = ANY(...)` — per-profile connector selection (issue
+  // #660, part of #658). Folded into this SAME EXISTS rather than a separate
+  // clause/stage: the single enforcement point every downstream consumer
+  // (feed, counts, scoring, assessment eligibility) inherits automatically
+  // through `matched`, per the design's explicit warning against a second
+  // WHERE drifting from this one. Reads as the funnel's "fuentes" dimension
+  // conceptually (a future zero-candidate diagnostic branch could name it
+  // that way), but there is deliberately no separate SQL clause/stage for it
+  // — "all" (or an absent field) omits the condition entirely, same as
+  // property_types' "all" sentinel (D-013/D-147): never bind an empty/NULL
+  // array, which Postgres would evaluate to zero rows for every property.
+  const connectors = effectiveConnectors(scope);
+  const sourceCondition =
+    connectors === "all"
+      ? ""
+      : (() => {
+          params.push(connectors);
+          return " AND listing.source = ANY(" + ph(params.length) + "::text[])";
+        })();
   conditions.push(
-    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')",
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale'" +
+      sourceCondition +
+      ")",
   );
   stages.push({ key: "geography", whereSql: conditions.join(" AND "), params: [...params] });
 
@@ -290,6 +312,15 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
     // EXISTS clause above: without it, a rental property's monthly rent
     // (an order of magnitude smaller than any sale price) could pass a
     // price-band filter meant for purchase prices.
+    //
+    // NOT source-restricted, unlike the EXISTS above (#660 / D-152, v1
+    // boundary). A profile pinned to [fotocasa] with price_max=150k still
+    // matches a property whose fotocasa listing is 400k when a milanuncios
+    // listing sits at 120k — the band is computed across excluded sources.
+    // The connector selection answers "which sources may introduce a
+    // candidate", not "which prices count". If that stops holding, thread
+    // the same `source = ANY($n)` bind through here so BOTH listing-level
+    // subqueries share one source semantics — see D-152 for the trigger.
     const minPriceExpr =
       "(SELECT MIN(listing.current_price) FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')";
     if (scope.price_min !== undefined) {

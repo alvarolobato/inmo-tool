@@ -15,6 +15,7 @@ import {
   createProfile,
   listActiveProfiles,
 } from "@/lib/db/profiles";
+import { unknownConnectorNames } from "@/lib/db/connectors";
 import { refreshProfileForScope } from "@/lib/filtering/profile-refresh";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -75,6 +76,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   try {
     const scope = ScopeSchema.parse(body.scope);
+
+    // Issue #660: connector NAMES are shape-validated by ScopeSchema
+    // (non-empty strings) but not against the live registry — that check
+    // can't happen client-safe. 400 on an unknown/renamed name rather than
+    // silently accepting it (which would later degrade to "matches
+    // nothing" for that name — sensible, but a save-time typo deserves an
+    // immediate error, not a silently-empty profile).
+    if (Array.isArray(scope.connectors)) {
+      const unknown = await unknownConnectorNames(scope.connectors);
+      if (unknown.length > 0) {
+        return NextResponse.json(
+          formatApiError(
+            `Conector${unknown.length > 1 ? "es" : ""} desconocido${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}.`,
+            "VALIDATION",
+            undefined,
+            requestId,
+          ),
+          { status: 400 },
+        );
+      }
+    }
+
     const thesisParams = ThesisParamsSchema.parse(body.thesis_params ?? {});
     const profile = await createProfile(body.name.trim(), scope, thesisParams);
 

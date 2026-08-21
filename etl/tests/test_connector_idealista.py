@@ -11,6 +11,7 @@ docstring for why this connector never fetches Idealista directly).
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from pathlib import Path
 
@@ -359,3 +360,322 @@ class TestNormalize:
         )
         canonical = IdealistaConnector().normalize(raw)
         assert canonical.m2_built == Decimal(1234)
+
+
+class TestFullScreenGallery:
+    """Issue #654 — the connector stored exactly 3 photos for every idealista
+    listing while the HTML it was parsing already carried the whole gallery.
+
+    `config.multimediaCarrousel.multimedias[type=PICTURE].content` is only a
+    3-item preview (its sibling `totalMultimedias` reports the real count);
+    the complete set sits in a separate `fullScreenGalleryPics` array the
+    connector never read. Measured on production extension_capture id 3627
+    (437 KB of retained detail-page HTML, D-150): 3 photos parsed, 18
+    genuinely present.
+
+    Fixture: `idealista_sample_detail_full_gallery.html` — fully synthetic
+    values, real schema shape transcribed from that capture; see its header
+    comment for what is faithful and what is deliberately different.
+    """
+
+    FIXTURE = (
+        Path(__file__).parent / "fixtures" / "idealista_sample_detail_full_gallery.html"
+    )
+
+    def _normalize(self, html: str):
+        return IdealistaConnector().normalize(
+            RawListing(
+                external_id="900000001",
+                source="idealista",
+                raw={
+                    "url": "https://www.idealista.com/inmueble/900000001/",
+                    "html": html,
+                },
+            )
+        )
+
+    def test_full_gallery_extracted_not_just_carousel_preview(self):
+        """The whole gallery, not the 3-item preview.
+
+        19 = the fixture's 18 full-screen photos plus the one photo that
+        exists only in the carousel preview (a deliberate fixture departure
+        that exercises the fallback merge). The assertion is the exact
+        count on purpose: `>= 3` would have passed against the bug.
+        """
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        assert len(canonical.photo_urls) == 19
+
+    def test_floor_plans_excluded_from_photos(self):
+        """The two `isPlan: true` entries are floor plans, not photos. They
+        sit on the same `id.pro.es.image.master` bucket as the photos, so
+        only the flag distinguishes them — a URL-shape check would let them
+        through."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        # The photo immediately before the first plan in array order IS a
+        # photo (so this test can't pass vacuously on an empty/preview-only
+        # gallery) ...
+        assert any("9000000017" in u for u in canonical.photo_urls)
+        # ... and neither plan came with it.
+        assert not any("9000000018" in u for u in canonical.photo_urls)
+        assert not any("9100000001" in u for u in canonical.photo_urls)
+
+    def test_gallery_order_preserved_cover_shot_first(self):
+        """Gallery order is meaningful — the first photo is the cover shot
+        shown in the candidate feed. Array order is used, NOT the entries'
+        own `absolutePosition`: the fixture's last photo (9100000002)
+        carries its multimedia id there instead of a position, exactly as
+        the real capture's late-added items do. On this sample an ascending
+        sort would land on the same order anyway; the point is that the
+        field is not a position for every entry, so no ordering may be
+        derived from it."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        assert canonical.photo_urls[0].endswith("9000000001.jpg")
+        assert canonical.photo_urls[1].endswith("9000000002.jpg")
+        # 17 sanely-positioned photos, then the late-added one, in array
+        # order — nothing was derived from its non-position
+        # absolutePosition (9100000002).
+        assert canonical.photo_urls[17].endswith("9100000002.jpg")
+        # Then the carousel-only photo, appended by the fallback merge.
+        assert canonical.photo_urls[18].endswith("9200000001.jpg")
+
+    def test_size_variants_of_one_photo_dedup_to_one_entry(self):
+        """The carousel preview carries the same first three photos as the
+        gallery at a different rendition (`WEB_DETAIL-M-L` vs
+        `WEB_DETAIL`). They must collapse to one photo each — dedup is
+        keyed on the `id.*.image.master/xx/xx/xx/NNNN` path, not the full
+        URL — and the kept URL is the gallery's `WEB_DETAIL` one."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        for photo_id in ("9000000001", "9000000002", "9000000003"):
+            matching = [u for u in canonical.photo_urls if photo_id in u]
+            assert len(matching) == 1, photo_id
+            assert "/WEB_DETAIL/" in matching[0]
+        # Rendition-independent identity, so no two stored URLs are the same
+        # photo at different sizes.
+        assert len(set(canonical.photo_urls)) == len(canonical.photo_urls)
+
+    def test_stores_jpg_not_webp(self):
+        """`imageDataService` (.jpg) is stored, not its `imageDataServiceWebp`
+        sibling — see the size/format note in idealista.py."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        # A gallery-only photo is present, so `all(...)` below is not
+        # vacuously true over the 3-item carousel preview alone.
+        assert any("9000000017" in u for u in canonical.photo_urls)
+        assert all(u.endswith(".jpg") for u in canonical.photo_urls)
+        assert not any(".webp" in u for u in canonical.photo_urls)
+
+    def test_unquoted_keys_and_colons_inside_strings(self):
+        """`fullScreenGalleryPics` is a JS object literal with UNQUOTED
+        identifier keys mixed among quoted ones, so it needs key-quoting
+        before json.loads. That rewrite must not touch quoted values: a
+        caption containing `https://` or a brace would otherwise be
+        corrupted, or unbalance the array scan."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {fullScreenGalleryPics: ["
+            '{"isPlan":false,hoverText:"see https://example.com/a?x=1 {ojo}",'
+            'imageDataService:"https://img4.idealista.com/blur/WEB_DETAIL/0/'
+            'id.pro.es.image.master/aa/bb/cc/11.jpg",'
+            'imageDataServiceWebp:"https://img4.idealista.com/blur/WEB_DETAIL/0/'
+            'id.pro.es.image.master/aa/bb/cc/11.webp",multimediaId:11},'
+            '{"isPlan":false,hoverText:"]},{ not a delimiter",'
+            'imageDataService:"WEB_DETAIL/0/id.pro.es.image.master/dd/ee/ff/22.jpg",'
+            "multimediaId:22}]};</script></body></html>"
+        )
+        canonical = self._normalize(html)
+        host = "https://img4.idealista.com/blur/WEB_DETAIL/0/"
+        assert canonical.photo_urls == (
+            host + "id.pro.es.image.master/aa/bb/cc/11.jpg",
+            # Partial paths get the img host prefixed, same as the carousel.
+            host + "id.pro.es.image.master/dd/ee/ff/22.jpg",
+        )
+
+    def test_falls_back_to_carousel_when_fullscreen_array_unparseable(self):
+        """A malformed `fullScreenGalleryPics` must not lose the photos the
+        carousel does carry — and must not be silently coerced into
+        something wrong either."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {"
+            "fullScreenGalleryPics: [{isPlan:false, imageDataService:}],"
+            "multimediaCarrousel: "
+            '{"multimedias":[{"type":"PICTURE","content":['
+            '{"src":"WEB_DETAIL/0/id.pro.es.image.master/a1/b2/c3/7.jpg"}]}]}'
+            "};</script></body></html>"
+        )
+        canonical = self._normalize(html)
+        assert canonical.photo_urls == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/a1/b2/c3/7.jpg",
+        )
+
+
+class TestGalleryTruncationFlag:
+    """Issue #654 / D-155, Opus review of PR #678 — the full-gallery parse
+    must not be able to degrade back to the 3-item carousel preview
+    silently.
+
+    Every failure mode of `_gallery_from_fullscreen` returns an empty tuple
+    and falls through to the carousel, which is byte-for-byte the original
+    bug: no exception, no log line, no flag, just three photos again. The
+    reviewer reproduced five realistic page changes against production
+    capture 3627 and all five produced exactly 3 photos with no signal.
+
+    `normalize()` now compares the parsed count against the page's own
+    declared photo total (`_declared_photo_total`, read from
+    `multimediaCarrousel.totalMultimedias` and corroborated by
+    `len(picturesWithoutPlans)`) and sets
+    `raw_extra.photo_gallery_truncated`. The mutations below are those five
+    degradations, applied to the synthetic fixture — the real capture they
+    were first reproduced against carries scraped listing content and
+    cannot live in this repo, so the fixture stands in for it, which is
+    exactly what its faithful-schema-shape header is for.
+    """
+
+    FIXTURE = TestFullScreenGallery.FIXTURE
+
+    def _normalize(self, html: str):
+        return TestFullScreenGallery._normalize(self, html)
+
+    def _mutate_line(self, marker: str, mutate):
+        """Apply `mutate` to the single fixture line carrying `marker`."""
+        lines = self.FIXTURE.read_text(encoding="utf-8").split("\n")
+        matches = [i for i, line in enumerate(lines) if marker in line]
+        assert len(matches) == 1, f"{marker}: expected 1 line, got {len(matches)}"
+        index = matches[0]
+        mutated = mutate(lines[index])
+        assert mutated != lines[index], f"{marker}: mutation was a no-op"
+        lines[index] = mutated
+        return "\n".join(lines)
+
+    def _mutate_gallery(self, mutate):
+        return self._mutate_line("fullScreenGalleryPics:", mutate)
+
+    # --- the healthy page ------------------------------------------------
+
+    def test_intact_page_is_not_flagged_and_records_the_declared_total(self):
+        """19 parsed against a declared 18 is NOT truncated.
+
+        The fixture deliberately carries one photo that exists only in the
+        carousel preview, so it parses one MORE than the page declares.
+        That is the direction the flag must never misfire on — `truncated`
+        means "we lost photos", not "the two numbers differ"."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        assert len(canonical.photo_urls) == 19
+        assert canonical.raw_extra["photo_gallery_declared_total"] == 18
+        assert canonical.raw_extra["photo_gallery_truncated"] is False
+
+    # --- the five reproduced degradations --------------------------------
+
+    def test_flagged_when_the_gallery_key_is_renamed(self):
+        """Degradation 1: Idealista renames `fullScreenGalleryPics`."""
+        html = self._mutate_gallery(
+            lambda line: line.replace(
+                "fullScreenGalleryPics:", "fullScreenGalleryPicsV2:", 1
+            )
+        )
+        canonical = self._normalize(html)
+        # Straight back to the carousel preview — the original bug.
+        assert len(canonical.photo_urls) == 4
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+        assert canonical.raw_extra["photo_gallery_declared_total"] == 18
+
+    def test_flagged_when_a_trailing_comma_breaks_the_literal(self):
+        """Degradation 2: a trailing comma before the closing `]`.
+
+        Legal JavaScript, rejected by `json.loads`."""
+        html = self._mutate_gallery(
+            lambda line: line[:-2] + ",]," if line.endswith("}],") else line
+        )
+        canonical = self._normalize(html)
+        assert len(canonical.photo_urls) == 4
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+
+    def test_flagged_when_a_value_switches_to_single_quotes(self):
+        """Degradation 3: one caption emitted with single quotes.
+
+        Also legal JavaScript, also rejected by `json.loads`."""
+        html = self._mutate_gallery(
+            lambda line: line.replace('hoverText:"Cocina"', "hoverText:'Cocina'", 1)
+        )
+        canonical = self._normalize(html)
+        assert len(canonical.photo_urls) == 4
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+
+    def test_flagged_when_is_plan_becomes_undefined(self):
+        """Degradation 4: `isPlan: false` emitted as `isPlan: undefined`."""
+        html = self._mutate_gallery(
+            lambda line: line.replace('"isPlan":false', '"isPlan":undefined', 1)
+        )
+        canonical = self._normalize(html)
+        assert len(canonical.photo_urls) == 4
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+
+    def test_flagged_when_the_url_field_is_renamed(self):
+        """Degradation 5: `imageDataService` renamed.
+
+        The array still parses — every entry is simply skipped for having
+        no URL, which is the quietest failure of the five."""
+        html = self._mutate_gallery(
+            lambda line: line.replace("imageDataService:", "imageDataSvc:")
+        )
+        canonical = self._normalize(html)
+        assert len(canonical.photo_urls) == 4
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+
+    # --- the two declared-total sources are independent ------------------
+
+    def test_pictures_without_plans_keeps_the_check_armed(self):
+        """`picturesWithoutPlans` is a second, independent declared total.
+
+        If only `multimediaCarrousel` is renamed, `totalMultimedias` goes
+        with it AND the carousel fallback disappears — but the sibling
+        array still says 18, so a degraded gallery is still caught."""
+        html = self._mutate_line(
+            "multimediaCarrousel:",
+            lambda line: line.replace("multimediaCarrousel:", "carrouselV2:", 1),
+        )
+        html = "\n".join(
+            line.replace("fullScreenGalleryPics:", "fullScreenGalleryPicsV2:", 1)
+            if "fullScreenGalleryPics:" in line
+            else line
+            for line in html.split("\n")
+        )
+        canonical = self._normalize(html)
+        # Both photo sources gone: only the og:image thumbnail is left.
+        assert len(canonical.photo_urls) == 1
+        assert canonical.raw_extra["photo_gallery_declared_total"] == 18
+        assert canonical.raw_extra["photo_gallery_truncated"] is True
+
+    def test_no_flag_keys_when_the_page_declares_no_total(self):
+        """A page that states no total leaves the check blind — say so by
+        omitting both keys rather than asserting a clean bill of health."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {fullScreenGalleryPics: ["
+            '{"isPlan":false,imageDataService:'
+            '"WEB_DETAIL/0/id.pro.es.image.master/a1/b2/c3/7.jpg"}]};'
+            "</script></body></html>"
+        )
+        canonical = self._normalize(html)
+        assert len(canonical.photo_urls) == 1
+        assert "photo_gallery_truncated" not in canonical.raw_extra
+        assert "photo_gallery_declared_total" not in canonical.raw_extra
+
+    # --- the operator-facing half ----------------------------------------
+
+    def test_degradation_is_logged_not_only_flagged(self, caplog):
+        """A flag nobody queries is not enough: the module had no logger at
+        all, so a silent regression stayed silent in the logs too."""
+        html = self._mutate_gallery(
+            lambda line: line.replace(
+                "fullScreenGalleryPics:", "fullScreenGalleryPicsV2:", 1
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="etl.connectors.idealista"):
+            self._normalize(html)
+        assert any(
+            "photo_gallery_truncated" in record.getMessage()
+            for record in caplog.records
+        )

@@ -276,6 +276,60 @@ body {
 }
 
 /* ============================================================
+   /conversations list — phone-width tap targets (issue #573, per D-121)
+   ============================================================
+   ConversationRowActions.tsx and ConversationsTable.tsx style everything
+   with inline `style` objects. The two row-action icon buttons and the
+   bulk-action bar's buttons need the 44px tap-target floor on a touch
+   screen, but a pointer device does not — applying it unconditionally
+   cost real desktop density (measured at 1440px: row height 46 -> 61px,
+   +33%, and the Acciones column 90 -> 116px to fit the taller buttons).
+
+   Per D-121 rung 1 every value below is a static literal per breakpoint
+   (nothing derived from a prop or state), so it is DELETED from the
+   inline style object and owned here — no specificity fight, no
+   `!important`. Desktop stays pixel-identical to before #573; the e2e
+   spec asserts both directions (`mobile-conversations.spec.ts`).
+   ============================================================ */
+
+/* Row-action icon buttons (👁 / ⊞). No desktop declaration at all — the
+   inline style's own padding/fontSize sizes them exactly as before. */
+@media (max-width: 767px) {
+  .conv-row-action-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* The Acciones <col>. A `tableLayout: fixed` table sizes columns purely
+   from <col> widths, so this has to track the button size above. */
+.conv-col-acciones {
+  width: 90px;
+}
+@media (max-width: 767px) {
+  .conv-col-acciones {
+    width: 116px;
+  }
+}
+
+/* Bulk-action bar buttons ("Archivar/Desarchivar seleccionadas",
+   "Cancelar"). Measured at 390px before this rule: 28px and 18px tall —
+   both under the floor, inside the exact style objects #573 already
+   touched to add `flexWrap`. Desktop keeps the compact 4px/10px padding
+   the inline styles set. */
+@media (max-width: 767px) {
+  .conv-bulk-btn {
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+  .conv-bulk-cancel {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 10px 12px;
+  }
+}
+
+/* ============================================================
    Animations
    ============================================================ */
 

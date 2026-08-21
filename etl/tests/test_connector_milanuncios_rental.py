@@ -332,6 +332,7 @@ class TestDisabledByDefault:
                 pg_conn,
                 connector.name,
                 [ConnectorScope(center=(40.4168, -3.7038), radius_km=10)],
+                {},
             )
             assert enabled is False
             assert scopes == []

@@ -497,4 +497,110 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       expect(matches).not.toContain(rentalOnlyId);
     });
   });
+
+  // Issue #660: per-profile connector selection, real Postgres end to end.
+  // The decorative trap the issue calls out by name: a fixture where the
+  // profile selects EVERY connector never actually exercises the filter.
+  // Every case below excludes a real connector that has a matching listing
+  // and asserts that listing's property is ABSENT — not merely that a
+  // selected connector's property is present.
+  describe("connector selection (issue #660)", () => {
+    it("a profile restricted to one source does not match a property listed only on an excluded source", async () => {
+      await withRealDb(async (pool) => {
+        const onSelectedId = await insertProperty(pool);
+        await insertListing(pool, onSelectedId, { source: "fotocasa" });
+        const onExcludedId = await insertProperty(pool);
+        await insertListing(pool, onExcludedId, { source: "milanuncios" });
+
+        const profileId = await makeProfile({
+          geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+          property_types: ["piso"],
+          connectors: ["fotocasa"],
+          hard_exclusions: {},
+        });
+        await materializeProfile(profileId);
+        const matches = (await matchedRows(pool, profileId)).map((r) => r.property_id);
+
+        expect(matches).toContain(onSelectedId);
+        expect(matches).not.toContain(onExcludedId);
+      });
+    });
+
+    it("absent connectors (pre-#660 profile) and the explicit 'all' sentinel both match every source identically", async () => {
+      await withRealDb(async (pool) => {
+        const fotocasaId = await insertProperty(pool);
+        await insertListing(pool, fotocasaId, { source: "fotocasa" });
+        const milanunciosId = await insertProperty(pool);
+        await insertListing(pool, milanunciosId, { source: "milanuncios" });
+
+        // No `connectors` key at all — the pre-#660 shape.
+        const absentProfileId = await makeProfile({
+          geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+          property_types: ["piso"],
+          hard_exclusions: {},
+        });
+        // Explicit "all" — the form's post-#660 write.
+        const allProfileId = await makeProfile({
+          geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+          property_types: ["piso"],
+          connectors: "all",
+          hard_exclusions: {},
+        });
+
+        await materializeProfile(absentProfileId);
+        await materializeProfile(allProfileId);
+
+        const absentMatches = (await matchedRows(pool, absentProfileId)).map((r) => r.property_id);
+        const allMatches = (await matchedRows(pool, allProfileId)).map((r) => r.property_id);
+
+        for (const matches of [absentMatches, allMatches]) {
+          expect(matches).toContain(fotocasaId);
+          expect(matches).toContain(milanunciosId);
+        }
+      });
+    });
+
+    it("a property with listings on both an included and an excluded source still matches (deduped property, any qualifying listing is enough)", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "fotocasa" });
+        await insertListing(pool, propertyId, { source: "milanuncios" });
+
+        const profileId = await makeProfile({
+          geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+          property_types: ["piso"],
+          connectors: ["fotocasa"],
+          hard_exclusions: {},
+        });
+        await materializeProfile(profileId);
+        const matches = (await matchedRows(pool, profileId)).map((r) => r.property_id);
+
+        expect(matches).toContain(propertyId);
+      });
+    });
+
+    it("narrowing an existing profile's connector selection un-matches a property on the next materialize (no stale matched=true)", async () => {
+      await withRealDb(async (pool) => {
+        const milanunciosOnlyId = await insertProperty(pool);
+        await insertListing(pool, milanunciosOnlyId, { source: "milanuncios" });
+
+        const profileId = await makeProfile({
+          geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+          property_types: ["piso"],
+          hard_exclusions: {},
+        });
+        await materializeProfile(profileId);
+        expect((await matchedRows(pool, profileId)).map((r) => r.property_id)).toContain(milanunciosOnlyId);
+
+        await pool.query(
+          `UPDATE search_profile SET scope = jsonb_set(scope, '{connectors}', $1::jsonb) WHERE id = $2`,
+          [JSON.stringify(["fotocasa"]), profileId],
+        );
+        await materializeProfile(profileId);
+
+        const row = (await matchedRows(pool, profileId)).find((r) => r.property_id === milanunciosOnlyId);
+        expect(row?.matched).not.toBe(true);
+      });
+    });
+  });
 });
