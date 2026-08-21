@@ -45,7 +45,7 @@ API route: `GET /api/profiles/[id]/search-urls` → `{ profileId, name, tasks }`
 > "Abrir búsqueda" button per task) as an interim; a dedicated task-driven UI
 > (per-task last-run tracking) is a separate issue.
 
-## Reviewing captured/observed search URLs — SQL, not a page (#653)
+## Reviewing captured/observed search URLs — API or SQL, not a page (#653)
 
 `/admin/captured-urls` (issue #475/#488, part of #471) was deleted outright in
 #653: production had only 2 `captured_search_urls` rows (last written
@@ -53,29 +53,39 @@ API route: `GET /api/profiles/[id]/search-urls` → `{ profileId, name, tasks }`
 URL-grammar work, not an operator surface anyone was checking. The write paths
 are untouched (`POST /api/captured-search-urls`, the extension's passive
 observer → `POST /api/observed-search-urls`, D-051's capture-to-infer
-machinery) — only the browsing page is gone. When decoding a portal's grammar
-(the workflow #471/#514 needed that page for), query the tables directly:
+machinery) — and so is each route's own `GET`, which is the actual easiest
+replacement (found during #656 review — no SSH, same rows, as JSON):
 
 ```bash
-ps prod psql app "$POSTGRES_DB" <<'SQL'
--- Deliberate captures ("Capturar URL de búsqueda"), newest first, verbatim
--- (shape= and all).
-SELECT id, portal, url, title, captured_at
-FROM captured_search_urls
-ORDER BY captured_at DESC, id DESC
-LIMIT 50;
-
--- Passively-observed search/results pages, most-recently-seen first — a
--- re-observation UPSERTs (seen_count, last_seen), so this is naturally
--- deduped to one row per distinct search.
-SELECT id, portal, url, title, seen_count, first_seen, last_seen
-FROM observed_search_urls
-ORDER BY last_seen DESC
-LIMIT 50;
-SQL
+curl -s -H "x-admin-key: $ADMIN_API_KEY" \
+  "https://<dashboard-host>/api/captured-search-urls?limit=50" | jq
+curl -s -H "x-admin-key: $ADMIN_API_KEY" \
+  "https://<dashboard-host>/api/observed-search-urls?limit=50" | jq
 ```
 
-Filter either query with `WHERE portal = '<portal>'` or `WHERE url LIKE
+Both return `{ success: true, rows: [...] }` — the exact same
+`listCapturedSearchUrls()` / `listObservedSearchUrls()` helpers the deleted
+page called, unfiltered by portal (filter client-side, e.g. `jq
+'.rows[] | select(.portal=="idealista")'`).
+
+For a one-off dev-database query instead (or when the dashboard itself is
+unreachable), go straight to `ps prod psql`. Per `deploy/prod-psql.sh`'s own
+usage comment, pass SQL via `-c`, not a heredoc on stdin — that script is
+invoked over `ssh -t` (`remote_tty` in `cli/commands/prod.sh`), and a
+local heredoc piped through an allocated pseudo-tty is unreliable. The
+database name is the literal `inmotool` (repo convention — see
+`cli/commands/prod.sh`'s own example), not a `$POSTGRES_DB` env var that
+doesn't exist on the operator's machine:
+
+```bash
+ps prod psql app inmotool -c \
+  "SELECT id, portal, url, title, captured_at FROM captured_search_urls ORDER BY captured_at DESC, id DESC LIMIT 50"
+
+ps prod psql app inmotool -c \
+  "SELECT id, portal, url, title, seen_count, first_seen, last_seen FROM observed_search_urls ORDER BY last_seen DESC LIMIT 50"
+```
+
+Filter either query by adding `WHERE portal = '<portal>'` or `WHERE url LIKE
 '%<fragment>%'` the same way the old page's portal chips / filter box did.
 Both tables and their schemas are unchanged — see `etl/schema/init.sql`
 (`captured_search_urls`, `observed_search_urls`) for full column docs,

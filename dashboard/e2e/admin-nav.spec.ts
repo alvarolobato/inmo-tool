@@ -8,16 +8,15 @@
  *   - the strip shows the consolidated, renamed tab set (Captura (admin),
  *     Clasificación, Duplicados, LLM) and no longer the four separate LLM tabs,
  *     "URLs capturadas", or the old "Candidatos" label;
- *   - `/admin/candidatos`, `/admin/interactions`, `/admin/tool-calls` and
- *     `/admin/captured-urls` are gone outright (404) — no replacement, per
- *     #653 (0 rows ever in the tables they viewed, or a redirect stub nothing
- *     linked to any more);
- *   - `/admin/usage` and `/admin/slow-queries` are NOT the same case: their
- *     data is live, so `/admin/usage` permanently redirects to `/admin/llm`
- *     and the redirect TARGET is asserted to actually render (not just that
- *     the old path is gone — a redirect nobody tests is a 404 waiting to
- *     happen), while `/admin/slow-queries` folds into that same page as a
- *     disclosure with no route of its own;
+ *   - `/admin/candidatos`, `/admin/interactions`, `/admin/tool-calls`,
+ *     `/admin/captured-urls` and `/admin/slow-queries` are gone outright
+ *     (404) — no replacement PAGE, per #653 (0 rows ever in the tables they
+ *     viewed, a redirect stub nothing linked to any more, or content that
+ *     folded into `/admin/llm` as a disclosure with no route of its own);
+ *   - `/admin/usage` is NOT the same case: `llm_usage` is live, so it
+ *     redirects to `/admin/llm` and the redirect TARGET is asserted to
+ *     actually render (not just that the old path is gone — a redirect
+ *     nobody tests is a 404 waiting to happen);
  *   - Duplicados is reachable from the strip;
  *   - no error surface anywhere (the D-041 bar).
  *
@@ -132,14 +131,22 @@ test("EC-2: /admin/candidatos is gone outright (404, no redirect)", async ({ pag
   expect(res?.status()).toBe(404);
 });
 
-test("EC-2: /admin/interactions, /admin/tool-calls and /admin/captured-urls are gone (404)", async ({
+test("EC-2: /admin/interactions, /admin/tool-calls, /admin/captured-urls and /admin/slow-queries are gone (404)", async ({
   page,
 }) => {
-  // #653: 0 rows ever in llm_interactions / llm_tool_calls, and
+  // #653 DoD lists all five deleted routes (this file's other 404 test
+  // covers /admin/candidatos separately, since it gets its own "no redirect"
+  // framing). 0 rows ever in llm_interactions / llm_tool_calls;
   // captured_search_urls is a developer decode aid consulted by SQL now
-  // (see docs/skills/search-url-builder.md) — no replacement page for any of
-  // the three.
-  for (const path of ["/admin/interactions", "/admin/tool-calls", "/admin/captured-urls"]) {
+  // (see docs/skills/search-url-builder.md); /admin/slow-queries's content
+  // (pg_stat_statements) is a collapsed disclosure on /admin/llm now — no
+  // replacement PAGE for any of the four.
+  for (const path of [
+    "/admin/interactions",
+    "/admin/tool-calls",
+    "/admin/captured-urls",
+    "/admin/slow-queries",
+  ]) {
     const res = await page.goto(path);
     expect(res?.status(), `${path} should 404`).toBe(404);
   }
@@ -150,10 +157,20 @@ test("EC-2: /admin/usage permanently redirects to /admin/llm, which renders", as
   // tests is a 404 waiting to happen. `llm_usage` is live (17,391 rows as of
   // 2026-08-21), so this is a redirect, not a 404 (unlike interactions/
   // tool-calls/captured-urls above).
+  //
+  // What `res` actually is here (corrected per #656 review): Next's
+  // `permanentRedirect()` is NOT a 308 + Location header on the wire for
+  // this app-router page — it streams an RSC redirect instruction inside a
+  // normal 200 HTML document for `/admin/usage` itself, and the navigation
+  // to `/admin/llm` happens client-side once React hydrates. So `res` below
+  // is `/admin/usage`'s OWN response (200, no Location) — a browser
+  // (including Playwright) still ends up on `/admin/llm`, which is what
+  // `toHaveURL` + the visibility assertion below prove; `res.status()` only
+  // confirms the stub route itself didn't error. A non-browser client would
+  // need to run JS to follow this — see the comment on
+  // `app/admin/usage/page.tsx` for what that means going forward.
   const res = await page.goto("/admin/usage");
   await expect(page).toHaveURL(/\/admin\/llm$/);
-  // Next's `permanentRedirect()` issues a 308; Playwright's `res` reflects the
-  // FINAL response after following it, which is a normal 200 page render.
   expect(res?.status()).toBe(200);
   await expect(page.getByTestId("admin-llm-page")).toBeVisible();
 
@@ -188,8 +205,23 @@ test("the consolidated LLM page renders usage, cost/coverage and the slow-querie
   await expect(slowQueries).toBeVisible();
   const toggle = page.getByTestId("slow-queries-disclosure-toggle");
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  // WCAG 2.5.5's 44px minimum tap target (review of #656 — this panel's
+  // markup moved verbatim from a page nobody read on a phone onto one the
+  // owner does; several of its interactive elements measured 35-38px).
+  const toggleBox = await toggle.boundingBox();
+  expect(toggleBox!.height).toBeGreaterThanOrEqual(44);
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  // A sort-header button (always rendered, regardless of row count) and the
+  // nested guidance-panel toggle get the same floor.
+  const sortHeaderBtn = page.getByRole("button", { name: /Media ms/ });
+  const sortHeaderBox = await sortHeaderBtn.boundingBox();
+  expect(sortHeaderBox!.height).toBeGreaterThanOrEqual(44);
+
+  const guidanceToggle = page.getByText("¿Cómo actuar ante consultas lentas?");
+  const guidanceBox = await guidanceToggle.boundingBox();
+  expect(guidanceBox!.height).toBeGreaterThanOrEqual(44);
 
   // Visiting /admin/usage highlights the single LLM tab (aria-current="page").
   await page.goto("/admin/usage");
