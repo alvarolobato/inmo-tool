@@ -39,7 +39,9 @@ def _cmd_run(conn) -> int:
     print(
         f"Compared {result.pairs_compared} pair(s): "
         f"{result.merged} merged, {result.suggested} suggested for review, "
-        f"{result.conflicts} merge-time conflict(s) flagged."
+        f"{result.conflicts} merge-time conflict(s) flagged, "
+        f"{result.price_gap_rejected} pair(s) suppressed by the "
+        f"price-gap rule this pass (issue #627)."
     )
     if result.photo_hash_auto_merged:
         # Issue #602, D-137: of `merged` above, how many were corroborated

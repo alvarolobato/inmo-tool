@@ -631,6 +631,7 @@ def _finish_dedup_run(
     suggested: int | None = None,
     conflicts: int | None = None,
     photo_hash_auto_merged: int | None = None,
+    price_gap_rejected: int | None = None,
     error_msg: str | None = None,
 ) -> None:
     with conn.cursor() as cur:
@@ -639,7 +640,8 @@ def _finish_dedup_run(
             UPDATE dedup_runs
                SET finished_at = NOW(), status = %s, pairs_compared = %s,
                    merged = %s, suggested = %s, conflicts = %s,
-                   photo_hash_auto_merged = %s, error_msg = %s,
+                   photo_hash_auto_merged = %s, price_gap_rejected = %s,
+                   error_msg = %s,
                    duration_ms = (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::INTEGER
              WHERE id = %s
             """,
@@ -650,6 +652,7 @@ def _finish_dedup_run(
                 suggested,
                 conflicts,
                 photo_hash_auto_merged,
+                price_gap_rejected,
                 error_msg,
                 run_id,
             ),
@@ -752,16 +755,18 @@ def run_dedup(
             suggested=result.suggested,
             conflicts=result.conflicts,
             photo_hash_auto_merged=result.photo_hash_auto_merged,
+            price_gap_rejected=result.price_gap_rejected,
         )
         logger.info(
             "Dedup run %s: compared=%d merged=%d suggested=%d conflicts=%d "
-            "photo_hash_auto_merged=%d",
+            "photo_hash_auto_merged=%d price_gap_rejected=%d",
             run_id,
             result.pairs_compared,
             result.merged,
             result.suggested,
             result.conflicts,
             result.photo_hash_auto_merged,
+            result.price_gap_rejected,
         )
         return result
     finally:

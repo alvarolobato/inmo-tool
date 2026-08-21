@@ -5757,3 +5757,351 @@ class TestDedupRunResultPhotoHealth:
         captured = capsys.readouterr()
         assert "milanuncios" in captured.out
         assert "0/1" in captured.out
+
+
+class TestPriceGapRule:
+    """Issue #627 (D-138): reject a pair outright when price differs by
+    more than 30%, or by 15%+ corroborated by a size (>=5%) or rooms
+    (>=2, reusing D-117's own threshold) disagreement. Boundary/missing-
+    value coverage for the predicate itself lives in
+    test_dedup_signal_price_gap.py — this class covers what only the
+    engine can prove: placement in `evaluate_pair`'s priority order, and
+    the "never files a suggestion, never creates a property_merge_veto,
+    always counted" behaviour the design requires (D-138).
+
+    Placement vs. address_coords/reference_code's own POSITIVE match is
+    already pinned by two pre-existing tests that keep passing unchanged:
+    TestAddressCoordsSignal.test_matching_coords_size_address_and_no_floor_data_auto_merges
+    (250000 vs 400000, a 60% gap, still auto-merges via address_coords)
+    and TestReferenceCodeSignal.test_shared_reference_code_without_corroboration_is_suggestion
+    (150000 vs 600000, a 75% gap, still files a reference_code
+    suggestion) — both signals are checked earlier in `evaluate_pair`'s
+    loop and return before price_gap ever runs, so neither test needed to
+    change for this issue. This class adds the two signals the issue
+    explicitly calls out as NOT to be preempted (cadastral, the D-116
+    veto) plus the photo_hash case where the veto is actually meant to
+    intercept.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        return cache
+
+    def test_price_gap_over_30pct_preempts_what_would_otherwise_photo_hash_auto_merge(
+        self,
+    ):
+        """Identical photos, identical size — TestPhotoHashAutoMerge's own
+        shape for a `merge` verdict — but a 50% price gap. The price-gap
+        veto must win: this is exactly the "promoción" failure mode the
+        owner described (many near-identical flats, near-identical
+        photos, genuinely different prices)."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(100000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(50000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "reject"
+        assert evaluation.basis == "price_gap"
+        assert evaluation.detail["rule"] == "price_gap_over_30pct"
+
+    def test_cadastral_match_is_exempt_from_the_price_gap_veto(self):
+        a = _record(
+            1,
+            100,
+            cadastral_ref="3061226YH0036S0007SM",
+            current_price=Decimal(100000),
+        )
+        b = _record(
+            2,
+            200,
+            cadastral_ref="3061226YH0036S0007SM",
+            current_price=Decimal(50000),
+        )
+        evaluation = engine.evaluate_pair(a, b, _PhotoHashCache())
+        assert evaluation.basis == "cadastral"
+        assert evaluation.decision == "merge"
+
+    def test_reference_code_conflict_veto_wins_over_price_gap(self):
+        """D-116's veto returns `None` outright (never a price_gap
+        `reject` decision) — it is checked before price_gap, so the
+        `basis` a caller would see for this pair is never 'price_gap'."""
+        a = _record(
+            1,
+            100,
+            contact_raw="Inmobiliaria Sevilla 2000",
+            reference_code="NS603",
+            current_price=Decimal(100000),
+        )
+        b = _record(
+            2,
+            200,
+            contact_raw="INMOBILIARIA SEVILLA 2000",
+            reference_code="AB100",
+            current_price=Decimal(50000),
+        )
+        evaluation = engine.evaluate_pair(a, b, _PhotoHashCache())
+        assert evaluation is None
+
+    def test_brand_new_pair_never_files_a_suggestion_and_is_counted(self, dedup_db):
+        """The design's preferred outcome (D-138): the pair never enters
+        the review queue at all — no `suggested_merge` row, no
+        `property_merge_veto` row — but the run still counts it."""
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-new-pair",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+        assert result.price_gap_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT COUNT(*) FROM property_merge_veto")
+            assert cur.fetchone()[0] == 0
+
+    def test_existing_pending_suggestion_is_deleted_not_frozen_as_rejected(
+        self, dedup_db
+    ):
+        """Review M1: issue #627 requires this be "reversible without a DB
+        console". Moving the row to `status='rejected'` is NOT reversible
+        in practice — D-024's `_load_recorded_pairs` puts a `rejected`
+        listing pair in `skip_pairs` forever, the dashboard only ever
+        lists `status='pending'`, and there is no `ps dedup unreject`. So
+        a row filed by an earlier rule/run (here inserted directly, as if
+        `phone` had suggested it before this issue's rule existed) that
+        the CURRENT price-gap rule would reject on reevaluation is instead
+        DELETED outright — same behaviour as a brand-new pair the rule
+        rejects, never a frozen 'rejected' row. Never creates a
+        `property_merge_veto` (that table is written only by the
+        human-only `reject_property_pair`, never from this reevaluation
+        path)."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-pending",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO suggested_merge "
+                "(listing_id_a, listing_id_b, match_basis, confidence, status) "
+                "VALUES (%s, %s, 'phone', 0.500, 'pending') RETURNING id",
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.price_gap_rejected == 1
+        assert result.reevaluated_price_gap_removed == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT COUNT(*) FROM property_merge_veto")
+            assert cur.fetchone()[0] == 0
+
+    def test_deleted_pair_is_reversible_without_a_db_console(self, dedup_db):
+        """M1's actual point, proven end to end: once the underlying data
+        changes so the rule no longer applies, the pair is freely
+        re-suggestible on the very next run — nothing permanently closed
+        the door. A `rejected` row could never do this (D-024 skip_pairs);
+        a deleted one just isn't there to skip. A shared phone number is
+        seeded so a real (weaker) signal is available to pick the pair
+        back up once price closes to within phone's own 10% corroboration
+        band — otherwise "nothing rejects it any more" and "nothing
+        currently supports it either" would be indistinguishable."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-reversible",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+            description_a="Piso en venta, tel 611222333",
+            description_b="Se vende, contacto 611222333",
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO suggested_merge "
+                "(listing_id_a, listing_id_b, match_basis, confidence, status) "
+                "VALUES (%s, %s, 'phone', 0.500, 'pending') RETURNING id",
+                sorted((listing_a, listing_b)),
+            )
+        dedup_db.commit()
+
+        first = engine.run(dedup_db)
+        assert first.reevaluated_price_gap_removed == 1
+
+        # The price correction that would make this a genuine near-match —
+        # no DB console reject/veto ever stood in the way.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET current_price = %s WHERE id = %s",
+                (Decimal(99000), listing_b),
+            )
+        dedup_db.commit()
+
+        second = engine.run(dedup_db)
+        assert second.price_gap_rejected == 0
+        assert second.suggested + second.merged >= 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] >= 1
+
+    def test_production_path_persists_the_counter_to_dedup_runs(self, dedup_db):
+        """Review M2: `photo_hash_auto_merged` was log/CLI-only until
+        #624's own review caught that a log line is invisible in
+        production and required a persisted `dedup_runs` column instead.
+        `price_gap_rejected` must not repeat that gap — it goes through
+        `orchestrator.run_dedup` (the actual production entry point, not
+        `engine.run()` directly) and is read back from the table."""
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-visibility-orch",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+        )
+
+        result = orchestrator.run_dedup(dedup_db, trigger="test")
+
+        assert result is not None
+        assert result.price_gap_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT price_gap_rejected FROM dedup_runs "
+                "ORDER BY started_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_cli_run_reports_the_price_gap_count(self, dedup_db, capsys):
+        """`ps dedup run` (etl.dedup.cli._cmd_run) must print the count —
+        the design's own "countable in both `ps dedup run` and the
+        orchestrator log line" requirement. Wording (review L3): a
+        per-pass count of pairs the rule suppressed THIS pass, not "N new
+        rejections" — a brand-new pair still in the DB unmodified gets
+        re-suppressed (and re-counted) every run."""
+        from etl.dedup.cli import _cmd_run
+
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-cli",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+        )
+
+        with mock.patch(
+            "etl.dedup.cli.orchestrator.run_dedup",
+            side_effect=lambda *a, **k: engine.run(dedup_db),
+        ):
+            exit_code = _cmd_run(dedup_db)
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "1 pair(s) suppressed by the price-gap rule this pass" in captured.out
+
+    def test_phone_coords_corroborated_particular_merge_is_the_one_preemptable_path(
+        self,
+    ):
+        """Review M3: D-117's own placement rule keeps a structured-field
+        veto from ever running ahead of `address_coords`/`phone`/
+        `reference_code`/`photo_hash`'s auto-merges, because a hard veto
+        there was MEASURED to break ~80 correct merges (13.6% of 590).
+        price_gap is placed ahead of `photo_hash`/`phone` anyway — the
+        difference is that `photo_hash`'s auto-merge requires price within
+        `PHOTO_MERGE_PRICE_RATIO` (5%, structurally immune to a >=15%
+        rule) and `address_coords`/`reference_code` are checked earlier in
+        the loop and return first. The one real exception:
+        `phone_extract`'s coords-corroborated `particular`/`particular`
+        merge tier (`_corroborated`'s coords+size path) has NO price
+        constraint at all — shared phone, coords close, size within 5%,
+        both `particular`, ANY price gap still merges at 0.900 today. A
+        >30% price gap here is exactly the case price_gap now intercepts,
+        pre-empting a real (if small — this population was never part of
+        the 88-merge measurement, which counted human confirms only, not
+        every technically-reachable auto-merge path) phone-only path."""
+        lat = Decimal("40.416775")
+        lon = Decimal("-3.703790")
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            description="Se vende, tel 611222333",
+            listing_kind="particular",
+            lat=lat,
+            lon=lon,
+            m2_built=Decimal(70),
+            current_price=Decimal(100000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            description="Contacto 611222333",
+            listing_kind="particular",
+            lat=lat,
+            lon=lon,
+            m2_built=Decimal(70),
+            current_price=Decimal(50000),
+        )
+        # Sanity: without the price-gap rule, this pair WOULD auto-merge
+        # via phone's coords-corroborated particular tier.
+        without_price_gap = phone_extract.evaluate(a, b)
+        assert without_price_gap is not None
+        assert without_price_gap.decision == "merge"
+
+        evaluation = engine.evaluate_pair(a, b, _PhotoHashCache())
+        assert evaluation.decision == "reject"
+        assert evaluation.basis == "price_gap"
