@@ -23,13 +23,32 @@ function PropertyRef({
   // #606: these pills sit in a `flexWrap: "wrap"` row (their container,
   // below), but `whiteSpace: "nowrap"` fixes each pill's own width at its
   // full text's min-content size — a real listing address is easily long
-  // enough on its own to exceed a 390px viewport, and a nowrap item can't
-  // shrink below that regardless of how much the row wraps around it.
-  // `maxWidth` + ellipsis caps each pill without touching the nowrap/pill
-  // look; `min(240px, 60vw)` degrades with the viewport the same way
-  // ProfileSwitcher's cap (#574) does.
+  // enough on its own to exceed a 390px viewport, and by default a flex
+  // item can't shrink below its own min-content width regardless of how
+  // much the row wraps around it.
+  //
+  // `overflow: "hidden"` is the whole fix: a flex item whose `overflow` is
+  // anything other than `visible` gets an automatic minimum size of 0
+  // (CSS Sizing 3 §5.2), so the nowrap pill becomes free to shrink to the
+  // space its wrapped line actually has, and `textOverflow` renders the
+  // ellipsis. Measured at 390px: pills shrink 540 -> 300px, `main
+  // .main-content` scrollWidth 390 == clientWidth 390.
+  //
+  // Deliberately NO `maxWidth` cap. An earlier revision of this fix added
+  // `maxWidth: "min(240px, 60vw)"`; it did no work (removing only that
+  // line keeps mobile-clasificacion.spec.ts green) and was actively
+  // harmful in two ways, both measured:
+  //   - Phone: five properties on the same street all render at an
+  //     identical 234px and read as the same truncated prefix. Spanish
+  //     addresses put the distinguishing part ("número 123, piso 4B") at
+  //     the END, so a tighter cap truncates exactly the bytes that tell
+  //     two candidates apart.
+  //   - Desktop: at 1440px it capped a pill that had room to render in
+  //     full at 240px instead of 540px — a regression on a width that had
+  //     no overflow problem to begin with.
+  // Let `overflow: hidden` truncate only when the line genuinely runs out
+  // of room, and never above that.
   const capStyle: React.CSSProperties = {
-    maxWidth: "min(240px, 60vw)",
     overflow: "hidden",
     textOverflow: "ellipsis",
   };
@@ -54,6 +73,11 @@ function PropertyRef({
       </Link>
     );
   }
+  // The full address must stay recoverable on hover/long-press in this
+  // branch too — `overflow: hidden` truncates here exactly as it does in
+  // the linked branch above, so a `title` that only explained the missing
+  // link (what this used to say) left a truncated address with no recovery
+  // path at all.
   return (
     <span
       style={{
@@ -66,7 +90,7 @@ function PropertyRef({
         display: "inline-block",
         ...capStyle,
       }}
-      title="Sin perfil asociado todavía — no hay enlace directo"
+      title={`${label} — sin perfil asociado todavía, no hay enlace directo`}
     >
       {label}
     </span>

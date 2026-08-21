@@ -295,8 +295,14 @@ export function ConversationsTable({
           <span style={{ color: "var(--fg-muted)" }}>
             {selected.size} seleccionada{selected.size !== 1 ? "s" : ""}
           </span>
+          {/* #573: `.conv-bulk-btn` gives these the 44px tap-target floor
+              below `md` only (D-121 rung 1 — the values are static
+              literals, so globals.css owns them and this inline object
+              never declares them); they measured 28px tall at 390px.
+              Desktop keeps the compact 4px/10px padding below. */}
           <button
             type="button"
+            className="conv-bulk-btn"
             style={{
               background: "var(--bg-3)",
               border: "1px solid var(--border)",
@@ -314,6 +320,7 @@ export function ConversationsTable({
           </button>
           <button
             type="button"
+            className="conv-bulk-btn"
             style={{
               background: "var(--bg-3)",
               border: "1px solid var(--border)",
@@ -329,8 +336,13 @@ export function ConversationsTable({
           >
             Desarchivar seleccionadas
           </button>
+          {/* Measured 18px tall at 390px — the smallest target in the bar,
+              and the one you reach for to get OUT of a bulk selection.
+              `.conv-bulk-cancel` lifts it to 44px below `md`. */}
           <button
             type="button"
+            className="conv-bulk-cancel"
+            data-testid="bulk-cancel-btn"
             style={{
               marginLeft: "auto",
               background: "none",
@@ -364,7 +376,10 @@ export function ConversationsTable({
               md:table-column` on the <col> — a fixed-layout table's <col>
               honors `display: none` and stops claiming width, distinct
               from hiding just the <td>), so Título gets the freed space;
-              at `md:` and up every <col> renders exactly as before. */}
+              at `md:` and up every <col> renders exactly as before —
+              verified by the desktop assertions in
+              `e2e/mobile-conversations.spec.ts` (row height 46px, Acciones
+              90px, unchanged from before this PR). */}
           <colgroup>
             <col style={{ width: 36 }} />           {/* checkbox */}
             <col />                                  {/* title — takes all remaining space */}
@@ -380,11 +395,16 @@ export function ConversationsTable({
             <col className="hidden md:table-column" style={{ width: 75 }} />            {/* duración */}
             <col className="hidden md:table-column" style={{ width: 145 }} />           {/* actividad */}
             <col className="hidden md:table-column" style={{ width: 75 }} />            {/* tokens */}
-            {/* #573: widened 90 → 116 so the two now-44px-tap-target action
-                buttons (was 22×26) plus this cell's own 8px/10px padding
-                actually fit without relying on the cell's overflow:
-                visible to bail it out. */}
-            <col style={{ width: 116 }} />           {/* acciones */}
+            {/* #573: 90px at desktop (unchanged), widened to 116px BELOW
+                `md` only, where the two action buttons take their 44px tap
+                target (`.conv-row-action-btn`) and, with this cell's own
+                8px/10px padding, no longer fit in 90px without leaning on
+                the cell's `overflow: visible` to bail them out. Per D-121
+                rung 1 the width is a static literal per breakpoint, so it
+                moves off the inline style entirely onto
+                `.conv-col-acciones` in globals.css rather than fighting
+                specificity from a media query. */}
+            <col className="conv-col-acciones" />    {/* acciones */}
           </colgroup>
           <thead>
             <tr>

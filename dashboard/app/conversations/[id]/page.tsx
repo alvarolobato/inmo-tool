@@ -49,6 +49,12 @@ export default async function ConversationSplitViewPage({ params }: PageProps) {
           style={{
             alignItems: "center",
             padding: "10px 16px",
+            // This link only ever renders below `md` (`flex md:hidden`),
+            // i.e. only on a touch screen, so the 44px tap-target floor is
+            // unconditional here — no D-121 breakpoint split needed, since
+            // there is no desktop rendering to keep pixel-identical. It
+            // measured 390×41 without this.
+            minHeight: 44,
             fontSize: 13,
             color: "var(--fg-muted)",
             borderBottom: "1px solid var(--border)",

@@ -162,5 +162,81 @@ test.describe("phone width (iPhone 13 emulation)", () => {
       return bad;
     }, width);
     expect(offenders, "no property-reference pill should extend past the viewport").toEqual([]);
+
+    // The fix must be `overflow: hidden` letting the pill shrink to its
+    // line, NOT a fixed `maxWidth` cap. A cap tighter than the available
+    // line truncates every same-street address to an identical prefix —
+    // Spanish addresses carry the distinguishing part ("número 123, piso
+    // 4B") at the END — so assert the pills actually use the width the
+    // wrapped row gives them. Measured: 300px with `overflow: hidden`
+    // alone; 234px with the removed `min(240px, 60vw)` cap.
+    const pillWidths = await page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll('[data-testid^="candidato-"] a, [data-testid^="candidato-"] span'),
+      )
+        .filter((el) => (el.textContent || "").includes("Calle de la Verificaci"))
+        .map((el) => Math.round(el.getBoundingClientRect().width)),
+    );
+    expect(pillWidths.length, "the seeded property pills rendered").toBeGreaterThan(0);
+    for (const w of pillWidths) {
+      expect(
+        w,
+        `pill width ${w}px should use the room its wrapped line has (>=280px at 390px viewport) — a tighter fixed cap truncates same-street addresses to an identical prefix`,
+      ).toBeGreaterThanOrEqual(280);
+    }
+
+    // A truncated pill must stay recoverable: both branches of PropertyRef
+    // put the full address in `title`. The unlinked <span> branch used to
+    // spend its title purely on explaining the missing link.
+    const titles = await page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll('[data-testid^="candidato-"] a, [data-testid^="candidato-"] span'),
+      )
+        .filter((el) => (el.textContent || "").includes("Calle de la Verificaci"))
+        .map((el) => el.getAttribute("title") || ""),
+    );
+    for (const [i, t] of titles.entries()) {
+      expect(t, `pill ${i}'s title carries the full address for recovery`).toContain(
+        "piso 4B, Madrid",
+      );
+    }
+  });
+});
+
+test.describe("desktop width (no regression from the phone fix)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("property pills render in full at 1440px — the phone fix must not cap desktop", async ({
+    page,
+  }) => {
+    skipIfNoDb(test);
+
+    await page.goto("/admin/clasificacion", { waitUntil: "networkidle" });
+    await expect(page.getByTestId(`candidato-${SLUG}`), "the seeded candidate rendered").toBeVisible();
+    await page.waitForTimeout(500);
+
+    // `/admin/clasificacion` had no overflow problem at desktop width. An
+    // earlier revision of the #606 fix capped every pill at 240px here
+    // too (natural width 540px), truncating addresses on a viewport with
+    // plenty of room. `scrollWidth <= clientWidth` is the direct,
+    // proxy-free "this text is not truncated" measurement.
+    const pills = await page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll('[data-testid^="candidato-"] a, [data-testid^="candidato-"] span'),
+      )
+        .filter((el) => (el.textContent || "").includes("Calle de la Verificaci"))
+        .map((el) => ({
+          width: Math.round(el.getBoundingClientRect().width),
+          scrollWidth: (el as HTMLElement).scrollWidth,
+          clientWidth: (el as HTMLElement).clientWidth,
+        })),
+    );
+    expect(pills.length, "the seeded property pills rendered").toBeGreaterThan(0);
+    for (const p of pills) {
+      expect(
+        p.scrollWidth,
+        `pill (${p.width}px rendered) should not be truncated at 1440px — scrollWidth ${p.scrollWidth} vs clientWidth ${p.clientWidth}`,
+      ).toBeLessThanOrEqual(p.clientWidth + 1);
+    }
   });
 });
