@@ -42,6 +42,7 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
       alerts: "1",
       view: "descartadas",
       onlyNew: true,
+      newSince: "2026-02-10T00:00:00.000Z",
     };
     const search = candidateFiltersToSearch(full);
     expect(parseCandidateFilters(search)).toEqual(full);
@@ -61,6 +62,26 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
     // hasActiveFilters picks it up; it is not one of the popover-group filters.
     expect(hasActiveFilters(f)).toBe(true);
     expect(moreFiltersActiveCount(f)).toBe(0);
+  });
+
+  it("issue #667 (B1 fix): newSince freezes alongside onlyNew, round-trips, and is never emitted standalone", () => {
+    const anchor = "2026-02-10T00:00:00.000Z";
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, onlyNew: true, newSince: anchor };
+    const p = candidateFiltersToParams(f);
+    expect(p.get("newSince")).toBe(anchor);
+    expect(parseCandidateFilters(`?onlyNew=true&newSince=${encodeURIComponent(anchor)}`).newSince).toBe(
+      anchor,
+    );
+
+    // newSince with onlyNew OFF never gets serialized — pairing is a
+    // serialize-time rule, not a parse-time one (a stray newSince with no
+    // onlyNew is meaningless: nothing reads it).
+    const stray: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, onlyNew: false, newSince: anchor };
+    expect(candidateFiltersToParams(stray).get("newSince")).toBeNull();
+
+    // Absent newSince parses back to "" regardless of onlyNew.
+    expect(parseCandidateFilters("?onlyNew=true").newSince).toBe("");
+    expect(parseCandidateFilters("").newSince).toBe("");
   });
 
   it("#466: the 'Con alertas' state maps to the alerts=1 URL param (old links/bookmarks keep working)", () => {

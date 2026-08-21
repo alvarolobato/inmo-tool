@@ -469,10 +469,20 @@ function ValidProfileRow({
           worse than no button. `.profile-novedades-link` (globals.css)
           carries the ≥44px mobile tap target (D-121/D-124 ladder), same
           shape as `.profile-enter-btn` just below.
+
+          B1 fix (opus review, D-148): `newSince` FREEZES the exact anchor
+          `new_count` was just computed against (`metrics.new_since`) into
+          the link. Without this, the profile detail page's own
+          `GET /api/profiles/[id]` shifts `previous_viewed_at` forward
+          (`touchProfileViewedAt`) the moment it loads — BEFORE the feed's
+          own query runs — so re-deriving the anchor live there would read
+          the just-shifted value and silently disagree with the count this
+          row promised (measured live: 937 promised, 0 shown). Freezing it
+          here is what makes the count and the destination agree.
         */}
         {metrics.new_count > 0 && (
           <Link
-            href={`/profiles/${profile.id}?onlyNew=true`}
+            href={`/profiles/${profile.id}?onlyNew=true&newSince=${encodeURIComponent(metrics.new_since)}`}
             data-testid="profile-ver-novedades"
             className="profile-novedades-link"
             style={{

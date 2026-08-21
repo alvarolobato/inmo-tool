@@ -77,6 +77,8 @@ export type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } f
 // Re-exported below for the callers/tests that import it from this module.
 
 interface RawOverviewRow extends SearchProfileRawRow {
+  /** Issue #667 (B1 fix) — see ProfileOverviewMetrics.new_since's doc. Raw pg Date, same looseness as SearchProfileRow.created_at/last_viewed_at (JSON-serializes to an ISO string once the API route responds). */
+  novelty_anchor_ts: string;
   matched_count: number;
   new_count: number;
   accepted_count: number;
@@ -126,6 +128,12 @@ export const OVERVIEW_QUERY_SQL = `WITH ${DISABLED_SOURCES_CTE},
      SELECT
        sp.id, sp.name, sp.scope, sp.thesis_params, sp.archived_at, sp.created_at,
        sp.last_materialized_at, sp.last_viewed_at,
+       -- Issue #667 (B1 fix): the EXACT anchor new_count is computed against,
+       -- so the "Ver novedades" link can freeze it into ?newSince= before
+       -- previous_viewed_at SHIFTS underneath it (touchProfileViewedAt runs
+       -- on the profile detail page's own GET, moments after this query).
+       COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day')
+                                                   AS novelty_anchor_ts,
        COALESCE(match_stats.matched_count, 0)     AS matched_count,
        COALESCE(match_stats.new_count, 0)         AS new_count,
        COALESCE(fc.accepted_count, 0)             AS accepted_count,
@@ -161,8 +169,14 @@ export const OVERVIEW_QUERY_SQL = `WITH ${DISABLED_SOURCES_CTE},
          --       double-counted properties whose only recent first_seen came
          --       from a disabled portal (never shown as NUEVO in the feed) and
          --       off-by-one'd the exact-anchor boundary — the ~400-vs-7 drift.
+         -- Issue #667 (B2 fix): also excludes the profile's REJECTED matched
+         -- properties (fbc.feedback_type = 'reject') — the candidate feed's
+         -- default view (D-094, includeRejected=false) already hides them, so
+         -- a rejected-but-newly-first-seen property must not inflate a count
+         -- that promises "this many cards are waiting in the feed".
          COUNT(*) FILTER (
            WHERE newness.first_seen_at > COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day')
+             AND fbc.feedback_type IS DISTINCT FROM 'reject'
          ) AS new_count,
          MIN(cand.min_price) AS min_price,
          MAX(cand.min_price) AS max_price,
@@ -180,6 +194,12 @@ export const OVERVIEW_QUERY_SQL = `WITH ${DISABLED_SOURCES_CTE},
          END AS gross_yield_median_pct
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
+       -- Issue #667 (B2 fix): latest feedback verdict per (profile,
+       -- property) — reads the SAME feedback_current CTE feedback_counts
+       -- above already aggregates from, reused here (not re-derived) so
+       -- new_count's reject-exclusion can never define "rejected" differently.
+       LEFT JOIN feedback_current fbc
+              ON fbc.profile_id = pls.profile_id AND fbc.property_id = pls.property_id
        CROSS JOIN LATERAL (
          -- operation = 'sale' (issue #31 Opus-review fix, PR #199): this
          -- feeds min_price/max_price/median_price AND
@@ -335,6 +355,7 @@ export async function listProfileOverviews(): Promise<ProfileOverviewEntry[]> {
     const metrics: ProfileOverviewMetrics = {
       matched_count: raw.matched_count,
       new_count: raw.new_count,
+      new_since: raw.novelty_anchor_ts,
       accepted_count: raw.accepted_count,
       rejected_count: raw.rejected_count,
       min_price: toNum(raw.min_price),

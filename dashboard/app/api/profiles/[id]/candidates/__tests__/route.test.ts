@@ -156,6 +156,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
       false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -191,6 +192,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
       false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 });
@@ -279,6 +281,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
       false, // issue #667 onlyNew ($26), off by default
+      null, // issue #667 (B1 fix) newSince ($27), off by default
     ]);
   });
 
@@ -636,6 +639,41 @@ describe("GET /api/profiles/[id]/candidates — onlyNew 'Ver novedades' filter (
       expect(res.status).toBe(400);
       expect(mockQuery).not.toHaveBeenCalled();
     }
+  });
+
+  it("issue #667 (B1 fix): passes newSince to listCandidates as $27, and rejects an unparseable timestamp with 400", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const anchor = "2026-02-10T00:00:00.000Z";
+    const res = await GET(
+      makeRequest(
+        `http://localhost/api/profiles/3/candidates?onlyNew=true&newSince=${encodeURIComponent(anchor)}`,
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $27 (index 26) is the frozen newSince anchor.
+    expect(candidatesParams()[26]).toBe(anchor);
+
+    mockQuery.mockClear();
+    queue = [];
+    const bad = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?onlyNew=true&newSince=not-a-date"),
+      ctx("3"),
+    );
+    expect(bad.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("leaves newSince off ($27 = null) when absent", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?onlyNew=true"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(candidatesParams()[26]).toBeNull();
   });
 });
 

@@ -84,6 +84,21 @@ export interface CandidateFilters {
    * count⇔feed invariant). `false` = off. Param: `onlyNew` (`"true"`).
    */
   onlyNew: boolean;
+  /**
+   * Issue #667 (B1 fix, D-148): the FROZEN anchor `onlyNew` should filter
+   * against — an ISO timestamp snapshotted by the Perfiles row at the exact
+   * moment it computed `new_count` (`ProfileOverviewMetrics.new_since`).
+   * Required for the promised count and the filtered feed to agree:
+   * `previous_viewed_at` SHIFTS forward the moment this profile's OWN
+   * `GET /api/profiles/[id]` runs (`touchProfileViewedAt`), which happens
+   * BEFORE the feed's own fetch — so re-deriving the anchor live, instead of
+   * reusing this snapshot, would silently read the just-shifted value.
+   * `""` = no frozen anchor (falls back to the live-recomputed anchor,
+   * `ranked.is_new`, on the server — best-effort only, not race-free; every
+   * "Ver novedades" click always supplies one). Param: `newSince` (ISO
+   * string, URL-encoded).
+   */
+  newSince: string;
 }
 
 export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
@@ -100,6 +115,7 @@ export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
   alerts: "",
   view: "all",
   onlyNew: false,
+  newSince: "",
 };
 
 /** `trackedOnly` (sends `state=accept`) is derived from the segmented view. */
@@ -141,6 +157,9 @@ export function hasActiveFilters(f: CandidateFilters): boolean {
     f.alerts !== "" ||
     f.view !== "all" ||
     f.onlyNew ||
+    // newSince is not independently active-able — it only ever accompanies
+    // onlyNew (see the round-trip/serialize logic below) — so it does not
+    // get its own hasActiveFilters/chip entry.
     moreFiltersActiveCount(f) > 0
   );
 }
@@ -168,6 +187,10 @@ export function parseCandidateFilters(search: string): CandidateFilters {
     // Issue #667: only the exact string "true" turns the filter on — same
     // strict-parse discipline as `heritageZone` just above.
     onlyNew: p.get("onlyNew") === "true",
+    // Issue #667 (B1 fix): parsed independently of onlyNew's own value (an
+    // absent param is "" regardless) — pairing is a serialize-time concern
+    // (see candidateFiltersToParams), not a parse-time one.
+    newSince: p.get("newSince") ?? "",
   };
 }
 
@@ -190,6 +213,11 @@ export function candidateFiltersToParams(f: CandidateFilters): URLSearchParams {
   if (f.alerts !== "") p.set("alerts", f.alerts);
   if (f.view !== "all") p.set("view", f.view);
   if (f.onlyNew) p.set("onlyNew", "true");
+  // Issue #667 (B1 fix): newSince only ever accompanies an active onlyNew —
+  // emitting it standalone would be meaningless (nothing reads it without
+  // onlyNew=true) and would break the "default emits nothing" invariant for
+  // the common {onlyNew: false, newSince: ""} case.
+  if (f.onlyNew && f.newSince !== "") p.set("newSince", f.newSince);
   return p;
 }
 

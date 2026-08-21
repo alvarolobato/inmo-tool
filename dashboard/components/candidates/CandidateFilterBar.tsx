@@ -336,7 +336,11 @@ export function CandidateFilterBar({
     chips.push({
       key: "onlyNew",
       label: "Solo nuevos",
-      clear: () => set("onlyNew", false),
+      // Clears newSince too (issue #667 B1 fix) — a stale frozen anchor
+      // sitting in state with onlyNew off is inert (serialize never emits
+      // it standalone), but clearing both keeps the filter object itself
+      // clean rather than relying on that inertness.
+      clear: () => onChange({ ...values, onlyNew: false, newSince: "" }),
     });
 
   return (

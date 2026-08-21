@@ -112,6 +112,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
     alerts,
     view,
     onlyNew,
+    newSince,
   } = filters;
   // Derived from the segmented `view`: what the fetch layer / card rendering
   // used to read off two booleans.
@@ -218,6 +219,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       else if (alerts === "0") url.searchParams.set("hasAlerts", "false");
       // Issue #667 "Ver novedades": omitted (default) = off, same as heritageZone.
       if (onlyNew) url.searchParams.set("onlyNew", "true");
+      // Issue #667 (D-148 B1 fix): forwards the frozen anchor alongside
+      // onlyNew, unconditionally when set — never re-derived or dropped
+      // client-side. Absent only when the deep link itself omitted it.
+      if (onlyNew && newSince !== "") url.searchParams.set("newSince", newSince);
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
@@ -323,6 +328,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       isVpo,
       alerts,
       onlyNew,
+      newSince,
       showRejected,
       trackedOnly,
     ],
@@ -549,7 +555,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
             <button
               type="button"
               data-testid="clear-only-new-empty-state"
-              onClick={() => updateFilters({ ...filters, onlyNew: false })}
+              onClick={() => updateFilters({ ...filters, onlyNew: false, newSince: "" })}
               style={{
                 padding: 0,
                 border: "none",

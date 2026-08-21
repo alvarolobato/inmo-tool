@@ -1,14 +1,14 @@
 ---
 id: D-148
-title: '"Ver novedades" button filters on the raw visit-anchored is_new, not the cold-start-suppressed badge value'
+title: '"Ver novedades" freezes its visit anchor and excludes rejected candidates so the promised count and the feed agree'
 date: 2026-08-21
 group: Product / candidate feed
-rule: 'The onlyNew feed filter (issue #667) reuses ranked.is_new/previous_viewed_at verbatim (never a second "new" definition) and reads the RAW value, not the cold-start-suppressed badge, so the Perfiles row''s "N nuevos" count and the filtered feed''s result count agree by construction.'
+rule: 'The onlyNew filter (issue #667) freezes previous_viewed_at into the link as newSince (never re-derives it live) and lib/db/profile-overview.ts''s new_count excludes rejected candidates — both required for the "Ver novedades" button''s promised count to equal what the destination feed shows.'
 ---
 
-# D-148: "Ver novedades" button filters on the raw visit-anchored is_new, not the cold-start-suppressed badge value
+# D-148: "Ver novedades" freezes its visit anchor and excludes rejected candidates so the promised count and the feed agree
 
-*Decided: 2026-08-21*
+*Decided: 2026-08-21, revised same day after opus review of PR #668*
 
 **Context**: The owner asked for a "ver novedades" button per profile row on
 `/profiles` that jumps straight to that profile's candidate feed filtered to
@@ -21,87 +21,116 @@ the D-054 digest note calling out the same risk explicitly).
 This codebase already had exactly one definition of "new": #416/#447
 established it as "first-seen since the profile's own last visit" —
 `MIN(active-source listing.first_seen_at) > COALESCE(search_profile.
-previous_viewed_at, created_at - interval '1 day')`. It is computed in
-exactly two places today, both reading the same predicate: `lib/db/
-profile-overview.ts`'s `new_count` (the Perfiles row's "N nuevos" metric,
-and the input to `lib/novedades.ts`'s page-level strip) and `lib/
-candidates.ts`'s `ranked.is_new` (the feed's NUEVO badge, via the shared
-`novelty` CTE). Two rejected alternatives: the daily digest's "since the
-last digest" anchor (D-054) — deliberately a DIFFERENT anchor, chosen so an
-in-app glance and an out-of-band email don't have to agree on visit timing;
-and a fixed 24h/7d window — tells the owner nothing about whether *he* has
-seen a candidate, the exact complaint D-054's persona note is about.
+previous_viewed_at, created_at - interval '1 day')`. It is computed in two
+places: `lib/db/profile-overview.ts`'s `new_count` (the Perfiles row's "N
+nuevos" metric) and `lib/candidates.ts`'s `ranked.is_new` (the feed's NUEVO
+badge, via the `novelty` CTE).
 
-A second, less obvious wrinkle: `ranked.is_new` (raw) and what the NUEVO
-*badge* actually renders are NOT the same value. `listCandidates`'s cold-start
-suppression (#425) zeroes the per-card `is_new` field the client receives
-whenever the profile was never visited, or when raw novelty would cover more
-than 60% of the matched pool — so the whole feed doesn't highlight as "new"
-on a first look, where that carries no information. `new_count` never applies
-this suppression (its own doc says so explicitly). So a naive "filter on
-whatever the badge shows" implementation would disagree with `new_count` on
-every cold-start profile — the exact drift #447 already burned the team on
-once, just relocated to a second axis (badge-suppression vs. source-toggle
-this time, instead of D-055's disabled-source toggle).
+**The first version of this record (and the PR it described) claimed count
+and feed agree "by construction" and was wrong on two independent axes** —
+found by opus review of PR #668, not by the original build. Both are fixed
+here; this revision documents the actual, corrected mechanism.
+
+**B1 — the anchor shifts between count and filter**: `/profiles` computes
+`new_count` against `previous_viewed_at` at render time. Clicking "Ver
+novedades" navigates to `/profiles/[id]?onlyNew=true`, whose page first
+awaits `GET /api/profiles/[id]` — which runs `touchProfileViewedAt`,
+**shifting `previous_viewed_at ← last_viewed_at`** whenever the last visit
+was >30 min ago — *before* the candidate feed's own query ever runs. A
+naive `onlyNew` filter re-reading `search_profile.previous_viewed_at` live
+(the same column `ranked.is_new` reads) therefore reads the *already-shifted*
+value: order of operations is literally "record the view, then read the
+filter." Measured live on the demo DB: a profile showing "937 nuevos"
+returned **0** candidates under `onlyNew=true`. Reproduced end-to-end
+against a throwaway DB seeding candidates inside the anchor-shift gap.
+
+**B2 — `new_count` counted rejected candidates; the feed hides them**:
+`new_count`'s LATERAL filtered only on `pls.matched = true`, no feedback
+join. The candidate feed defaults to `includeRejected=false` (D-094). A
+profile with 4 newly-first-seen candidates, 2 of them already rejected,
+promised "4 nuevos" and the feed showed 2. This is an everyday loop (open
+feed, reject a few, go back to Perfiles, click again) — the 30-minute
+debounce on `previous_viewed_at` means the count doesn't move between
+visits even though what the feed shows does.
 
 **Decision**:
-- **"Nuevo" means "since I last viewed this specific profile"** —
-  `previous_viewed_at`, not the digest anchor, not a fixed window. The
-  `onlyNew` filter (`dashboard/lib/candidates.ts`) is a single new `AND`
-  clause in the existing `ranked` CTE's outer WHERE:
-  `AND ($26::boolean IS NOT TRUE OR ranked.is_new = true)`. `ranked.is_new`
-  is read VERBATIM — no new SQL expression, no second copy of the anchor
-  logic.
-- **The filter reads the RAW `ranked.is_new`, not the cold-start-suppressed
-  value** the mapping step applies to `CandidateRow.is_new` (what the badge
-  renders). This is deliberate: `new_count` is also raw (profile-overview.ts
-  never suppresses it), so filtering on the same raw predicate guarantees the
-  button's count and `onlyNew=true`'s result count are equal BY
-  CONSTRUCTION — extending the #447 invariant to a third read site instead of
-  opening a fourth place the two numbers could silently drift apart.
-  Accepted trade-off: on a cold-start profile, a card returned under
-  `onlyNew=true` may not carry its own NUEVO badge (still suppressed for
-  cosmetic reasons) even though it matched the filter — rare (only right
-  after profile creation, or a still-mostly-fresh pool) and self-clearing
-  (one visit ends cold-start for that profile).
+- **"Nuevo" still means "since I last viewed this specific profile"** —
+  `previous_viewed_at`, not the digest anchor (D-054), not a fixed window.
+  Unchanged from the original design call; see "Alternatives rejected"
+  below.
+- **B1 fix — freeze the anchor into the link, never re-derive it live.**
+  `lib/db/profile-overview.ts`'s query now also selects
+  `COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day') AS
+  novelty_anchor_ts`, surfaced as `ProfileOverviewMetrics.new_since` (an ISO
+  string) — the exact timestamp `new_count` was computed against.
+  `ProfileOverviewRow.tsx`'s link snapshots it:
+  `?onlyNew=true&newSince=<new_since>`. `lib/candidates.ts`'s `onlyNew`
+  filter, when `newSince` is present, evaluates `MIN(active-source
+  listing.first_seen_at) > newSince` via a correlated subquery bound to that
+  literal — the SAME aggregate shape as the `novelty` CTE's `is_new`, just
+  against the frozen value instead of the live `(SELECT ts FROM anchor)`.
+  `ranked.is_new`/`novelty_tier` themselves (the NUEVO badge, the fresh-first
+  sort) are UNTOUCHED — they stay anchored to the live visit timestamp, as
+  before; `onlyNew` is a pure WHERE-clause narrowing, never a second
+  ranking/display definition of "new." When `newSince` is absent (a
+  hand-typed `onlyNew=true` with no snapshot — never how the button itself
+  links), the filter falls back to the live `ranked.is_new`, documented as
+  best-effort only, not race-free.
+- **B2 fix — `new_count` now excludes the profile's rejected candidates.**
+  `match_stats`'s LATERAL joins the SAME `feedback_current` CTE the
+  accept/reject counts already use (never a second feedback read) and the
+  `new_count` FILTER adds `AND fbc.feedback_type IS DISTINCT FROM 'reject'`
+  — aligning it with the feed's own default visibility (D-094) instead of
+  changing the feed's default to match the count.
 - **The button is hidden, not disabled, not shown with "0", when
-  `new_count === 0`** — same pattern this file already used for the "N con
-  alertas" link (`metrics.flagged_count > 0 && (...)`). A button that opens a
-  confirmed-empty list reads as broken; hiding it is honest and costs
-  nothing since the row's own "N nuevos: 0" is already visible next to where
-  the button would be.
-- The filter is plumbed through the SAME URL-param filter machinery every
-  other feed filter uses (`dashboard/lib/candidate-filters.ts`'s `onlyNew`
-  boolean, param `onlyNew=true`), gets an active-filter chip ("Solo nuevos")
-  in `CandidateFilterBar.tsx` so it's visibly active and clearable without
-  back-navigation, and composes (AND) with every other filter, the keyset
-  cursor, the below-market pool, and the alerts tri-state — it narrows the
-  same `ranked` CTE's outer WHERE, never a parallel query path.
+  `new_count === 0`** — unchanged, same pattern as "N con alertas."
+- **Count and feed now agree by construction FOR THE BUTTON'S OWN LINK** —
+  both fixes are required together: B1 alone would still leak rejected
+  candidates into the promised count; B2 alone would still race on the
+  anchor shift. Neither fix touches the other's mechanism. "By construction"
+  is scoped to the path the button actually takes (`onlyNew=true` +
+  `newSince=<snapshot>`); a caller invoking `onlyNew=true` without a
+  snapshot gets the pre-B1 best-effort behavior, explicitly documented as
+  such in `CandidateFilters.onlyNew`'s doc — not silently promised as
+  race-free.
+- **B4 — the cold-start trade-off is NOT self-clearing on every axis.** The
+  original text claimed a card returned under `onlyNew=true` without its own
+  NUEVO badge (cold-start suppression, #425) is "rare and self-clearing (one
+  profile visit ends cold-start)." That is true only of the *never-visited*
+  branch. The *>60%-of-pool-is-fresh* branch does NOT self-clear on a visit
+  — a profile whose matched pool stays predominantly fresh (measured live:
+  one demo profile sits at ~80% fresh) keeps showing the cold-start note
+  ("Perfil nuevo: todo es reciente") and zero per-card NUEVO badges
+  indefinitely, chip-vs-badge contradiction included ("Solo nuevos" active,
+  no card individually marked). This is stated honestly here rather than
+  "fixed": `CandidateList.tsx`'s existing `novelty-cold-start-note` already
+  renders in this state (unconditionally, whenever `coldStart` is true,
+  onlyNew or not) — it is the mitigation, not a proof the contradiction
+  cannot occur.
 
-**Alternatives rejected**:
+**Alternatives rejected** (unchanged from the original design call):
 - *Anchor on the last digest send (`digest_run.sent_at`)* — would make the
   button disagree with the row's own "N nuevos" count, which is
-  visit-anchored, not digest-anchored; two profile-level "new" numbers on
-  the same page reading differently would be worse than the #447 bug this
-  avoids.
-- *A fixed 24h/7d window* — simplest, but doesn't answer "have I personally
-  seen this" — the whole point of "novedades" as a mental model.
+  visit-anchored, not digest-anchored.
+- *A fixed 24h/7d window* — doesn't answer "have I personally seen this."
 - *Filter on the cold-start-suppressed `is_new` (what the badge shows)* —
-  would make the filtered feed's card count silently diverge from the row's
-  `new_count` on every never-visited or mostly-fresh profile, reopening
-  exactly the class of bug #447 fixed, just on a new axis.
+  would diverge from `new_count` on every cold-start profile, the same class
+  of bug #447 fixed, on a new axis.
 
 **Rationale**: Reuses established, tested machinery at every layer (anchor
-definition, SQL predicate, filter-state plumbing) rather than inventing a
-parallel one, and picks the one raw/suppressed reading that keeps the
-button's promised count and the destination's actual count structurally
-equal — the explicit design constraint the owner's ask carried ("if you
-cannot make them agree cheaply, don't show a count" — here they agree for
-free, so the count is safe to show).
+definition, feedback-state read, filter-state plumbing) rather than
+inventing parallel ones, and the two fixes close the two independent races
+opus review found by construction for the real user flow, while stating
+plainly where "by construction" stops applying (no `newSince` snapshot;
+coverage-based cold-start).
 
-**See**: `dashboard/lib/candidates.ts` (`CandidateFilters.onlyNew`, the `$26`
-WHERE clause), `dashboard/lib/candidate-filters.ts`, `dashboard/app/api/
-profiles/[id]/candidates/route.ts`, `dashboard/components/profiles/
-ProfileOverviewRow.tsx`, `dashboard/components/candidates/
-CandidateFilterBar.tsx`, `dashboard/e2e/ver-novedades.spec.ts`, issue #667,
-prior art #416/#425/#447, D-054, D-057, D-059.
+**See**: `dashboard/lib/candidates.ts` (`CandidateFilters.onlyNew`/
+`newSince`, the `$26`/`$27` WHERE clause), `dashboard/lib/db/
+profile-overview.ts` (`novelty_anchor_ts`, the `feedback_current` join on
+`new_count`), `dashboard/lib/profile-overview-types.ts`
+(`ProfileOverviewMetrics.new_since`), `dashboard/lib/candidate-filters.ts`,
+`dashboard/app/api/profiles/[id]/candidates/route.ts`,
+`dashboard/components/profiles/ProfileOverviewRow.tsx`,
+`dashboard/components/candidates/CandidateFilterBar.tsx`,
+`dashboard/e2e/ver-novedades.spec.ts`, issue #667, prior art #416/#425/#447,
+D-054, D-057, D-059, D-094.

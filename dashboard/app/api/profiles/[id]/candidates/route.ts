@@ -54,10 +54,20 @@
  *                 other filter and leaves the keyset ordering intact.
  *   onlyNew     — issue #667 "Ver novedades" hard filter: `true` keeps only
  *                 candidates whose earliest active-source listing is newer than
- *                 this profile's last-visit anchor (the same predicate the
- *                 NUEVO badge and the Perfiles row's "N nuevos" count use — see
- *                 lib/candidates.ts's `CandidateFilters.onlyNew` doc). Absent/
- *                 empty = off (default). Any other value → 400.
+ *                 the visit anchor (the same predicate the NUEVO badge and the
+ *                 Perfiles row's "N nuevos" count use — see lib/candidates.ts's
+ *                 `CandidateFilters.onlyNew` doc). Absent/empty = off (default).
+ *                 Any other value → 400.
+ *   newSince    — issue #667 (D-148 B1 fix): the FROZEN visit-anchor timestamp
+ *                 `onlyNew` should evaluate against (ISO string) — the exact
+ *                 anchor the Perfiles row's "N nuevos" count was computed
+ *                 against, snapshotted into the link by `ProfileOverviewRow`
+ *                 BEFORE this profile's own `GET /api/profiles/[id]` can shift
+ *                 `previous_viewed_at` forward. Only meaningful with
+ *                 `onlyNew=true`; ignored otherwise. Must parse as a valid
+ *                 timestamp → 400 if not. Absent = `onlyNew` falls back to the
+ *                 live anchor (best-effort, not race-free — see
+ *                 `CandidateFilters.newSince` doc).
  *   All #310 filters combine with each other, with `source`, and with
  *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
  *   data (empty until #316) and correctly return an empty feed until it flows;
@@ -270,6 +280,22 @@ export async function GET(
     onlyNew = true;
   }
 
+  // Issue #667 (D-148 B1 fix): the frozen anchor onlyNew evaluates against.
+  // Must parse as a real timestamp — a malformed value is a client error
+  // (400), never silently dropped to the live-anchor fallback (which would
+  // quietly reopen the anchor-shift race the frozen value exists to close).
+  const rawNewSince = searchParams.get("newSince");
+  let newSince: string | null = null;
+  if (rawNewSince !== null && rawNewSince !== "") {
+    if (Number.isNaN(Date.parse(rawNewSince))) {
+      return NextResponse.json(
+        formatApiError("Ancla de novedades (newSince) no válida.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    newSince = rawNewSince;
+  }
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -390,6 +416,7 @@ export async function GET(
       state,
       q,
       onlyNew,
+      newSince,
     });
     return NextResponse.json(page);
   } catch (err) {
