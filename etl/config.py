@@ -216,6 +216,32 @@ def cimenta2_include_internal() -> bool:
     return bool(value)
 
 
+def retain_capture_html_for() -> frozenset[str]:
+    """Connector names whose `extension_capture.html` is retained after
+    processing, regardless of calibration state (issue #654, D-150).
+
+    Temporary diagnostic lever, independent of D-146's existing
+    `raw_extra.selectors_calibrated is False` retention rule: this one lets
+    an operator pull a real captured-HTML sample for a connector that IS
+    calibrated (e.g. Idealista, under investigation in #654) without
+    touching its calibration state. Off by default (empty set = no
+    connector gets this extra retention).
+
+    Standalone accessor (not a `Config` field) for the same reason as
+    `cimenta2_detail_endpoint`/`cimenta2_include_internal` above: read from
+    `etl.capture._process_one`, which already holds a live DB connection and
+    has no business constructing a full `Config` (which requires a resolved
+    PostgreSQL DSN, several other eagerly-loaded knobs) just to read one CSV
+    list.
+    """
+    value = _loader_get("etl.retain_capture_html_for", default=None)
+    if value is None:
+        value = os.environ.get("ETL_RETAIN_CAPTURE_HTML_FOR", "")
+    return frozenset(
+        name.strip().lower() for name in str(value).split(",") if name.strip()
+    )
+
+
 def _get_dedup_max_runtime_seconds() -> int:
     """Bounded lifetime of a dedup pass, in seconds (D-036).
 

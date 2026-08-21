@@ -20,6 +20,7 @@ from dataclasses import fields
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
+from etl.config import retain_capture_html_for
 from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.altamira import AltamiraConnector
 from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
@@ -760,7 +761,19 @@ def _process_one(
     # retention for it turns off automatically the moment its
     # `_SELECTORS_CALIBRATED` flag flips `raw_extra["selectors_calibrated"]`
     # to True, no code change needed here.
-    retain_html = canonical.raw_extra.get("selectors_calibrated") is False
+    #
+    # Issue #654 / D-150: a SECOND, independent, config-driven retention
+    # path — `etl.retain_capture_html_for` — lets an operator name a
+    # CALIBRATED connector (e.g. Idealista, under live investigation for a
+    # truncated photo gallery, D-145) whose HTML should still be kept, on
+    # purpose, without lying about or flipping its calibration state. Off by
+    # default; read fresh on every capture so flipping the config takes
+    # effect on the operator's next processed capture, no code change either
+    # direction. See D-150 for exactly how to turn it on/off.
+    retain_html = (
+        canonical.raw_extra.get("selectors_calibrated") is False
+        or connector.name in retain_capture_html_for()
+    )
     retained_html = html if retain_html else None
 
     with conn.cursor() as cur:

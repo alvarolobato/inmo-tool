@@ -291,6 +291,22 @@
   description: "Número N de ejecuciones consecutivas con 0 resultados que, tras una observación previa distinta de cero, marca una (conector, ámbito) como regresión de resultados en la Salud de datos (issue #376) — la señal 'una búsqueda que antes devolvía anuncios ahora devuelve 0', típica de una deriva de filtro/URL. Un ámbito que SIEMPRE ha estado a 0 (zona escasa nunca cubierta) no se marca; un 0 puntual tampoco; una recuperación (un valor distinto de cero posterior) limpia la marca. Por defecto 3. Solo lo lee el dashboard."
   requires_restart: []
   components: [dashboard]
+
+# Temporary diagnostic HTML retention (issue #654, D-150). Independent of the
+# calibration-based retention D-146 already provides — this lever exists
+# purely so an operator can pull one real captured HTML sample for a
+# CALIBRATED connector under active investigation, without touching that
+# connector's own calibration state.
+- key: etl.retain_capture_html_for
+  env: ETL_RETAIN_CAPTURE_HTML_FOR
+  type: string
+  sensitive: false
+  default: ""
+  section: "ETL"
+  description: "Lista separada por comas de nombres de conector (p. ej. 'idealista') cuyo extension_capture.html se conserva tras procesarse, aunque el conector esté calibrado (D-146 ya cubre el caso NO calibrado). Vacío por defecto = sin retención adicional para ningún conector. Uso temporal y reversible: se activa poniendo el nombre del conector aquí y reiniciando el ETL, se desactiva vaciando el valor y reiniciando — sin cambio de código en ningún sentido. El HTML retenido pesa bastante (~358 KB por captura); revisar y borrar las filas retenidas a mano una vez extraída la muestra (issue #654)."
+  requires_restart: [etl]
+  components: [etl]
+
 - key: openrouter.api_key
   env: OPENROUTER_API_KEY
   type: string
