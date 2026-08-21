@@ -133,15 +133,34 @@ function stubFetch(opts: {
   return { fetchMock, cursorCalls };
 }
 
+// #633: page-1 rendering (the card appearing) and the sentinel's
+// IntersectionObserver being CONSTRUCTED are two separate async events —
+// the card commits when `items`/`loading` update, but the sentinel only
+// exists once `cursor` is also non-null, and the observer itself attaches
+// from a `useEffect` that React schedules as a passive effect, not
+// synchronously with that commit. Waiting only for the card (the original
+// version of this helper) raced the two: under CI load the assertion could
+// run before the effect had constructed the observer, producing "no
+// IntersectionObserver instance was created" — timing-shaped, not random,
+// same species as #539's cross-round-trip race even though the mechanism
+// (React effect scheduling vs a Playwright CDP round trip) differs. Waiting
+// explicitly for the observer to exist closes the gap instead of relying on
+// incidental timing.
 async function renderAndWaitForPageOne() {
   render(<CandidateList profileId={1} />);
   await waitFor(() => expect(screen.getAllByTestId("candidate-card")).toHaveLength(1));
+  await waitFor(() => expect(FakeIntersectionObserver.instances.length).toBeGreaterThan(0));
 }
 
 function latestSentinelObserver(): FakeIntersectionObserver {
   const instance =
     FakeIntersectionObserver.instances[FakeIntersectionObserver.instances.length - 1];
-  if (!instance) throw new Error("no IntersectionObserver instance was created");
+  if (!instance) {
+    throw new Error(
+      "no IntersectionObserver instance was created — renderAndWaitForPageOne should have " +
+        "waited for one; call it before reaching for the sentinel observer",
+    );
+  }
   return instance;
 }
 

@@ -206,28 +206,53 @@ test("#460: the below-market chip sits next to the price, is green/red with a si
   // (1): the chip is on the SAME line, immediately after the price. We encode
   // that INTENT robustly rather than pinning a brittle exact pixel gap (a tight
   // x-gap threshold flaked under CI render/font timing — seen ~39.5 vs a ~25px
-  // bound). The price (<p>) and the below-market chip live in one
-  // `flex-wrap: nowrap` group (PriceSignals price mode), so they can never land
-  // on different lines — "same line" means their vertical centres coincide; a
-  // stacked/wrapped chip would sit a full line-height below and fail. The chip
-  // must also sit to the RIGHT of the price and be reasonably close (a generous
-  // gap, not an exact pixel value).
+  // bound, deflaked in #499). The price (<p>) and the below-market chip live
+  // in one `flex-wrap: nowrap` group (PriceSignals price mode), so they can
+  // never land on different lines — "same line" means their vertical centres
+  // coincide; a stacked/wrapped chip would sit a full line-height below and
+  // fail. The chip must also sit to the RIGHT of the price and be reasonably
+  // close (a generous gap, not an exact pixel value).
+  //
+  // #539: reading `priceBox`/`ratingBox` via two SEPARATE, sequential
+  // `.boundingBox()` calls (each its own CDP round trip) let a reflow ABOVE
+  // this card — most plausibly the `next/font` `display:"swap"` fallback→real
+  // swap, whose metric-matched fallback prevents CLS for THIS card's own
+  // single-line text but does not guarantee zero shift page-wide — land in
+  // the gap between the two reads on a loaded CI runner, comparing two
+  // DIFFERENT paint frames instead of one. Forcing that exact race locally
+  // (an artificial reflow injected between the two old calls) reproduced the
+  // reported numbers bit for bit: diff 38 vs threshold 12.75. The nowrap
+  // grouping itself is not in question — reproducing an actual wrap (reverting
+  // PriceSignals.tsx's inner `flexWrap: "nowrap"` to `"wrap"`) still fails
+  // this assertion below, confirming it still guards #460's real invariant.
+  //
+  // Fix: read both rects in ONE `evaluate()` — a single JS execution against a
+  // single committed layout/paint, so no reflow can land between them.
   await expect(dealRating).toBeVisible();
-  const priceBox = await deal.getByTestId("candidate-price").boundingBox();
-  const ratingBox = await dealRating.boundingBox();
-  expect(priceBox).not.toBeNull();
-  expect(ratingBox).not.toBeNull();
-  const priceMidY = priceBox!.y + priceBox!.height / 2;
-  const ratingMidY = ratingBox!.y + ratingBox!.height / 2;
+  const boxes = await deal.evaluate((cardEl) => {
+    const price = cardEl.querySelector('[data-testid="candidate-price"]');
+    const rating = cardEl.querySelector('[data-testid="price-rating"]');
+    if (!price || !rating) return null;
+    const p = price.getBoundingClientRect();
+    const r = rating.getBoundingClientRect();
+    return {
+      price: { x: p.x, y: p.y, width: p.width, height: p.height },
+      rating: { x: r.x, y: r.y, width: r.width, height: r.height },
+    };
+  });
+  expect(boxes).not.toBeNull();
+  const { price: priceBox, rating: ratingBox } = boxes!;
+  const priceMidY = priceBox.y + priceBox.height / 2;
+  const ratingMidY = ratingBox.y + ratingBox.height / 2;
   // Same line: vertical centres aligned (well within half the price height — a
   // wrapped-below chip would be ~a full line-height away and fail this).
-  expect(Math.abs(priceMidY - ratingMidY)).toBeLessThan(priceBox!.height / 2);
+  expect(Math.abs(priceMidY - ratingMidY)).toBeLessThan(priceBox.height / 2);
   // To the RIGHT of the price, starting at/after its right edge (small epsilon
   // for sub-pixel rounding) and within a generous horizontal gap — "next to the
   // price", not an exact pixel distance.
   const EPSILON = 4;
-  const gap = ratingBox!.x - (priceBox!.x + priceBox!.width);
-  expect(ratingBox!.x).toBeGreaterThan(priceBox!.x);
+  const gap = ratingBox.x - (priceBox.x + priceBox.width);
+  expect(ratingBox.x).toBeGreaterThan(priceBox.x);
   expect(gap).toBeGreaterThan(-EPSILON);
   expect(gap).toBeLessThan(120);
 
