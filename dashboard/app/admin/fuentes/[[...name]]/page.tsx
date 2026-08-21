@@ -22,11 +22,11 @@
  *   active/inactive; one-line last-run), linking to its own detail page.
  * - A `name` segment → `<FuenteDetail>`: one source's whole operator
  *   surface. Per the #636 disposition table:
- *     - Config + última ejecución + run-now → `<ConnectorCard
- *       defaultExpanded>` (component reused verbatim — same testids, same
- *       behaviour — a single-source page has nothing left to collapse
- *       behind, unlike the list's "ConnectorCard prose collapses behind a
- *       disclosure").
+ *     - Config + última ejecución + run-now → `<ConnectorCard>` (component
+ *       reused verbatim — same testids, same behaviour — now rendering
+ *       expanded, since a single-source page has nothing left to collapse
+ *       behind; issue #264's collapsed-by-default existed for the
+ *       `/etl/connectors` list this phase deletes).
  *     - The capture worklist (paste-seeding, status filter,
  *       skip/reactivate, "abrir siguiente pendiente") → scoped to this
  *       portal automatically (no portal picker needed — the route param IS
@@ -55,7 +55,7 @@ import { DriftReport } from "@/components/etl/DriftReport";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { ConnectorConfigPatch, ConnectorView } from "@/lib/connectors-schema";
-import { CAPTURE_PORTAL_NAMES, firstPendingUrl, WORKLIST_STATUSES } from "@/lib/worklist";
+import { firstPendingUrl, isCapturePortal, WORKLIST_STATUSES } from "@/lib/worklist";
 import type { WorklistPortalSummary, WorklistRow, WorklistStatus } from "@/lib/worklist";
 import type { DataHealthResponse } from "@/lib/data-health";
 import { LOW_PHOTO_THRESHOLD, isLowPhotoCoverage, isStuckPending, captureSuccessRate } from "@/lib/data-health";
@@ -86,6 +86,7 @@ export default function FuentesPage() {
 function FuentesList() {
   const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [health, setHealth] = useState<SourceHealthResponse | null>(null);
+  const [queues, setQueues] = useState<WorklistPortalSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
 
@@ -93,9 +94,12 @@ function FuentesList() {
     setLoading(true);
     setError(null);
     try {
-      const [connectorsRes, healthRes] = await Promise.all([
+      const [connectorsRes, healthRes, worklistRes] = await Promise.all([
         fetch("/api/etl/connectors"),
         fetch("/api/etl/source-health").catch(() => null),
+        // Unscoped on purpose: this is the ONE read that gives every portal's
+        // queue depth at once (see the pending-count column below).
+        fetch("/api/etl/worklist").catch(() => null),
       ]);
       if (!connectorsRes.ok) {
         const errBody = await connectorsRes.json().catch(() => null);
@@ -109,6 +113,13 @@ function FuentesList() {
       } else {
         setHealth(null);
       }
+      if (worklistRes && worklistRes.ok) {
+        const wl = await worklistRes.json();
+        setQueues((wl.summaries ?? []) as WorklistPortalSummary[]);
+      } else {
+        // Additive column — a failure here must not take down the list.
+        setQueues([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar las fuentes");
     } finally {
@@ -121,10 +132,31 @@ function FuentesList() {
   }, [load]);
 
   const healthByName = new Map((health?.sources ?? []).map((s) => [s.source, s]));
+  const queueByPortal = new Map(queues.map((q) => [q.source_portal, q]));
 
   return (
     <main className="route-shell" style={{ maxWidth: 900 }} data-testid="fuentes-page">
-      <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>Fuentes</h1>
+      {/* Header cross-link, carried over from `/etl/connectors` — the one
+          affordance that page had which the merge had quietly dropped. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>Fuentes</h1>
+        <Link
+          href="/etl"
+          data-testid="fuentes-to-monitor"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            minHeight: 44,
+            fontSize: 13,
+            color: "var(--accent)",
+            textDecoration: "none",
+            marginLeft: "auto",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Monitor ETL →
+        </Link>
+      </div>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
         Cada fila es un conector o portal de captura. Toca una fila para ver y
         cambiar su configuración, su cola de captura y su calidad de datos.
@@ -158,6 +190,8 @@ function FuentesList() {
             const isCaptureOnly = !c.supports_discovery;
             const active = isCaptureOnly ? c.capture_enabled : c.enabled;
             const h = healthByName.get(c.name);
+            const q = queueByPortal.get(c.name);
+            const showQueue = q != null && (q.pending > 0 || q.failed > 0);
             return (
               <Link
                 key={c.name}
@@ -166,7 +200,13 @@ function FuentesList() {
                 style={{
                   display: "flex",
                   alignItems: "center",
+                  // Wrap, so the queue-depth chip drops to a second line at
+                  // phone width instead of overflowing the row (D-124: these
+                  // children carry content-sized bases, not `flex: 1`/basis-0,
+                  // so wrapping is live here rather than inert).
+                  flexWrap: "wrap",
                   gap: 10,
+                  rowGap: 6,
                   padding: "10px 12px",
                   border: "1px solid var(--border)",
                   borderRadius: 8,
@@ -212,6 +252,35 @@ function FuentesList() {
                 {isCaptureOnly && (
                   <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>
                     solo captura
+                  </span>
+                )}
+                {/* Queue depth, straight off the unscoped worklist roll-up this
+                    page already fetches. This is the "¿se atascó algo esta
+                    noche?" glance that `/etl/captura`'s all-portals view used
+                    to answer in one screen; without it the only path is
+                    opening each source in turn. Rendered only when there is
+                    something to act on, so a drained fleet stays quiet. */}
+                {showQueue && (
+                  <span
+                    data-testid={`fuente-queue-${c.name}`}
+                    data-pending={q.pending}
+                    data-failed={q.failed}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      background: "var(--bg-2)",
+                      color: "var(--fg-muted)",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {q.pending > 0 && `${q.pending} en cola`}
+                    {q.pending > 0 && q.failed > 0 && " · "}
+                    {q.failed > 0 && (
+                      <span style={{ color: "#dc2626" }}>{q.failed} fallidas</span>
+                    )}
                   </span>
                 )}
                 <span
@@ -519,7 +588,15 @@ function FuenteDetail({ name }: { name: string }) {
 
   const connector = connectors.find((c) => c.name === name);
   const healthRow = health?.sources.find((s) => s.source === name) ?? null;
-  const showWorklist = CAPTURE_PORTAL_NAMES.includes(name) || summaries.length > 0;
+  // Gate on THIS connector's own capture capability, never on whether any
+  // worklist rows exist anywhere. The old `|| summaries.length > 0` fallback
+  // read a globally-scoped `summaries` (see lib/db/worklist.ts), so it was
+  // true for every source the moment ANY capture portal had a queue —
+  // rendering the paste box, "abrir siguiente pendiente" and another portal's
+  // progress card on plain crawl connectors like fotocasa, over an empty
+  // ledger. `isCapturePortal` is the same authority `listWorklist` filters
+  // rows by (issue #454), so a portal outside it can never have rows anyway.
+  const showWorklist = isCapturePortal(name);
 
   const portalHealth = dataHealth?.portals.find((p) => p.portal === name) ?? null;
   const sourceQuality = dataHealth?.sources.find((s) => s.source === name) ?? null;
@@ -527,7 +604,18 @@ function FuenteDetail({ name }: { name: string }) {
   const driftReport = drift?.find((r) => r.connector === name) ?? null;
 
   return (
-    <main className="route-shell" style={{ maxWidth: 900 }} data-testid="fuente-detail-page">
+    <main
+      className="route-shell"
+      style={{ maxWidth: 900 }}
+      data-testid="fuente-detail-page"
+      /* Settle signal for e2e (issue #642 P1 review). Flips to "true" once
+         `fetchWorklist` has resolved, WHETHER OR NOT a Captura section ends up
+         rendering. Without it, "this source shows no worklist section" is
+         unfalsifiable: the assertion runs on the first poll, before the fetch
+         returns, so it passes on a page that is about to render the section.
+         An absence assertion needs a positive event to hang off. */
+      data-worklist-loaded={worklistLoaded ? "true" : "false"}
+    >
       <Link
         href="/admin/fuentes"
         style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none" }}
@@ -582,7 +670,6 @@ function FuenteDetail({ name }: { name: string }) {
             connector={connector!}
             onPatch={handlePatch}
             onRunFinished={fetchConnectors}
-            defaultExpanded
           />
         </div>
       )}
@@ -626,6 +713,14 @@ function FuenteDetail({ name }: { name: string }) {
                     }}
                   >
                     <div style={{ display: "flex", gap: 16, alignItems: "baseline", flexWrap: "wrap" }}>
+                      {/* The portal name stays on the card even though the page
+                          is already scoped to one source: these numbers are
+                          attributable claims, and an unlabelled progress bar is
+                          exactly what made the pre-fix duplication dangerous
+                          rather than merely noisy. */}
+                      <strong style={{ color: "var(--fg)", textTransform: "capitalize" }}>
+                        {s.source_portal}
+                      </strong>
                       <span style={{ color: "var(--fg)" }}>
                         {s.captured}/{s.total} capturadas
                       </span>
@@ -643,11 +738,12 @@ function FuenteDetail({ name }: { name: string }) {
                       <span style={{ color: "var(--fg-muted)", marginLeft: "auto" }}>{pct}%</span>
                     </div>
                     <div
+                      data-testid={`worklist-progress-${s.source_portal}`}
                       role="progressbar"
                       aria-valuenow={pct}
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      aria-label={`${pct}% capturadas`}
+                      aria-label={`${s.source_portal}: ${pct}% capturadas`}
                       style={{ marginTop: 8, height: 6, borderRadius: 4, background: "var(--border)", overflow: "hidden" }}
                     >
                       <div style={{ width: `${pct}%`, height: "100%", background: "#16a34a", transition: "width 0.2s" }} />

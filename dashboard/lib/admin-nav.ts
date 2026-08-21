@@ -117,8 +117,12 @@ function matchPrefixesFor(item: AdminNavItem): readonly string[] {
 
 /**
  * Returns the `href` of the nav item that owns `pathname`, or `null` when none
- * do. Longest-prefix wins, so `/etl/connectors` highlights Conectores (not
- * Monitor ETL) and `/admin/usage` highlights the LLM tab (not itself).
+ * do. Longest-prefix wins, so `/admin/fuentes/<name>` highlights Fuentes (not
+ * some shorter `/admin` prefix) and `/admin/usage` highlights the LLM tab (not
+ * itself). There is no Conectores item any more — `/etl/connectors` was
+ * deleted in issue #642 P1, and the stale `/etl/*` paths it left behind fall
+ * through to Monitor ETL by the same longest-prefix rule (pinned in
+ * `lib/__tests__/admin-nav.test.ts`).
  */
 export function activeAdminHref(pathname: string): string | null {
   let best: { href: string; len: number } | null = null;

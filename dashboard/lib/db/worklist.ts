@@ -26,6 +26,14 @@ export interface AddWorklistResult {
  * List worklist rows (optionally filtered to one portal), newest first, plus
  * per-portal status roll-ups for the page header. One round trip each.
  *
+ * `portal` scopes BOTH halves. It used to scope only `rows`, leaving
+ * `summaries` global — harmless for the old unscoped `/etl/captura`, which
+ * fetched every portal and filtered client-side, but a correctness bug for a
+ * per-source page: `/admin/fuentes/aliseda` rendered aliseda's rows next to
+ * every other portal's progress bar, attributing another source's numbers to
+ * this one. A wrong number under the wrong heading is worse than a missing
+ * one, so the predicate lives here rather than in each caller.
+ *
  * The guided-capture surface is scoped to extension-capturable portals
  * (`CAPTURE_PORTAL_NAMES`, issue #454): rows for an ETL-fetched connector (e.g.
  * cimenta2) are vestigial — the extension never drains them — so they are
@@ -53,17 +61,29 @@ export async function listWorklist(
         [capturePortals],
       );
 
-  const summaryRows = await sql<{
-    source_portal: string;
-    status: WorklistStatus;
-    n: string;
-  }>(
-    `SELECT source_portal, status, COUNT(*)::text AS n
-       FROM capture_worklist
-      WHERE source_portal = ANY($1)
-      GROUP BY source_portal, status`,
-    [capturePortals],
-  );
+  const summaryRows = portal
+    ? await sql<{
+        source_portal: string;
+        status: WorklistStatus;
+        n: string;
+      }>(
+        `SELECT source_portal, status, COUNT(*)::text AS n
+           FROM capture_worklist
+          WHERE source_portal = $1 AND source_portal = ANY($2)
+          GROUP BY source_portal, status`,
+        [portal, capturePortals],
+      )
+    : await sql<{
+        source_portal: string;
+        status: WorklistStatus;
+        n: string;
+      }>(
+        `SELECT source_portal, status, COUNT(*)::text AS n
+           FROM capture_worklist
+          WHERE source_portal = ANY($1)
+          GROUP BY source_portal, status`,
+        [capturePortals],
+      );
 
   const byPortal = new Map<string, WorklistPortalSummary>();
   for (const r of summaryRows) {

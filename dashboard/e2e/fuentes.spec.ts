@@ -7,8 +7,9 @@
  * assertions are ported here, retargeted at the new routes:
  *   - `/admin/fuentes` — the lean list (identity, status, link to detail).
  *   - `/admin/fuentes/[name]` — the detail page: connector config
- *     (ConnectorCard, now starting expanded — issue #264's "collapsed by
- *     default" only applies to the list), and the capture worklist ledger
+ *     (ConnectorCard, which now renders expanded — issue #264's
+ *     "collapsed by default" served the `/etl/connectors` list this phase
+ *     deletes), and the capture worklist ledger
  *     scoped to this one portal (no portal picker needed — the route param
  *     IS the scope).
  *
@@ -211,6 +212,44 @@ test("list: shows both sources with no error surface, and links to their detail 
   await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
 });
 
+/**
+ * The queue-depth column (issue #642 P1 review). `/etl/captura`'s all-portals
+ * view is gone and #640's Estado tile doesn't exist yet, so without this the
+ * only way to answer "¿se atascó algo esta noche?" is opening every source in
+ * turn. The number comes off the SAME unscoped worklist roll-up the list
+ * already fetches — no new endpoint, no new computation.
+ */
+test("list: a capture source shows its queue depth; a drained/plain one shows none", async ({
+  page,
+}) => {
+  await page.goto("/admin/fuentes");
+  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+
+  // Counts are asserted against the API's OWN roll-up rather than a literal:
+  // this spec seeds >=1 pending and >=1 failed aliseda row, but aliseda may
+  // already carry real rows on a shared/demo DB (see CAPTURE_ONLY's note), so
+  // the invariant worth pinning is "the chip shows what the roll-up says".
+  const roll = await page.request.get("/api/etl/worklist");
+  const summary = ((await roll.json()).summaries ?? []).find(
+    (x: { source_portal: string }) => x.source_portal === CAPTURE_ONLY,
+  );
+  expect(summary, "the spec's own seed guarantees an aliseda roll-up").toBeTruthy();
+  expect(summary.pending).toBeGreaterThanOrEqual(1);
+  expect(summary.failed).toBeGreaterThanOrEqual(1);
+
+  const chip = page.getByTestId(`fuente-queue-${CAPTURE_ONLY}`);
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("data-pending", String(summary.pending));
+  await expect(chip).toHaveAttribute("data-failed", String(summary.failed));
+  await expect(chip).toContainText(`${summary.pending} en cola`);
+
+  // A plain crawl connector has no capture queue at all — no chip, not a "0".
+  await expect(page.getByTestId(`fuente-queue-${CONNECTOR}`)).toHaveCount(0);
+
+  // The header cross-link restored from /etl/connectors.
+  await expect(page.getByTestId("fuentes-to-monitor")).toHaveAttribute("href", "/etl");
+});
+
 test("detail: connector config starts expanded (no click needed), shows scope + freshness", async ({
   page,
 }) => {
@@ -306,6 +345,61 @@ test("detail: capture worklist ledger — seeded rows, statuses, and per-portal 
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
 });
 
+/**
+ * The regression this guards (issue #642 P1 review): `listWorklist(portal)`
+ * scoped `rows` but not `summaries`, so a per-source page rendered EVERY
+ * portal's progress card — and the new card had dropped the portal name, so
+ * two bars showing different numbers sat on one source's page with nothing
+ * distinguishing them. Wrong numbers under the wrong heading.
+ *
+ * Needs a SECOND capture portal carrying rows, so it seeds one (a real
+ * `CAPTURE_PORTAL_NAMES` entry — `portalForUrl`/`listWorklist` ignore anything
+ * else) and cleans it up. The `E2E-FUENTES-` marker keeps `purgeWorklist`'s
+ * afterAll sweep covering it too.
+ */
+test("detail: the progress card is scoped to THIS portal and names it (no cross-portal leak)", async ({
+  page,
+}) => {
+  const otherUrl = "https://www.idealista.com/inmueble/E2E-FUENTES-OTHER-PORTAL/";
+  await pool.query(
+    `INSERT INTO capture_worklist (url, match_key, source_portal, status)
+     VALUES ($1, $2, $3, 'pending')`,
+    [otherUrl, "idealista.com/inmueble/E2E-FUENTES-OTHER-PORTAL", "idealista"],
+  );
+  try {
+    // Precondition: the other portal really is in the global roll-up, so a
+    // leak would be observable.
+    const global = await page.request.get("/api/etl/worklist");
+    const globalPortals = ((await global.json()).summaries ?? []).map(
+      (s: { source_portal: string }) => s.source_portal,
+    );
+    expect(globalPortals).toContain("idealista");
+    expect(globalPortals).toContain(CAPTURE_ONLY);
+
+    // The scoped read returns ONLY this portal's roll-up.
+    const scoped = await page.request.get(`/api/etl/worklist?portal=${CAPTURE_ONLY}`);
+    const scopedSummaries = (await scoped.json()).summaries ?? [];
+    expect(scopedSummaries.map((s: { source_portal: string }) => s.source_portal)).toEqual([
+      CAPTURE_ONLY,
+    ]);
+
+    // ...and the page renders exactly one card, for this portal, NAMED.
+    await page.goto(`/admin/fuentes/${CAPTURE_ONLY}`);
+    await expect(page.getByTestId("fuente-worklist")).toBeVisible();
+    await expect(page.getByTestId(`worklist-summary-${CAPTURE_ONLY}`)).toBeVisible();
+    await expect(page.getByTestId("worklist-summary-idealista")).toHaveCount(0);
+    await expect(page.locator('[data-testid^="worklist-summary-"]')).toHaveCount(1);
+    await expect(page.getByTestId(`worklist-summary-${CAPTURE_ONLY}`)).toContainText(CAPTURE_ONLY);
+
+    // The bar carries the portal in its accessible name — an unlabelled
+    // progress bar is what made the leak dangerous rather than just noisy.
+    const bar = page.getByTestId(`worklist-progress-${CAPTURE_ONLY}`);
+    await expect(bar).toHaveAttribute("aria-label", new RegExp(`^${CAPTURE_ONLY}: \\d+% capturadas$`));
+  } finally {
+    await pool.query("DELETE FROM capture_worklist WHERE url = $1", [otherUrl]);
+  }
+});
+
 test("detail: status filter tabs scope the ledger to one status", async ({ page }) => {
   await page.goto(`/admin/fuentes/${CAPTURE_ONLY}`);
   const [pendingId, capturedId, failedId] = seededWorklistIds;
@@ -384,11 +478,42 @@ test("detail: skip and reactivate a worklist row persist status (skip/reactivate
     .toBe("pending");
 });
 
+/**
+ * An absence assertion is only worth anything if it can fail. `goto` +
+ * `toHaveCount(0)` cannot: it resolves on the first poll, before
+ * `fetchWorklist` returns, so it passes green on a page that renders the
+ * section a moment later — which is exactly what the pre-fix build did (the
+ * `showWorklist` gate read a globally-scoped `summaries`, so ANY capture
+ * portal having a queue turned the whole Captura block on for every source).
+ *
+ * So: wait for a POSITIVE settle first — the page's own
+ * `data-worklist-loaded` flag, which flips once the worklist fetch resolves
+ * whether or not a section renders — and only then assert the absence. The
+ * aliseda rows this spec seeds are still in `capture_worklist` at this point,
+ * so the global-summaries regression would be live if it came back.
+ */
 test("detail: a source with no capture activity (fotocasa, plain crawl) shows no worklist section", async ({
   page,
 }) => {
   await page.goto(`/admin/fuentes/${CONNECTOR}`);
+
+  // Positive settle #1: the page itself rendered.
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
+  // Positive settle #2: the worklist fetch has RESOLVED. Without this the
+  // assertion below is unfalsifiable.
+  await expect(page.getByTestId("fuente-detail-page")).toHaveAttribute(
+    "data-worklist-loaded",
+    "true",
+  );
+  // Positive settle #3: a capture portal DOES have a queue right now, so the
+  // old `|| summaries.length > 0` fallback would be true if it returned.
+  const globalQueue = await page.request.get("/api/etl/worklist");
+  expect(globalQueue.ok()).toBe(true);
+  expect(((await globalQueue.json()).summaries ?? []).length).toBeGreaterThan(0);
+
+  // Only now is the absence meaningful.
   await expect(page.getByTestId("fuente-worklist")).toHaveCount(0);
+  await expect(page.getByTestId("worklist-open-next")).toHaveCount(0);
 });
 
 test.describe("phone width (iPhone 13 emulation, D-120/D-121/D-124)", () => {
@@ -436,6 +561,15 @@ test.describe("phone width (iPhone 13 emulation, D-120/D-121/D-124)", () => {
     const row = page.getByTestId(`fuente-row-${CONNECTOR}`);
     const box = await row.boundingBox();
     expect(box!.height, "a list row is the whole tap target — must clear 44px").toBeGreaterThanOrEqual(44);
+
+    // The queue-depth chip must not be what pushes a row past the viewport:
+    // assertNoPageOverflow above already covers the page, so check the row's
+    // own box stays inside it too (the chip is `flexShrink: 0`, so a
+    // regression would show up here as a row wider than 390px).
+    expect(box!.width).toBeLessThanOrEqual(390);
+    await expect(page.getByTestId(`fuente-queue-${CAPTURE_ONLY}`)).toBeVisible();
+    const chipBox = await page.getByTestId(`fuente-queue-${CAPTURE_ONLY}`).boundingBox();
+    expect(chipBox!.x + chipBox!.width).toBeLessThanOrEqual(390);
   });
 
   test("detail: no page overflow, and every button clears the 44px tap-target floor", async ({
@@ -446,7 +580,7 @@ test.describe("phone width (iPhone 13 emulation, D-120/D-121/D-124)", () => {
     await assertNoPageOverflow(page);
 
     // The ConnectorCard toggle — issue #642 review: this card is now the
-    // primary control surface (defaultExpanded, not behind a disclosure),
+    // primary control surface (rendered expanded, not behind a disclosure),
     // the exact class of 35-38px tap target #656 found in moved-verbatim
     // markup elsewhere. Caught and fixed here (ConnectorCard.tsx's shared
     // `buttonStyle`) before relocating, not after.

@@ -26,12 +26,11 @@ import { updateAvailable, type ExtensionStatusResponse } from "@/lib/extension-s
  * addressable in e2e; the setup content is identical everywhere.
  */
 
-type CtaContext = "captura" | "filtros" | "worklist" | "connectors";
+type CtaContext = "captura" | "filtros" | "connectors";
 
 const CONTEXT_COPY: Record<CtaContext, string> = {
   captura: "Para capturar necesitas la extensión del navegador instalada y vinculada.",
   filtros: "«Abrir» y fijar filtros requieren la extensión del navegador vinculada.",
-  worklist: "La captura asistida necesita la extensión del navegador vinculada.",
   connectors: "Los portales de solo captura necesitan la extensión del navegador vinculada.",
 };
 

@@ -92,23 +92,28 @@ function captureOnly(overrides: Partial<ConnectorView> = {}): ConnectorView {
 
 const noop = vi.fn(async () => {});
 
-describe("ConnectorCard — compact collapse/expand", () => {
-  it("renders collapsed by default: identity + status visible, detail hidden", () => {
+// Starts EXPANDED (issue #642 P1 review). #264's collapsed-by-default served
+// the `/etl/connectors` LIST, which that phase deleted; the card's only caller
+// is now the single-source Fuentes detail page. The collapse toggle survives
+// as an affordance (useful on a phone, D-120/D-121) — the always-true
+// `defaultExpanded` prop that briefly configured it did not.
+describe("ConnectorCard — expanded by default, collapsible", () => {
+  it("renders expanded by default: identity, status AND full detail visible", () => {
     render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
 
     // Identity band is always visible.
     expect(screen.getByTestId("connector-fotocasa")).toBeInTheDocument();
     expect(screen.getByTestId("status-fotocasa")).toHaveTextContent("activo");
-    expect(screen.getByTestId("expand-fotocasa")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("expand-fotocasa")).toHaveAttribute("aria-expanded", "true");
 
-    // The full detail region and its contents are NOT mounted while collapsed.
-    expect(screen.queryByTestId("connector-detail-fotocasa")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("scope-summary")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("rooms-fotocasa")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("lastrun-fotocasa")).not.toBeInTheDocument();
+    // ...and so is the detail region, with no click needed.
+    expect(screen.getByTestId("connector-detail-fotocasa")).toBeInTheDocument();
+    expect(screen.getByTestId("scope-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("rooms-fotocasa")).toBeInTheDocument();
+    expect(screen.getByTestId("lastrun-fotocasa")).toBeInTheDocument();
   });
 
-  it("shows a one-line last-run summary in the collapsed row", () => {
+  it("shows a one-line last-run summary in the summary row", () => {
     render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
     const summary = screen.getByTestId("lastrun-summary-fotocasa");
     expect(summary).toHaveTextContent("success");
@@ -120,28 +125,32 @@ describe("ConnectorCard — compact collapse/expand", () => {
     expect(screen.getByTestId("lastrun-summary-fotocasa")).toHaveTextContent("Sin ejecuciones");
   });
 
-  it("expands on click to reveal full detail, then collapses again", () => {
+  it("collapses on click to hide the detail, then expands again", () => {
     render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
     const toggle = screen.getByTestId("expand-fotocasa");
 
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
     const detail = screen.getByTestId("connector-detail-fotocasa");
     expect(within(detail).getByTestId("scope-summary")).toBeInTheDocument();
-    // Detail-only controls now present.
-    expect(screen.getByTestId("rooms-fotocasa")).toBeInTheDocument();
-    expect(screen.getByTestId("lastrun-fotocasa")).toBeInTheDocument();
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("connector-detail-fotocasa")).not.toBeInTheDocument();
+    // Detail-only controls go with it.
+    expect(screen.queryByTestId("rooms-fotocasa")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("lastrun-fotocasa")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("connector-detail-fotocasa")).toBeInTheDocument();
   });
 
-  it("keeps enable/disable a basic action available without expanding", () => {
+  it("keeps enable/disable in the summary row, so collapsing never hides it", () => {
     const onPatch = vi.fn(async () => {});
     render(<ConnectorCard connector={makeConnector({ enabled: true })} onPatch={onPatch} />);
 
-    // Toggle lives in the collapsed row (not behind the chevron).
+    // Collapse first: the toggle must survive, i.e. it is NOT inside the
+    // detail region the chevron hides.
+    fireEvent.click(screen.getByTestId("expand-fotocasa"));
     expect(screen.queryByTestId("connector-detail-fotocasa")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("toggle-fotocasa"));
 
@@ -153,8 +162,7 @@ describe("ConnectorCard — single toggle (issue #319 / D-055)", () => {
   it("a capture-only connector shows ONE toggle mapped to capture_enabled, and no crawl button", () => {
     render(<ConnectorCard connector={captureOnly()} onPatch={vi.fn()} />);
 
-    // Exactly one Activar/Desactivar toggle, usable without expanding.
-    expect(screen.queryByTestId("connector-detail-idealista")).not.toBeInTheDocument();
+    // Exactly one Activar/Desactivar toggle, in the summary row.
     expect(screen.getByTestId("toggle-idealista")).toHaveTextContent("Desactivar");
 
     // The old second controls (crawl toggle / capture toggle / capture pill)
@@ -210,24 +218,26 @@ describe("ConnectorCard — single toggle (issue #319 / D-055)", () => {
     expect(screen.getByTestId("toggle-idealista")).toBeDisabled();
   });
 
-  it("describes 'solo captura' in the expanded detail, not a two-toggle explanation", () => {
+  it("describes 'solo captura' in the detail, not a two-toggle explanation", () => {
     render(<ConnectorCard connector={captureOnly()} onPatch={vi.fn()} />);
 
-    // The note lives behind the chevron, not in the narrow collapsed row.
-    expect(screen.queryByTestId("capture-note-idealista")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("expand-idealista"));
+    // The note lives in the detail region, which is open from the start.
     expect(screen.getByTestId("capture-note-idealista")).toHaveTextContent("extensión");
+    // ...and it is behind the chevron, not in the always-visible summary row.
+    fireEvent.click(screen.getByTestId("expand-idealista"));
+    expect(screen.queryByTestId("capture-note-idealista")).not.toBeInTheDocument();
   });
 });
 
 describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
-  it("shows the freshness state and interval control in the expanded detail", () => {
+  it("shows the freshness state and interval control in the detail", () => {
     render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
-    // Freshness lives behind the chevron, like the rest of the detail.
-    expect(screen.queryByTestId("freshness-fotocasa")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("expand-fotocasa"));
+    // Freshness is part of the detail region, visible without a click now.
     expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent("fresco");
     expect(screen.getByTestId("freshness-interval-fotocasa")).toBeInTheDocument();
+    // ...and it goes away with the rest of the detail when collapsed.
+    fireEvent.click(screen.getByTestId("expand-fotocasa"));
+    expect(screen.queryByTestId("freshness-state-fotocasa")).not.toBeInTheDocument();
   });
 
   it("renders each cadence state distinctly", () => {
@@ -244,7 +254,6 @@ describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
       },
     });
     const { rerender } = render(<ConnectorCard connector={refreshing} onPatch={noop} />);
-    fireEvent.click(screen.getByTestId("expand-fotocasa"));
     expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent(
       "refrescando… (1/4 ámbitos)",
     );
@@ -269,7 +278,6 @@ describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
   it("changing the interval PATCHes freshness_interval_hours (null = default)", () => {
     const onPatch = vi.fn(async () => {});
     render(<ConnectorCard connector={makeConnector()} onPatch={onPatch} />);
-    fireEvent.click(screen.getByTestId("expand-fotocasa"));
 
     fireEvent.change(screen.getByTestId("freshness-interval-fotocasa"), {
       target: { value: "6" },
@@ -286,7 +294,6 @@ describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
     // Unlike scope/filters, the cadence is a valid knob for capture-only
     // portals (it's #289's manual-capture staleness window).
     render(<ConnectorCard connector={captureOnly()} onPatch={noop} />);
-    fireEvent.click(screen.getByTestId("expand-idealista"));
     expect(screen.getByTestId("freshness-interval-idealista")).toBeInTheDocument();
     // …but still no scope/filter controls.
     expect(screen.queryByTestId("edit-scope-idealista")).not.toBeInTheDocument();
