@@ -55,16 +55,23 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
     expect(byHref.has("/etl/discovery")).toBe(false);
   });
 
-  it("both consumers render from ADMIN_NAV (no local nav arrays left)", () => {
+  it("the nav strip (AdminChrome) renders from ADMIN_NAV, with no local array", () => {
     const chrome = read("app/admin/AdminChrome.tsx");
-    const index = read("app/admin/page.tsx");
-    for (const src of [chrome, index]) {
-      expect(src).toContain("ADMIN_NAV");
-      expect(src).toContain("@/lib/admin-nav");
-    }
-    // The old inline arrays are gone.
-    expect(index).not.toContain("ADMIN_LINKS");
+    expect(chrome).toContain("ADMIN_NAV");
+    expect(chrome).toContain("@/lib/admin-nav");
     expect(chrome).not.toContain("const ADMIN_NAV = [");
+  });
+
+  // Issue #638: /admin's own content stopped being a second ADMIN_NAV-driven
+  // card grid — it is now the Estado board (lib/db/source-health.ts), with
+  // navigation between admin surfaces owned entirely by AdminChrome's strip
+  // (rendered on every /admin/* route, this one included — see
+  // app/admin/layout.tsx). This test only guards against a NEW local nav
+  // array reappearing on the index, not against ADMIN_NAV being unused here.
+  it("app/admin/page.tsx (Estado board) does not reintroduce a local nav array", () => {
+    const index = read("app/admin/page.tsx");
+    expect(index).not.toContain("ADMIN_LINKS");
+    expect(index).not.toContain("const ADMIN_NAV = [");
   });
 });
 

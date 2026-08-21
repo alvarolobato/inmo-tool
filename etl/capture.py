@@ -268,6 +268,10 @@ def process_pending_captures(conn) -> int:
     skipped_disabled = 0
     ingested = 0
     for capture_id, url, html, created_at in pending:
+        # Reset per-iteration — a raise from _connector_for_url(url) itself
+        # (before this is reassigned) must never leak a PRIOR url's resolved
+        # connector into this one's failure record (issue #638 review S1).
+        resolved = None
         try:
             resolved = _connector_for_url(url)
             if resolved is not None:
@@ -290,7 +294,17 @@ def process_pending_captures(conn) -> int:
                 "extension_capture id=%s: unexpected error, marking failed",
                 capture_id,
             )
-            _mark_failed(conn, capture_id, url, "Unexpected internal error")
+            # Best-effort attribution (issue #638 review S1): `resolved` is
+            # whatever this SAME iteration successfully computed before the
+            # exception, or None if it never got that far — never a stale
+            # value from a previous url.
+            _mark_failed(
+                conn,
+                capture_id,
+                url,
+                "Unexpected internal error",
+                connector_name=resolved[0].name if resolved is not None else None,
+            )
         processed += 1
 
     # Issue #269: a capture that actually landed a listing must trigger the
@@ -700,7 +714,7 @@ def _process_one(
     try:
         canonical = connector.normalize(raw)
     except ConnectorError as exc:
-        _mark_failed(conn, capture_id, url, str(exc))
+        _mark_failed(conn, capture_id, url, str(exc), connector_name=connector.name)
         return False
 
     # Reuses the exact same persistence path the automated orchestrator
@@ -806,12 +820,23 @@ def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
         time.sleep(interval_seconds)
 
 
-def _mark_failed(conn, capture_id: int, url: str, error_msg: str) -> None:
+def _mark_failed(
+    conn, capture_id: int, url: str, error_msg: str, connector_name: str | None = None
+) -> None:
+    """Record a failed capture. `connector_name` is set whenever the caller
+    already knows which portal this URL resolved to (e.g. `normalize()`
+    raised) — issue #638 review finding S1: before this, EVERY failed row
+    left `connector_name` NULL regardless of whether a connector had been
+    resolved, which made the Estado board's per-source capture-failure-rate
+    signal (`lib/source-health.ts`) permanently unreachable in production —
+    11/11 real failed rows (including the hipoges 2026-08-19 pair the owner
+    cited in #636's addendum) were unattributed. `None` stays correct for a
+    genuinely unresolvable URL (no connector recognises it at all)."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE extension_capture SET status = 'failed', error_msg = %s, "
-            "processed_at = NOW() WHERE id = %s",
-            (error_msg, capture_id),
+            "connector_name = %s, processed_at = NOW() WHERE id = %s",
+            (error_msg, connector_name, capture_id),
         )
     conn.commit()
     # If a still-pending worklist row matches this URL, mark it 'failed' too so
