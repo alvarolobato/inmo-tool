@@ -511,3 +511,174 @@ describe("runAssessmentBatch", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------
+// #666 — bounded concurrency within a flow's round.
+//
+// `concurrency` defaults to 1 (see batch.ts), which is why every test above
+// this point — written against the pre-#666 serial loop — passes completely
+// unchanged: a worker pool of size 1 reproduces the exact old call order and
+// "stops on the very first call" semantics. The tests below explicitly pass
+// `concurrency > 1` and prove, with REAL overlapping promises (never a
+// sequential `for` loop pretending to be concurrent), that:
+//   - calls genuinely run in parallel, bounded by `concurrency`;
+//   - a quota/budget/circuit stop halts NEW work without unbounded overrun;
+//   - one bad property is attempted AT MOST ONCE per pass regardless of how
+//     many workers are racing the queue (the D-104 "one bad property must
+//     not become three strikes" exit criterion, at the batch-call-count
+//     level — cache.integration.test.ts proves the same thing one layer
+//     down, at the real `ai_assessment_failure` row level).
+// ---------------------------------------------------------------------
+
+describe("#666: concurrency", () => {
+  it("runs up to `concurrency` (property, flow) calls in parallel within one flow's round", async () => {
+    const CONCURRENCY = 3;
+    const propertyIds = [1, 2, 3, 4, 5, 6];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let started = 0;
+    let releaseAll!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+
+    // Every call blocks until CONCURRENCY calls are simultaneously in
+    // flight — so `maxInFlight` can only reach CONCURRENCY if the pool
+    // genuinely dispatched that many calls at once, not one-at-a-time.
+    const assess = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      started += 1;
+      if (started === CONCURRENCY) releaseAll();
+      await barrier;
+      inFlight -= 1;
+    });
+
+    const flows: BatchFlow[] = [{ type: "occupancy", promptVersion: "occupancy/v2", assess }];
+
+    await runAssessmentBatch({
+      flows,
+      concurrency: CONCURRENCY,
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
+      selectPropertyIds: async () => propertyIds,
+      isCurrent: async () => false,
+    });
+
+    expect(maxInFlight).toBe(CONCURRENCY); // exactly the configured pool size
+    expect(assess).toHaveBeenCalledTimes(propertyIds.length); // every property still gets visited
+  });
+
+  it("a quota stop under concurrency halts NEW work, bounded by `concurrency` extra in-flight calls — not the rest of the page", async () => {
+    const CONCURRENCY = 3;
+    const propertyIds = [1, 2, 3, 4, 5, 6];
+    let started = 0;
+    let releaseAll!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+
+    // Hold the first wave of `concurrency` calls open until all of them have
+    // started, THEN let them all resolve/reject together — property 1's
+    // quota error and properties 2/3's successes race, proving the stop
+    // doesn't retroactively un-dispatch calls already in flight.
+    const assess = vi.fn(async (propertyId: number) => {
+      started += 1;
+      if (started === CONCURRENCY) releaseAll();
+      await gate;
+      if (propertyId === 1) {
+        throw new LlmQuotaExceededError(95, "session", 80);
+      }
+    });
+
+    const flows: BatchFlow[] = [{ type: "occupancy", promptVersion: "occupancy/v2", assess }];
+
+    const result = await runAssessmentBatch({
+      flows,
+      concurrency: CONCURRENCY,
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
+      selectPropertyIds: async () => propertyIds,
+      isCurrent: async () => false,
+    });
+
+    expect(result.stopped).toBe("quota");
+    // Exactly the first wave started — properties 4/5/6 were NEVER dispatched
+    // once the stop fired, and no MORE than `concurrency` calls ever raced
+    // ahead of the stop.
+    expect(assess).toHaveBeenCalledTimes(CONCURRENCY);
+    const attemptedIds = assess.mock.calls.map(([id]) => id).sort();
+    expect(attemptedIds).toEqual([1, 2, 3]);
+  });
+
+  it("under concurrency, each (property, flow) pair is attempted AT MOST ONCE per pass — one bad property can't accrue extra strikes", async () => {
+    const propertyIds = [1, 2, 3, 4, 5, 6, 7, 8];
+    const attempts = new Map<number, number>();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Every property fails with a genuine content error (the kind that
+    // WOULD strike the D-104 ledger one layer down) — the concern this test
+    // pins is purely "does the pool ever call assess() twice for the same
+    // property in one pass", which is exactly what would turn one strike
+    // into three.
+    const assess = vi.fn(async (propertyId: number) => {
+      attempts.set(propertyId, (attempts.get(propertyId) ?? 0) + 1);
+      throw new Error("malformed model output");
+    });
+
+    const flows: BatchFlow[] = [{ type: "occupancy", promptVersion: "occupancy/v2", assess }];
+
+    const result = await runAssessmentBatch({
+      flows,
+      concurrency: 4, // 8 properties, 4 workers -> two full rounds
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
+      selectPropertyIds: async () => propertyIds,
+      isCurrent: async () => false,
+    });
+
+    expect(result.stopped).toBeNull(); // a generic error never stops the batch
+    expect(result.errors).toBe(propertyIds.length);
+    expect(assess).toHaveBeenCalledTimes(propertyIds.length);
+    for (const propertyId of propertyIds) {
+      expect(attempts.get(propertyId)).toBe(1);
+    }
+    spy.mockRestore();
+  });
+
+  it("concurrency=1 (the default) reproduces the exact serial order — no behaviour change for an unconfigured caller", async () => {
+    const order: string[] = [];
+    const { flows } = (() => {
+      const a = vi.fn(async (id: number) => {
+        order.push(`occupancy:${id}`);
+      });
+      const b = vi.fn(async (id: number) => {
+        order.push(`condition:${id}`);
+      });
+      return {
+        flows: [
+          { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
+          { type: "condition", promptVersion: "condition/v1", assess: b },
+        ] as BatchFlow[],
+      };
+    })();
+
+    await runAssessmentBatch({
+      flows,
+      // concurrency intentionally omitted — must default to 1.
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
+      selectPropertyIds: async () => [1, 2, 3],
+      isCurrent: async () => false,
+    });
+
+    expect(order).toEqual([
+      "occupancy:1",
+      "occupancy:2",
+      "occupancy:3",
+      "condition:1",
+      "condition:2",
+      "condition:3",
+    ]);
+  });
+});

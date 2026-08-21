@@ -252,10 +252,15 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
     pending,
     coverage_fraction: coverageFraction(covered, eligible),
     projected_ticks: projectBacklogTicks(pending, scheduler.batchSize),
+    // #666/D-149: while a real backlog exists, consecutive ticks reschedule
+    // after `drainIntervalSeconds`, not the full idle `intervalSeconds` — see
+    // scheduler.ts's adaptive duty cycle. Using the idle cadence here would
+    // wildly overstate how long the backlog actually takes to clear now that
+    // draining doesn't wait out the full interval between ticks.
     projected_seconds: projectBacklogSeconds(
       pending,
       scheduler.batchSize,
-      scheduler.intervalSeconds,
+      scheduler.drainIntervalSeconds,
     ),
     projected_cost_eur: projectBacklogCostEur(pending, avgCostPerProperty),
     avg_cost_eur_per_property: avgCostPerProperty,

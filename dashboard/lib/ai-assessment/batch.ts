@@ -212,6 +212,15 @@ export async function isFlowCurrent(
 export interface RunAssessmentBatchOptions {
   /** Max properties to process this tick. */
   batchSize?: number;
+  /**
+   * #666 — how many (property, flow) calls may be in flight at once WITHIN
+   * one flow's round (see the worker-pool doc below). Defaults to 1, which
+   * reproduces the exact serial call order/timing the pre-#666 code had —
+   * every pre-existing test in `batch.test.ts` that asserts "stopped on the
+   * very first call" relies on this default. Production passes the
+   * scheduler's configured `dashboard.assessment_concurrency` instead.
+   */
+  concurrency?: number;
   /** Correlation id threaded into the flows' LLM calls / logs. */
   requestId?: string | null;
   /** Overridable seams (tests inject these; production uses the real defaults). */
@@ -233,6 +242,7 @@ export interface RunAssessmentBatchOptions {
 }
 
 const DEFAULT_BATCH_SIZE = 5;
+const DEFAULT_CONCURRENCY = 1;
 
 /**
  * Run one bounded assessment pass. Safe to call repeatedly and concurrently:
@@ -248,6 +258,7 @@ export async function runAssessmentBatch(
   opts: RunAssessmentBatchOptions = {},
 ): Promise<AssessmentBatchResult> {
   const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+  const concurrency = Math.max(1, Math.floor(opts.concurrency ?? DEFAULT_CONCURRENCY));
   const flows = opts.flows ?? DEFAULT_BATCH_FLOWS;
   const selectPropertyIds = opts.selectPropertyIds ?? selectPropertiesNeedingAssessment;
   const isCurrent = opts.isCurrent ?? isFlowCurrent;
@@ -346,77 +357,159 @@ export async function runAssessmentBatch(
   // the ONLY test that fails if this loop is reverted to property-major.
   const touchedProperties = new Set<number>();
 
-  for (const flow of flows) {
-    for (const propertyId of propertyIds) {
-      touchedProperties.add(propertyId);
-      result.properties = touchedProperties.size;
+  // #666 — CONCURRENCY, added on top of the flow-major structure above, not
+  // instead of it.
+  //
+  // Each flow's round still runs to completion (or a stop) before the NEXT
+  // flow starts — flow-major order is kept for two independent reasons, not
+  // just the Phase-3 batching prerequisite documented above:
+  //
+  //   1. It is what makes the "one bad property never turns into three
+  //      strikes in a single pass" (#666 exit criterion / D-104) trivially
+  //      true regardless of concurrency: the (flow, propertyId) task list
+  //      handed to a round is `propertyIds` for THAT flow — already a
+  //      deduplicated array with no retry-within-pass logic anywhere — so
+  //      each pair is attempted AT MOST ONCE per `runAssessmentBatch` call
+  //      no matter how many workers race to drain it. Concurrency changes
+  //      the ORDER work completes in, never the SET of work attempted.
+  //   2. D-103's CLI prompt cache keys on `--system-prompt`, which is
+  //      identical for every call within one flow's round and changes
+  //      between rounds. Grouping concurrent calls by flow (rather than
+  //      interleaving occupancy/condition/redflags/… calls across workers)
+  //      keeps every round hitting the SAME cached system prompt instead of
+  //      cold-starting it on every call — see docs/decisions/D-149 for the
+  //      measurement this is based on.
+  //
+  // WITHIN a flow's round, up to `concurrency` properties run in parallel via
+  // a small worker-pool (below), not `Promise.all` over the whole array —
+  // `concurrency` bounds how many `claude` CLI processes (D-106) and
+  // advisory-lock-holding DB connections (cache.ts's `withAdvisoryLock`,
+  // db-write.ts's pool — see D-149) are in flight at once, which is the
+  // actual ceiling, not the LLM API itself (measured, D-149).
+  //
+  // STOP semantics under concurrency (budget/quota/circuit): the FIRST
+  // stop-worthy error observed sets a round-local `stopReason` flag. Every
+  // worker checks that flag before pulling its NEXT item from the queue, so
+  // no NEW (flow, property) pair starts once a stop fires — but up to
+  // `concurrency - 1` OTHER calls already dispatched in the same round may
+  // still be in flight and are allowed to finish (not aborted; Node has no
+  // cheap `claude` process cancellation, and killing a call that already
+  // spent tokens buys nothing safety-wise). Those in-flight calls still
+  // update `result` normally (including, rarely, setting the SAME
+  // `stopReason` a second time via a same-typed error — harmless, first
+  // write wins). This is a bounded, documented widening of the pre-#666
+  // "stops on the very first call" guarantee — with the production default
+  // concurrency the widening is at most `dashboard.assessment_concurrency`
+  // extra calls, not the rest of the page.
+  const stopSignal: { reason: BatchStopReason | null } = { reason: null };
 
-      // EC-2: skip a flow whose verdict already matches the current prompt
-      // version — no listing load, no LLM call, no spend.
-      if (await isCurrent(propertyId, flow)) {
-        result.skipped += 1;
-        continue;
-      }
+  /** Process one (flow, propertyId) pair — the exact body the old loop had. */
+  async function runOne(flow: BatchFlow, propertyId: number): Promise<void> {
+    touchedProperties.add(propertyId);
+    result.properties = touchedProperties.size;
 
-      try {
-        await flow.assess(propertyId, { requestId, trendingCandidates, dismissedCandidates });
-        result.assessed += 1;
-      } catch (err) {
-        // EC-3: a budget/circuit stop is a CLEAN halt of the whole batch, not
-        // a crash. Return what we have so far so the caller logs and retries
-        // on the next tick (by which time the daily window may have reset or
-        // the breaker closed).
-        if (err instanceof BudgetExceededError) {
-          result.stopped = "budget";
+    // EC-2: skip a flow whose verdict already matches the current prompt
+    // version — no listing load, no LLM call, no spend.
+    if (await isCurrent(propertyId, flow)) {
+      result.skipped += 1;
+      return;
+    }
+
+    try {
+      await flow.assess(propertyId, { requestId, trendingCandidates, dismissedCandidates });
+      result.assessed += 1;
+    } catch (err) {
+      // EC-3: a budget/circuit stop is a CLEAN halt of the whole batch, not
+      // a crash. Record what we have so far so the caller logs and retries
+      // on the next tick (by which time the daily window may have reset or
+      // the breaker closed).
+      if (err instanceof BudgetExceededError) {
+        if (!stopSignal.reason) {
+          stopSignal.reason = "budget";
           console.warn(
             `[ai-assessment:batch] daily LLM budget exhausted at property=${propertyId} ` +
               `flow=${flow.type} — stopping this pass cleanly (assessed=${result.assessed}).`,
           );
-          return result;
         }
-        // D-107: the subscription quota cap is a clean halt of the WHOLE pass,
-        // exactly like a budget stop. Continuing would throw for every
-        // remaining property in the page to no purpose.
-        if (err instanceof LlmQuotaExceededError) {
-          result.stopped = "quota";
+        return;
+      }
+      // D-107: the subscription quota cap is a clean halt of the WHOLE pass,
+      // exactly like a budget stop. Continuing would throw for every
+      // remaining property in the page to no purpose.
+      if (err instanceof LlmQuotaExceededError) {
+        if (!stopSignal.reason) {
+          stopSignal.reason = "quota";
           console.warn(
             `[ai-assessment:batch] subscription quota cap reached at property=${propertyId} ` +
               `flow=${flow.type} (${err.pctUsed}% of the "${err.window}" window, ` +
               `limit ${err.threshold}%) — stopping this pass cleanly ` +
               `(assessed=${result.assessed}).`,
           );
-          return result;
         }
-        if (err instanceof CircuitBreakerOpenError) {
-          result.stopped = "circuit";
+        return;
+      }
+      if (err instanceof CircuitBreakerOpenError) {
+        if (!stopSignal.reason) {
+          stopSignal.reason = "circuit";
           console.warn(
             `[ai-assessment:batch] LLM circuit breaker open at property=${propertyId} ` +
               `flow=${flow.type} — stopping this pass cleanly (assessed=${result.assessed}).`,
           );
-          return result;
         }
-        // A property with no readable listings can't be assessed — skip it,
-        // never let it sink the batch. (Selection filters these out, so this
-        // is a race backstop.)
-        if (err instanceof NoListingsError) {
-          result.noListings += 1;
-          continue;
-        }
-        // Parked by the failure ledger — no LLM call was made, no money spent.
-        // Logged at info, not error: this is the cost guard working, and at
-        // one line per tick per parked flow it would otherwise drown the log.
-        if (err instanceof AssessmentParkedError) {
-          result.parked += 1;
-          continue;
-        }
-        // Any other per-property/flow failure (malformed model output, a
-        // transient DB blip): log and carry on with the next flow/property.
-        result.errors += 1;
-        console.error(
-          `[ai-assessment:batch] property=${propertyId} flow=${flow.type} failed:`,
-          err,
-        );
+        return;
       }
+      // A property with no readable listings can't be assessed — skip it,
+      // never let it sink the batch. (Selection filters these out, so this
+      // is a race backstop.)
+      if (err instanceof NoListingsError) {
+        result.noListings += 1;
+        return;
+      }
+      // Parked by the failure ledger — no LLM call was made, no money spent.
+      // Logged at info, not error: this is the cost guard working, and at
+      // one line per tick per parked flow it would otherwise drown the log.
+      if (err instanceof AssessmentParkedError) {
+        result.parked += 1;
+        return;
+      }
+      // Any other per-property/flow failure (malformed model output, a
+      // transient DB blip): log and carry on with the next flow/property.
+      result.errors += 1;
+      console.error(
+        `[ai-assessment:batch] property=${propertyId} flow=${flow.type} failed:`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Bounded worker pool over `propertyIds` for one flow. `concurrency`
+   * workers each pull the next unclaimed index (a plain `let` increment —
+   * safe because JS only interleaves at `await` points, so two workers can
+   * never read-then-increment the same index) and stop early once
+   * `stopSignal.reason` is set, WITHOUT starting a new pair. `Promise.all`
+   * only resolves once every worker has stopped — i.e. once every pair
+   * dispatched before the stop was observed has actually finished.
+   */
+  async function runFlowRound(flow: BatchFlow): Promise<void> {
+    let nextIndex = 0;
+    async function worker(): Promise<void> {
+      for (;;) {
+        if (stopSignal.reason) return;
+        const i = nextIndex++;
+        if (i >= propertyIds.length) return;
+        await runOne(flow, propertyIds[i]);
+      }
+    }
+    const workerCount = Math.min(concurrency, propertyIds.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  }
+
+  for (const flow of flows) {
+    await runFlowRound(flow);
+    if (stopSignal.reason) {
+      result.stopped = stopSignal.reason;
+      return result;
     }
   }
 

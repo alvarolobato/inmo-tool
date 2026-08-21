@@ -16,6 +16,8 @@ vi.mock("@/lib/ai-assessment/scheduler", () => ({
     enabled: true,
     batchSize: 5,
     intervalSeconds: 900,
+    concurrency: 4,
+    drainIntervalSeconds: 5,
   })),
 }));
 vi.mock("@/lib/system-config/loader", () => ({
@@ -144,8 +146,8 @@ describe("getLlmHealth", () => {
     expect(r.coverage.covered).toBe(60);
     expect(r.coverage.coverage_fraction).toBeCloseTo(0.6, 6);
     expect(r.coverage.projected_ticks).toBe(8);
-    // (8-1) ticks * 900s = 6300
-    expect(r.coverage.projected_seconds).toBe(6300);
+    // (8-1) ticks * 5s (the #666 drain interval, not the idle interval) = 35
+    expect(r.coverage.projected_seconds).toBe(35);
     // Only 'occupancy' is an assessment endpoint. Assessment share of 7d tokens
     // = 20000 / (20000+6000) = 0.769...; assessment € = 21 * that; per property
     // = / 8. Just assert it's a positive projection derived from that.

@@ -535,9 +535,9 @@
   env: DASHBOARD_ASSESSMENT_BATCH_SIZE
   type: int
   sensitive: false
-  default: 5
+  default: 8
   section: "Evaluación IA"
-  description: "Número máximo de inmuebles procesados por tick del pase de evaluación IA (los más antiguos sin veredicto actual primero). Acota el gasto LLM por ciclo; no es un backfill de todo el histórico de golpe. Debe ser positivo."
+  description: "Número máximo de inmuebles procesados por tick del pase de evaluación IA (los más antiguos sin veredicto actual primero). Acota el trabajo por ciclo; no es un backfill de todo el histórico de golpe. Igualado a dashboard.assessment_concurrency por defecto a propósito (#666/D-149): una ronda de un eje solo reparte como mucho este número de inmuebles, así que un valor menor aquí capa en silencio la concurrencia configurada. Debe ser positivo."
   requires_restart: [dashboard]
   components: [dashboard]
 
@@ -557,7 +557,27 @@
   sensitive: false
   default: 900
   section: "Evaluación IA"
-  description: "Cadencia (segundos) del pase de evaluación IA. Por defecto 15 min: suficiente para que un inmueble recién ingerido reciba sus veredictos dentro de una ventana acotada sin martillear el LLM. Debe ser positivo."
+  description: "Cadencia OCIOSA (segundos) del pase de evaluación IA: se usa para el primer tick tras arrancar y siempre que un tick encuentra la cola vacía o se detiene por presupuesto/circuito/cuota (#666). Mientras haya cola pendiente, los ticks se encadenan cada dashboard.assessment_drain_interval_seconds en su lugar — ver esa clave. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: dashboard.assessment_concurrency
+  env: DASHBOARD_ASSESSMENT_CONCURRENCY
+  type: int
+  sensitive: false
+  default: 8
+  section: "Evaluación IA"
+  description: "Nº de llamadas (inmueble, eje) en paralelo DENTRO de la ronda de un mismo eje del pase de evaluación IA (#666) — nunca se entrelazan ejes distintos, para no enfriar la caché de --system-prompt del CLI (D-103). Cuenta procesos `claude` simultáneos (D-106) y conexiones del pool de escritura que la #30 advisory-lock mantiene abiertas durante toda la llamada al LLM (D-149) — no la API, que en medición aguanta mucha más concurrencia. Fijado a un máximo de 8 sin importar el valor configurado; medido (D-149) contra el backend real: ~5x más rápido en pared de reloj a concurrencia 8 frente a serie, con ganancia marginal ya a 10 — de ahí tope y valor por defecto iguales."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: dashboard.assessment_drain_interval_seconds
+  env: DASHBOARD_ASSESSMENT_DRAIN_INTERVAL_SECONDS
+  type: int
+  sensitive: false
+  default: 5
+  section: "Evaluación IA"
+  description: "Cadencia (segundos) entre ticks del pase de evaluación IA MIENTRAS un tick acaba de tocar una página completa (dashboard.assessment_batch_size inmuebles) — señal de que probablemente queda cola detrás (#666). Un tick por debajo de una página completa, o que se detiene por presupuesto/circuito/cuota, vuelve a la cadencia ociosa (dashboard.assessment_interval_seconds) en su lugar. Debe ser positivo."
   requires_restart: [dashboard]
   components: [dashboard]
 

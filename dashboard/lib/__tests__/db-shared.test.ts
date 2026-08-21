@@ -40,11 +40,14 @@ describe("buildPgPoolConfig", () => {
     expect(cfg.max).toBe(5);
   });
 
-  it("read pool uses max:10 and write pool uses max:5", () => {
+  it("passes the caller's max through unchanged — db.ts/db-write.ts each own their own literal", () => {
+    // This is a pure-function test of buildPgPoolConfig itself, not an
+    // assertion about what db.ts/db-write.ts actually pass — see #666/D-149
+    // for why db-write.ts's own `max` is 12, not 5.
     const readCfg = buildPgPoolConfig({ max: 10 });
-    const writeCfg = buildPgPoolConfig({ max: 5 });
+    const writeCfg = buildPgPoolConfig({ max: 12 });
     expect(readCfg.max).toBe(10);
-    expect(writeCfg.max).toBe(5);
+    expect(writeCfg.max).toBe(12);
   });
 
   it("applies statement_timeout and connectionTimeoutMillis", () => {

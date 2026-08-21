@@ -42,7 +42,15 @@ let _pool: Pool | null = null;
 
 export function getPool(): Pool {
   if (!_pool) {
-    _pool = new Pool(buildPgPoolConfig({ max: 5 }));
+    // #666/D-149: `cache.ts`'s `withAdvisoryLock` (the #30 stampede guard)
+    // holds a DEDICATED connection from this pool for the ENTIRE duration of
+    // an assessment call, including the real network LLM round trip. `max`
+    // must therefore stay comfortably above `dashboard.assessment_concurrency`'s
+    // hard cap (8) or the pool itself silently caps concurrent assessment
+    // throughput below whatever is configured — with no error, just
+    // quietly-worse-than-configured. 12 = hard cap + headroom for the pool's
+    // other callers (dashboard CRUD writes, failure-ledger reads/writes).
+    _pool = new Pool(buildPgPoolConfig({ max: 12 }));
   }
   return _pool;
 }
