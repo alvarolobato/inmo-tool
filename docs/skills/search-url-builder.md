@@ -45,6 +45,42 @@ API route: `GET /api/profiles/[id]/search-urls` → `{ profileId, name, tasks }`
 > "Abrir búsqueda" button per task) as an interim; a dedicated task-driven UI
 > (per-task last-run tracking) is a separate issue.
 
+## Reviewing captured/observed search URLs — SQL, not a page (#653)
+
+`/admin/captured-urls` (issue #475/#488, part of #471) was deleted outright in
+#653: production had only 2 `captured_search_urls` rows (last written
+2026-08-09) and 152 `observed_search_urls` rows — a developer decode aid for
+URL-grammar work, not an operator surface anyone was checking. The write paths
+are untouched (`POST /api/captured-search-urls`, the extension's passive
+observer → `POST /api/observed-search-urls`, D-051's capture-to-infer
+machinery) — only the browsing page is gone. When decoding a portal's grammar
+(the workflow #471/#514 needed that page for), query the tables directly:
+
+```bash
+ps prod psql app "$POSTGRES_DB" <<'SQL'
+-- Deliberate captures ("Capturar URL de búsqueda"), newest first, verbatim
+-- (shape= and all).
+SELECT id, portal, url, title, captured_at
+FROM captured_search_urls
+ORDER BY captured_at DESC, id DESC
+LIMIT 50;
+
+-- Passively-observed search/results pages, most-recently-seen first — a
+-- re-observation UPSERTs (seen_count, last_seen), so this is naturally
+-- deduped to one row per distinct search.
+SELECT id, portal, url, title, seen_count, first_seen, last_seen
+FROM observed_search_urls
+ORDER BY last_seen DESC
+LIMIT 50;
+SQL
+```
+
+Filter either query with `WHERE portal = '<portal>'` or `WHERE url LIKE
+'%<fragment>%'` the same way the old page's portal chips / filter box did.
+Both tables and their schemas are unchanged — see `etl/schema/init.sql`
+(`captured_search_urls`, `observed_search_urls`) for full column docs,
+including the `norm_key` de-dup key on the observed table.
+
 ## Precedence: the builder is tier 3 — an owner pin wins (tier 0, D-051/D-101)
 
 The `build()` in this module is the **bottom** of a precedence stack that

@@ -1,6 +1,23 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+/**
+ * "Consultas lentas (pg_stat_statements)" — collapsed disclosure on `/admin/llm`
+ * (issue #653/#636 Fase 0 borrado).
+ *
+ * Previously its own page (`/admin/slow-queries`, client-fetched from
+ * `/api/admin/slow-queries`). Both the page and the API route die: the query
+ * (`fetchSlowQueries()`, `lib/admin-slow-queries.ts` — already written to be
+ * "the shared implementation for GET /api/admin/slow-queries and the admin
+ * HTML page") now runs once, inline, in the `/admin/llm` server component, and
+ * its result is handed down as a prop. No client round-trip, no route to keep
+ * alive just for this one caller.
+ *
+ * Collapsed by default (the LLM page leads with usage + cost; this is a
+ * disclosure for when something needs investigating) — same toggle pattern as
+ * the nested "¿Cómo actuar?" guidance panel.
+ */
+
+import { useState, useMemo, useCallback, useRef } from "react";
 import Prism from "prismjs";
 import "prismjs/components/prism-sql";
 import { formatPgQueryText } from "@/lib/format-pg-query";
@@ -21,7 +38,7 @@ interface SlowQuery {
   origin?: QueryOrigin;
 }
 
-interface SlowQueriesData {
+export interface SlowQueriesData {
   queries: SlowQuery[];
   error?: string;
 }
@@ -166,30 +183,14 @@ function GuidancePanel() {
   );
 }
 
-export default function AdminSlowQueriesPage() {
-  const [data, setData] = useState<SlowQueriesData | null>(null);
+export function SlowQueriesPanel({ data }: { data: SlowQueriesData }) {
+  const [panelOpen, setPanelOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [sortKey, setSortKey] = useState<SortKey>("mean_exec_time_ms");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [filter, setFilter] = useState("");
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [debouncedFilter, setDebouncedFilter] = useState("");
-
-  useEffect(() => {
-    void fetch("/api/admin/slow-queries")
-      .then((r) => r.json())
-      .then((d) => setData(d as SlowQueriesData))
-      .catch((e) =>
-        setData({ queries: [], error: e instanceof Error ? e.message : "Error" }),
-      );
-  }, []);
-
-  // Cleanup debounce timer on unmount
-  useEffect(() => {
-    return () => {
-      if (filterTimerRef.current !== null) clearTimeout(filterTimerRef.current);
-    };
-  }, []);
 
   // Debounce filter input — 150 ms
   const handleFilterChange = useCallback((value: string) => {
@@ -200,7 +201,6 @@ export default function AdminSlowQueriesPage() {
 
   // Memoised formatted + highlighted SQL per query
   const formattedQueries = useMemo(() => {
-    if (!data) return [];
     return data.queries.map((q) => {
       const formatted = formatPgQueryText(q.query);
       return {
@@ -230,7 +230,6 @@ export default function AdminSlowQueriesPage() {
 
   // Filter + sort (client-side)
   const displayRows = useMemo(() => {
-    if (!data) return [];
     const lf = debouncedFilter.toLowerCase();
     const filtered = data.queries
       .map((q, i) => ({ q, i }))
@@ -245,7 +244,7 @@ export default function AdminSlowQueriesPage() {
     });
   }, [data, debouncedFilter, sortKey, sortDir]);
 
-  const totalCount = data?.queries.length ?? 0;
+  const totalCount = data.queries.length;
   const filteredCount = displayRows.length;
 
   const columns: Array<{ label: string; key?: SortKey; align: "left" | "right" }> = [
@@ -259,42 +258,64 @@ export default function AdminSlowQueriesPage() {
   ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <h1
+    <section
+      data-testid="admin-llm-slow-queries"
+      style={{ borderRadius: 8, border: "1px solid var(--border)", overflow: "hidden" }}
+    >
+      <button
+        type="button"
+        onClick={() => setPanelOpen((v) => !v)}
+        data-testid="slow-queries-disclosure-toggle"
         style={{
-          fontSize: 17,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          padding: "12px 16px",
+          background: "var(--bg-2)",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "var(--font-inter, sans-serif)",
+          fontSize: 14,
           fontWeight: 600,
           color: "var(--fg)",
-          margin: 0,
+          textAlign: "left",
         }}
+        aria-expanded={panelOpen}
       >
+        <span style={{ fontSize: 11, opacity: 0.7 }}>{panelOpen ? "▼" : "▶"}</span>
         Consultas lentas (pg_stat_statements)
-      </h1>
-
-      {/* Guidance panel */}
-      <GuidancePanel />
-
-      {data?.error && (
-        <p
+        <span
           style={{
-            borderRadius: 6,
-            border: "1px solid var(--warn)",
-            background: "var(--warn-bg, rgba(245,158,11,0.08))",
-            padding: "8px 12px",
-            fontSize: 13,
-            color: "var(--warn)",
+            marginLeft: "auto",
+            fontSize: 11,
+            fontWeight: 400,
+            color: "var(--fg-muted)",
           }}
         >
-          {data.error}
-        </p>
-      )}
+          {totalCount} consultas
+        </span>
+      </button>
 
-      {!data && (
-        <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
-      )}
+      {panelOpen && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16 }}>
+          <GuidancePanel />
 
-      {data && (
-        <>
+          {data.error && (
+            <p
+              style={{
+                borderRadius: 6,
+                border: "1px solid var(--warn)",
+                background: "var(--warn-bg, rgba(245,158,11,0.08))",
+                padding: "8px 12px",
+                fontSize: 13,
+                color: "var(--warn)",
+              }}
+            >
+              {data.error}
+            </p>
+          )}
+
           {/* Filter row */}
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
@@ -524,8 +545,8 @@ export default function AdminSlowQueriesPage() {
               </tbody>
             </table>
           </div>
-        </>
+        </div>
       )}
-    </div>
+    </section>
   );
 }

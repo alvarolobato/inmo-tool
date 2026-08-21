@@ -1,21 +1,29 @@
 /**
- * E2E: admin IA consolidation (issue #508), D-041.
+ * E2E: admin IA consolidation (issue #508), extended by #653/#636 Fase 0
+ * borrado, D-041.
  *
  * Drives a real Next.js server against a real Postgres. Asserts the admin strip
  * is rendered from the single shared nav source (lib/admin-nav.ts):
  *
  *   - the strip shows the consolidated, renamed tab set (Captura (admin),
- *     Clasificación, Duplicados, LLM) and no longer the four separate LLM tabs
- *     or the old "Candidatos" label;
- *   - `/admin/candidatos` 301-redirects to `/admin/clasificacion` and the
- *     vocabulary review renders (with its manual-promotion note);
+ *     Clasificación, Duplicados, LLM) and no longer the four separate LLM tabs,
+ *     "URLs capturadas", or the old "Candidatos" label;
+ *   - `/admin/candidatos`, `/admin/interactions`, `/admin/tool-calls` and
+ *     `/admin/captured-urls` are gone outright (404) — no replacement, per
+ *     #653 (0 rows ever in the tables they viewed, or a redirect stub nothing
+ *     linked to any more);
+ *   - `/admin/usage` and `/admin/slow-queries` are NOT the same case: their
+ *     data is live, so `/admin/usage` permanently redirects to `/admin/llm`
+ *     and the redirect TARGET is asserted to actually render (not just that
+ *     the old path is gone — a redirect nobody tests is a 404 waiting to
+ *     happen), while `/admin/slow-queries` folds into that same page as a
+ *     disclosure with no route of its own;
  *   - Duplicados is reachable from the strip;
- *   - visiting an LLM sub-route (`/admin/usage`) highlights the single LLM tab;
  *   - no error surface anywhere (the D-041 bar).
  *
  * Extensión (#509) and Descubrimiento (#511) have now been removed — their
  * function moved to inline CTAs / Salud de datos. The strip is down to its
- * intended 9-tab set, asserted here.
+ * intended 8-tab set, asserted here.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -26,13 +34,12 @@ import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 // The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
-// were removed by #509 / #511.
+// were removed by #509 / #511; "URLs capturadas" was deleted outright by #653.
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
   "Conectores",
   "Captura (admin)",
   "Salud de datos",
-  "URLs capturadas",
   "Clasificación",
   "Duplicados",
   "LLM",
@@ -47,6 +54,7 @@ const REMOVED_STRIP_LABELS = [
   "Herramientas LLM",
   "Uso LLM",
   "Interacciones",
+  "URLs capturadas",
   // Removed by #509 / #511.
   "Extensión",
   "Descubrimiento",
@@ -116,22 +124,40 @@ test("EC-1: /admin index cards match the strip (single source, no drift)", async
   }
 });
 
-test("EC-2: /admin/candidatos redirects to /admin/clasificacion with the review", async ({
+test("EC-2: /admin/candidatos is gone outright (404, no redirect)", async ({ page }) => {
+  // #653: the old #508 redirect stub (`/admin/candidatos` → `/admin/clasificacion`)
+  // was deleted — its own header said "delete once no external link points
+  // here", and the strip already links straight to `/admin/clasificacion`.
+  const res = await page.goto("/admin/candidatos");
+  expect(res?.status()).toBe(404);
+});
+
+test("EC-2: /admin/interactions, /admin/tool-calls and /admin/captured-urls are gone (404)", async ({
   page,
 }) => {
-  await page.goto("/admin/candidatos");
-  await expect(page).toHaveURL(/\/admin\/clasificacion$/);
-  await expect(page.getByTestId("clasificacion-page")).toBeVisible();
-  // The manual-promotion note is the page's distinctive content.
-  await expect(page.getByText(/La promoción es manual/)).toBeVisible();
+  // #653: 0 rows ever in llm_interactions / llm_tool_calls, and
+  // captured_search_urls is a developer decode aid consulted by SQL now
+  // (see docs/skills/search-url-builder.md) — no replacement page for any of
+  // the three.
+  for (const path of ["/admin/interactions", "/admin/tool-calls", "/admin/captured-urls"]) {
+    const res = await page.goto(path);
+    expect(res?.status(), `${path} should 404`).toBe(404);
+  }
+});
 
-  // D-041 bar.
+test("EC-2: /admin/usage permanently redirects to /admin/llm, which renders", async ({ page }) => {
+  // Asserting the redirect TARGET renders is the point — a redirect nobody
+  // tests is a 404 waiting to happen. `llm_usage` is live (17,391 rows as of
+  // 2026-08-21), so this is a redirect, not a 404 (unlike interactions/
+  // tool-calls/captured-urls above).
+  const res = await page.goto("/admin/usage");
+  await expect(page).toHaveURL(/\/admin\/llm$/);
+  // Next's `permanentRedirect()` issues a 308; Playwright's `res` reflects the
+  // FINAL response after following it, which is a normal 200 page render.
+  expect(res?.status()).toBe(200);
+  await expect(page.getByTestId("admin-llm-page")).toBeVisible();
+
   await expect(page.getByTestId("error-display")).toHaveCount(0);
-  const body = page.locator("body");
-  await expect(body).not.toContainText("Detalles técnicos");
-  await expect(body).not.toContainText("there is no parameter");
-  await expect(body).not.toContainText("HTTP 500");
-  await expect(body).not.toContainText("Error al cargar");
 });
 
 test("EC-3: Duplicados is reachable from the strip", async ({ page }) => {
@@ -144,22 +170,28 @@ test("EC-3: Duplicados is reachable from the strip", async ({ page }) => {
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
-test("LLM landing groups the four diagnostics and the strip highlights it on sub-routes", async ({
+test("the consolidated LLM page renders usage, cost/coverage and the slow-queries disclosure", async ({
   page,
 }) => {
   await page.goto("/admin/llm");
   await expect(page.getByTestId("admin-llm-page")).toBeVisible();
-  // Landing links to the four existing routes.
-  for (const href of [
-    "/admin/slow-queries",
-    "/admin/tool-calls",
-    "/admin/usage",
-    "/admin/interactions",
-  ]) {
-    await expect(page.locator(`a[href="${href}"]`).first()).toBeVisible();
-  }
 
-  // Visiting a sub-route highlights the single LLM tab (aria-current="page").
+  // Usage content (formerly `/admin/usage`) leads the page.
+  await expect(page.getByText("Configuración efectiva")).toBeVisible();
+
+  // Cost/coverage panel (formerly on "Salud de datos") is present.
+  await expect(page.getByTestId("llm-health")).toBeVisible();
+
+  // Slow-queries disclosure (formerly `/admin/slow-queries`) is present,
+  // collapsed by default, and opens on click.
+  const slowQueries = page.getByTestId("admin-llm-slow-queries");
+  await expect(slowQueries).toBeVisible();
+  const toggle = page.getByTestId("slow-queries-disclosure-toggle");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  // Visiting /admin/usage highlights the single LLM tab (aria-current="page").
   await page.goto("/admin/usage");
   const llmTab = strip(page).getByRole("link", { name: "LLM", exact: true });
   await expect(llmTab).toHaveAttribute("aria-current", "page");

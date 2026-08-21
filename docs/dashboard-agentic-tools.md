@@ -64,7 +64,7 @@ Available to the `chat` flow only (`CHAT_TOOLS`); assessment flows get none.
 
 - Table: `llm_tool_calls` (see `etl/schema/init.sql`).
 - Fields include `tool_name`, `endpoint`, `request_id`, `status`, `latency_ms`, payload sizes, optional `error_code`, plus **`llm_provider`** and **`llm_driver`** (e.g. `cli` / `claude_code`).
-- **Admin API**: `GET /api/admin/tool-calls` (same auth as other admin routes) returns rolling **30-day** aggregates by endpoint, tool, and status.
+- **Aggregation**: `fetchToolCallAggregates()` (`dashboard/lib/llm-tools/logging.ts`) computes rolling **30-day** aggregates by endpoint, tool, and status. Its own admin page (`/admin/tool-calls`) and API route (`GET /api/admin/tool-calls`) were deleted in #653 — `llm_tool_calls` had 0 rows ever in production as of 2026-08-21, so the viewer had nothing to show. The write path (this telemetry table) and `fetchToolCallAggregates()` itself are untouched; only the read-only viewer is gone.
 
 ## Analyze flow and `dashboardId`
 

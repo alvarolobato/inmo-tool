@@ -39,12 +39,12 @@ function makeRequest(
 
 describe("middleware — admin UI gating", () => {
   describe("when ADMIN_API_KEY is set", () => {
-    it("redirects unauthenticated /admin/slow-queries to login with redirect param", () => {
-      const res = middleware(makeRequest("/admin/slow-queries"));
+    it("redirects unauthenticated /admin/config to login with redirect param", () => {
+      const res = middleware(makeRequest("/admin/config"));
       expect(res.status).toBe(307);
       const location = res.headers.get("location")!;
       expect(location).toContain("/admin/login");
-      expect(location).toContain("redirect=%2Fadmin%2Fslow-queries");
+      expect(location).toContain("redirect=%2Fadmin%2Fconfig");
     });
 
     it("redirects unauthenticated /etl to login with redirect=%2Fetl", () => {
@@ -76,8 +76,8 @@ describe("middleware — admin UI gating", () => {
       expect(res.headers.get("location")).toBeNull();
     });
 
-    it("allows authenticated requests to /admin/slow-queries to pass through", () => {
-      const res = middleware(makeRequest("/admin/slow-queries", { cookie: ADMIN_KEY }));
+    it("allows authenticated requests to /admin/config to pass through", () => {
+      const res = middleware(makeRequest("/admin/config", { cookie: ADMIN_KEY }));
       expect(res.headers.get("location")).toBeNull();
     });
 
@@ -90,7 +90,11 @@ describe("middleware — admin UI gating", () => {
       expect(res.headers.get("location")).toContain("/admin/login");
     });
 
-    it("redirects unauthenticated /admin/candidatos (legacy redirect stub) to login", () => {
+    // #653: /admin/candidatos was deleted outright (no page at all) — the
+    // middleware matcher gates by PATH PREFIX, not by whether a route exists,
+    // so an unauthenticated request to a since-deleted admin path must still
+    // redirect to login (never fall through to Next's 404 unauthenticated).
+    it("redirects unauthenticated /admin/candidatos (deleted route) to login", () => {
       const res = middleware(makeRequest("/admin/candidatos"));
       expect(res.status).toBe(307);
       expect(res.headers.get("location")).toContain("/admin/login");
@@ -213,12 +217,12 @@ describe("middleware — admin UI gating", () => {
       expect(res.status).toBe(503);
     });
 
-    it("redirects /admin/slow-queries to login with error=2 and redirect param", () => {
-      const res = middleware(makeRequest("/admin/slow-queries"));
+    it("redirects /admin/llm to login with error=2 and redirect param", () => {
+      const res = middleware(makeRequest("/admin/llm"));
       expect(res.status).toBe(307);
       const location = res.headers.get("location")!;
       expect(location).toContain("error=2");
-      expect(location).toContain("redirect=%2Fadmin%2Fslow-queries");
+      expect(location).toContain("redirect=%2Fadmin%2Fllm");
     });
 
     it("redirects /etl to login with error=2 and redirect=%2Fetl", () => {

@@ -1,6 +1,8 @@
 /**
- * Shared CSS class helper for rendering InteractionLine entries consistently
- * across DashboardGenerateProgressDialog, ChatSidebar, and admin detail pages.
+ * Shared CSS class helper for rendering InteractionLine entries consistently.
+ * The admin `/admin/interactions/[request_id]` detail page that used to be
+ * this helper's other caller was deleted outright in #653 (`llm_interactions`
+ * had 0 rows ever in production); `DashboardGenerateProgressDialog` remains.
  */
 import type { InteractionLine } from "@/lib/db-write";
 

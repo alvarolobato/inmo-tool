@@ -27,7 +27,8 @@ export interface AdminNavItem {
   description: string;
   /**
    * Extra path prefixes (besides `href`) that should mark this entry active.
-   * Used by the consolidated "LLM" landing, which groups four sub-routes.
+   * Used by the consolidated "LLM" page, which also owns `/admin/usage`
+   * (a permanent redirect here — see `app/admin/usage/page.tsx`).
    */
   matchPrefixes?: readonly string[];
 }
@@ -63,16 +64,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Salud de la captura y el ETL: capturas atascadas, fallos de conectores, calidad de extracción y perfiles obsoletos.",
   },
-  // Captured Idealista search URLs (#475, part of #471).
-  {
-    href: "/admin/captured-urls",
-    label: "URLs capturadas",
-    description:
-      "URLs de búsqueda capturadas por la extensión (incluida la zona dibujada) para decodificar.",
-  },
   // Redflag-vocabulary review (#399, Fase 8 of #385). Renamed from "Candidatos"
-  // (which collided with property candidates) to "Clasificación"; old route
-  // `/admin/candidatos` 301s here.
+  // (which collided with property candidates) to "Clasificación". The old
+  // `/admin/candidatos` redirect stub was deleted outright in #653 (its own
+  // header said "delete once no external link points here" — the strip
+  // linked straight to `/admin/clasificacion` already, so nothing does now).
   {
     href: "/admin/clasificacion",
     label: "Clasificación",
@@ -87,53 +83,24 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Cola de sugerencias de fusión de propiedades pendientes de confirmar o rechazar.",
   },
-  // Consolidated LLM landing (#508): the four LLM diagnostics tabs (Consultas
-  // lentas, Herramientas LLM, Uso LLM, Interacciones) collapse into one entry
-  // whose landing links to each. The strip highlights it on any of them.
+  // Consolidated LLM page (#508, further unified in #653/#636 Fase 0 borrado):
+  // usage, cost/coverage and slow-queries all live on this one page now.
+  // "Herramientas LLM" (`llm_tool_calls`) and "Interacciones" (`llm_interactions`)
+  // were deleted outright — both tables have 0 rows ever in production. Only
+  // `/admin/usage` survives as a redirect (its data, `llm_usage`, is live);
+  // `/admin/slow-queries` is gone (its content is a collapsed disclosure here).
   {
     href: "/admin/llm",
     label: "LLM",
     description:
-      "Diagnóstico del modelo de lenguaje: consultas lentas, uso de herramientas, tokens/coste e historial de interacciones.",
-    matchPrefixes: [
-      "/admin/slow-queries",
-      "/admin/tool-calls",
-      "/admin/usage",
-      "/admin/interactions",
-    ],
+      "Uso del modelo (tokens/coste), coste y cobertura de evaluación IA, y consultas SQL lentas.",
+    matchPrefixes: ["/admin/usage"],
   },
   {
     href: "/admin/config",
     label: "Configuración",
     description:
       "Ver y editar la configuración del sistema (config.yaml) desde el navegador.",
-  },
-];
-
-/**
- * The sub-pages grouped under the consolidated "LLM" landing, in display order.
- * Exported so the landing page and its tests share one list with the nav.
- */
-export const ADMIN_LLM_SUBPAGES: readonly { href: string; label: string; description: string }[] = [
-  {
-    href: "/admin/slow-queries",
-    label: "Consultas lentas",
-    description: "Consultas SQL lentas registradas en los últimos días.",
-  },
-  {
-    href: "/admin/tool-calls",
-    label: "Herramientas LLM",
-    description: "Uso de herramientas agénticas del modelo de lenguaje.",
-  },
-  {
-    href: "/admin/usage",
-    label: "Uso LLM",
-    description: "Tokens consumidos y coste estimado por proveedor y función.",
-  },
-  {
-    href: "/admin/interactions",
-    label: "Interacciones LLM",
-    description: "Historial de interacciones generate/modify/analyze con logs de herramientas.",
   },
 ];
 
