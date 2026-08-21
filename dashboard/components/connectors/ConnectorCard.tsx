@@ -58,7 +58,14 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
+// minHeight 44 (issue #642 review): this card is now the primary control
+// surface on the Fuentes detail page (defaultExpanded, not tucked behind a
+// disclosure) — the same class of 35-38px tap target #656 found in
+// moved-verbatim markup, caught here before relocating rather than after.
 const buttonStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 44,
   padding: "6px 12px",
   borderRadius: 6,
   border: "1px solid var(--border)",
@@ -366,18 +373,28 @@ export function ConnectorCard({
   connector,
   onPatch,
   onRunFinished,
+  defaultExpanded = false,
 }: {
   connector: ConnectorView;
   onPatch: (name: string, patch: ConnectorConfigPatch) => Promise<void>;
   /** Called after an ad-hoc "Ejecutar ahora" run finishes, so the parent can
    * refresh the last-run summary (issue #244). */
   onRunFinished?: () => void;
+  /**
+   * Starts expanded (issue #642 P1): the Fuentes detail page
+   * (`app/admin/fuentes/[name]/page.tsx`) shows exactly one connector, so
+   * hiding its own configuration behind a click would just be a wasted tap.
+   * The list page (`app/admin/fuentes/page.tsx`) still renders every card
+   * collapsed by default (issue #264's original browsability rationale, now
+   * scoped to the list rather than a single-source page).
+   */
+  defaultExpanded?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   // Collapsed by default: the list must be browsable at a glance, so full
   // config/scope/last-run detail is hidden until the operator expands a row
-  // (issue #264).
-  const [expanded, setExpanded] = useState(false);
+  // (issue #264). A single-source detail page opts into starting expanded.
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [editingScope, setEditingScope] = useState(false);
   const [draftScope, setDraftScope] = useState<LocationPickerValue>(() => ({
     center: connector.geography_override?.center ?? [40.4168, -3.7038],

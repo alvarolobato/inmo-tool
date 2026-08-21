@@ -301,12 +301,14 @@ export function ConnectorSection({
                 ? `${connector.capturedProfile} propiedad${connector.capturedProfile === 1 ? "" : "es"} de este perfil capturada${connector.capturedProfile === 1 ? "" : "s"}`
                 : "sin capturas de este perfil todavía"}
             </span>
-            {/* Queue deep-link (#512, EC-3): jump to the admin ledger filtered to
-                this portal's pending rows. No count is shown — this page stays
-                profile-scoped with NO portal-global numbers (#445); the global
-                queue figures live only on the ledger. */}
+            {/* Queue deep-link (#512, EC-3): jump to this portal's Fuentes
+                detail page, filtered to its pending rows (issue #642 P1 —
+                the admin ledger merged into /admin/fuentes/[name]). No count
+                is shown — this page stays profile-scoped with NO
+                portal-global numbers (#445); the global queue figures live
+                only on the ledger. */}
             <Link
-              href={`/etl/captura?portal=${encodeURIComponent(connector.portal)}&status=pending`}
+              href={`/admin/fuentes/${encodeURIComponent(connector.portal)}?status=pending`}
               data-testid={`captura-queue-link-${profileId}-${connector.portal}`}
               style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}
             >

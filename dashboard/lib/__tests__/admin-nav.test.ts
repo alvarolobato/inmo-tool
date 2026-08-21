@@ -27,7 +27,8 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
 
     // Renames.
     expect(byHref.get("/admin/clasificacion")?.label).toBe("Clasificación");
-    expect(byHref.get("/etl/captura")?.label).toBe("Captura (admin)");
+    // #642 P1: "Conectores" + "Captura (admin)" merged into "Fuentes".
+    expect(byHref.get("/admin/fuentes")?.label).toBe("Fuentes");
 
     // Duplicados now on the strip.
     expect(byHref.get("/admin/dedup")?.label).toBe("Duplicados");
@@ -35,13 +36,17 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
     // Old / deleted routes are gone from the nav: the #508 candidatos stub
     // (deleted outright by #653), the two 0-row LLM surfaces (deleted
     // outright), the standalone slow-queries page (folded into /admin/llm),
-    // and the captured-urls dev decode page (deleted outright).
+    // the captured-urls dev decode page (deleted outright), and the two
+    // merged-into-Fuentes tabs (#642 P1 — both routes still resolve, via a
+    // 301, just off the nav strip).
     for (const href of [
       "/admin/candidatos",
       "/admin/interactions",
       "/admin/tool-calls",
       "/admin/slow-queries",
       "/admin/captured-urls",
+      "/etl/connectors",
+      "/etl/captura",
     ]) {
       expect(byHref.has(href)).toBe(false);
     }
@@ -82,10 +87,19 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
 describe("activeAdminHref — longest-prefix match", () => {
   const cases: Array<[string, string | null]> = [
     ["/etl", "/etl"],
-    // A deeper /etl/* route must NOT also light up Monitor ETL.
-    ["/etl/connectors", "/etl/connectors"],
-    ["/etl/connectors/fotocasa", "/etl/connectors"],
-    ["/etl/captura", "/etl/captura"],
+    // #642 P1: /etl/connectors and /etl/captura are deleted outright (no
+    // page.tsx — a config-level 301 to Fuentes in next.config.js, so these
+    // pathnames are never actually rendered in practice) — no nav item of
+    // their OWN owns them any more. `activeAdminHref` is pure string
+    // matching though, so as sub-paths of `/etl` they now fall through to
+    // Monitor ETL's own prefix, same longest-prefix logic that used to give
+    // /etl/connectors its own nav item precedence over Monitor ETL. A
+    // deeper /admin/fuentes/* route DOES light up Fuentes (the new
+    // per-source detail page).
+    ["/etl/connectors", "/etl"],
+    ["/admin/fuentes", "/admin/fuentes"],
+    ["/admin/fuentes/fotocasa", "/admin/fuentes"],
+    ["/etl/captura", "/etl"],
     ["/admin/clasificacion", "/admin/clasificacion"],
     ["/admin/dedup", "/admin/dedup"],
     // /admin/usage (a permanent redirect to /admin/llm) highlights the LLM

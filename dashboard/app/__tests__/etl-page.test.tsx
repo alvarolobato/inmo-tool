@@ -354,7 +354,7 @@ describe("EtlMonitorPage", () => {
 
     expect(
       screen.getByRole("link", { name: /Gestionar conectores/ }),
-    ).toHaveAttribute("href", "/etl/connectors");
+    ).toHaveAttribute("href", "/admin/fuentes");
   });
 
   // ── 10. Funnel KPIs replace the old row-count/watermark ones ──────────────

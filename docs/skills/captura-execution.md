@@ -1,7 +1,7 @@
 # Captura — task-driven guided-capture execution UI
 
 **Page:** `dashboard/app/captura/page.tsx` — top-level, next to Perfiles (issues #268/#284 → task-driven in #289 → redesign #413, part of #237).
-**Decisions:** [D-045](../decisions/D-045-capture-execution-top-level.md) — execution is top-level, setup stays in `/etl`. [D-048](../decisions/D-048-task-driven-captura.md) — Captura is a list of discrete recurring TASKS with a per-task staleness window. [D-112](../decisions/D-112-batch-capture-pending-search-queue.md) — the extension-side pending-search queue this page's batch button feeds. [D-113](../decisions/D-113-capturar-todo-batch-queue-piggyback.md) — how "Capturar todo" hands additional searches to the extension with no direct dashboard→extension channel. [D-114](../decisions/D-114-global-capture-selection.md) — "Capturar todo" is ONE page-level control across every VISIBLE profile (not one per profile), selection keyed by `(profileId, taskId)`, per-task ticking exposed without expanding anything.
+**Decisions:** [D-045](../decisions/D-045-capture-execution-top-level.md) — execution is top-level, setup is admin-gated (superseded in its *location* clause by issue #642 P1: setup moved from `/etl/*` to `/admin/fuentes/[name]`; the execution-vs-setup split itself stands). [D-048](../decisions/D-048-task-driven-captura.md) — Captura is a list of discrete recurring TASKS with a per-task staleness window. [D-112](../decisions/D-112-batch-capture-pending-search-queue.md) — the extension-side pending-search queue this page's batch button feeds. [D-113](../decisions/D-113-capturar-todo-batch-queue-piggyback.md) — how "Capturar todo" hands additional searches to the extension with no direct dashboard→extension channel. [D-114](../decisions/D-114-global-capture-selection.md) — "Capturar todo" is ONE page-level control across every VISIBLE profile (not one per profile), selection keyed by `(profileId, taskId)`, per-task ticking exposed without expanding anything.
 
 **#413 redesign note**: the page is now a SERVER component that stacks every
 active profile (no more one-profile-at-a-time dropdown); under each profile
@@ -15,8 +15,11 @@ historical context for the task-driven model itself.
 ## What it is
 
 The first-class, owner-facing EXECUTION surface for guided capture. Distinct
-from the admin SETUP surfaces under `/etl/*` (extension install, API key,
-connector config, the raw `/etl/captura` worklist table). The day-to-day loop:
+from the admin SETUP surfaces (extension install, API key, connector config,
+the capture worklist ledger) — those lived under `/etl/*` through issue #642
+P1, which merged connector config (`/etl/connectors`) and the worklist ledger
+(`/etl/captura`) into `/admin/fuentes` (list) + `/admin/fuentes/[name]`
+(detail, one page per source); both old routes 301 there. The day-to-day loop:
 
 1. Pick a search profile (`GET /api/profiles`).
 2. See a list of discrete capture **TASKS** — one openable pre-filtered search

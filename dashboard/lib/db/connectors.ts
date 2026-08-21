@@ -143,7 +143,7 @@ export function isCaptureOnlyForFreshness(
 /**
  * Resolve one connector's freshness STATE — the ONE definition shared by
  * `getConnectorFreshness()` (dashboard/lib/db/freshness.ts, drives the
- * TopBar dot) and `listConnectors()` below (drives the /etl/connectors
+ * TopBar dot) and `listConnectors()` below (drives the /admin/fuentes
  * pill), so the two surfaces cannot structurally diverge on what "due"
  * means (issue #586, D-125). Before this extraction, `listConnectors()`
  * read `connector_freshness_state` alone for every connector including

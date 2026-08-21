@@ -15,6 +15,11 @@
  * capture ingest paths write — rather than from run/capture outcomes, which
  * lie by omission (see that module's header for the fotocasa/idealista
  * evidence). The pure status derivation is lib/source-health.ts.
+ *
+ * Each row links to `/admin/fuentes/[name]` (issue #642 P1) — a failing
+ * source's detail is one tap away, satisfying #642's EC-4 ("on a phone,
+ * Estado → failing source's detail in one tap"). Previously linked to the
+ * now-deleted `/etl/connectors`.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -96,7 +101,7 @@ function SourceRow({ row }: { row: SourceHealthResponse["sources"][number] }) {
     : (REASON_CHIP[row.reason] ?? SOURCE_STATUS_LABEL[row.status]);
   return (
     <Link
-      href="/etl/connectors"
+      href={`/admin/fuentes/${encodeURIComponent(row.source)}`}
       data-testid={`source-row-${row.source}`}
       data-status={row.status}
       style={{
