@@ -88,11 +88,12 @@ test.beforeEach(async ({ page, baseURL }) => {
 test("per-connector run writes a scoped trigger, shows a busy state, no error surface", async ({
   page,
 }) => {
-  await page.goto("/etl/connectors");
+  // #642 P1: connector management moved to the Fuentes detail page, which
+  // starts the ConnectorCard expanded (a single-source page has nothing to
+  // collapse behind — issue #264's browsability rationale only applies to
+  // the list).
+  await page.goto(`/admin/fuentes/${CONNECTOR}`);
   await expect(page.getByTestId(`connector-${CONNECTOR}`)).toBeVisible();
-
-  // "Ejecutar ahora" lives in the expanded detail region (issue #264).
-  await page.getByTestId(`expand-${CONNECTOR}`).click();
   await page.getByTestId(`run-now-${CONNECTOR}`).click();
 
   // The load-bearing backend assertion: a pending trigger scoped to exactly

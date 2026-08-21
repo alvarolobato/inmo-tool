@@ -89,22 +89,15 @@ export default async function CapturaPage() {
         aunque no toque.
       </p>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 6, lineHeight: 1.5 }}>
-        La <strong>extensión y su clave</strong> se instalan y vinculan con el botón de arriba. Los{" "}
-        <strong>conectores</strong> de cada portal se configuran en{" "}
+        La <strong>extensión y su clave</strong> se instalan y vinculan con el botón de arriba. Cada{" "}
+        <strong>fuente</strong> (conector o portal de captura) se configura, y su libro de capturas se
+        revisa, en{" "}
         <Link
-          href="/etl/connectors"
+          href="/admin/fuentes"
           data-testid="captura-to-connectors"
           style={{ color: "var(--accent)", textDecoration: "none" }}
         >
-          Conectores
-        </Link>
-        . El registro de todo lo que la extensión va capturando —el libro de capturas— vive en{" "}
-        <Link
-          href="/etl/captura"
-          data-testid="captura-to-ledger"
-          style={{ color: "var(--accent)", textDecoration: "none" }}
-        >
-          Captura (admin)
+          Fuentes
         </Link>
         .
       </p>

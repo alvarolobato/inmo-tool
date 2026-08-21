@@ -1,9 +1,14 @@
 /**
- * E2E: /captura ⇄ /etl/captura reconciliation (issue #512, D-041).
+ * E2E: /captura ⇄ Fuentes reconciliation (issue #512, D-041; retargeted by
+ * #642 P1 after `/etl/captura` merged into `/admin/fuentes/[name]`).
  *
  * #512 makes the two capture screens' roles explicit and coherent:
- *   - /captura       = plan + launch (the TopBar surface capture runs from);
- *   - /etl/captura   = the admin "libro de capturas" ledger (observe + repair).
+ *   - /captura                   = plan + launch (the TopBar surface capture
+ *                                  runs from);
+ *   - /admin/fuentes/[name]      = the admin "libro de capturas" ledger for
+ *                                  that one source (observe + repair) — was
+ *                                  the shared `/etl/captura` table with a
+ *                                  portal query param, now the route itself.
  *
  * This spec pins the two behaviours the issue's exit criteria call out:
  *   - EC-1: /captura no longer claims config lives in "Admin · Captura"; its
@@ -110,7 +115,7 @@ test.beforeEach(async ({ page, baseURL }) => {
   await seedAdminSession(page, baseURL);
 });
 
-test("corrected pointers: /captura points at Conectores + the ledger, not 'Admin · Captura' for config", async ({
+test("corrected pointers: /captura points at Fuentes for config + the ledger, not 'Admin · Captura'", async ({
   page,
 }) => {
   await page.goto("/captura");
@@ -122,17 +127,12 @@ test("corrected pointers: /captura points at Conectores + the ledger, not 'Admin
     page.getByText("La configuración (extensión, clave, conectores) vive en"),
   ).toHaveCount(0);
 
-  // Connector config now points at Conectores…
-  const connectorsLink = page.getByTestId("captura-to-connectors");
-  await expect(connectorsLink).toBeVisible();
-  await expect(connectorsLink).toHaveAttribute("href", "/etl/connectors");
-
-  // …and the ledger cross-link points at the admin worklist (framed as the
-  // "libro de capturas", not the place you capture).
-  const ledgerLink = page.getByTestId("captura-to-ledger");
-  await expect(ledgerLink).toBeVisible();
-  await expect(ledgerLink).toHaveAttribute("href", "/etl/captura");
-  await expect(ledgerLink).toHaveText("Captura (admin)");
+  // #642 P1: "Conectores" and "Captura (admin)" merged into one Fuentes
+  // pointer — config AND the ledger both live there now.
+  const fuentesLink = page.getByTestId("captura-to-connectors");
+  await expect(fuentesLink).toBeVisible();
+  await expect(fuentesLink).toHaveAttribute("href", "/admin/fuentes");
+  await expect(fuentesLink).toHaveText("Fuentes");
 
   // No error surface — the D-041 bar.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
@@ -141,7 +141,7 @@ test("corrected pointers: /captura points at Conectores + the ledger, not 'Admin
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
-test("queue chip deep-link: a connector's chip opens the ledger filtered to that portal's pending rows", async ({
+test("queue chip deep-link: a connector's chip opens its Fuentes detail page filtered to pending rows", async ({
   page,
 }) => {
   await page.goto("/captura");
@@ -153,14 +153,15 @@ test("queue chip deep-link: a connector's chip opens the ledger filtered to that
   await expect(chip).toBeVisible();
   await expect(chip).toHaveAttribute(
     "href",
-    "/etl/captura?portal=aliseda&status=pending",
+    "/admin/fuentes/aliseda?status=pending",
   );
   await chip.click();
 
-  // Lands on the ledger, focused on aliseda + the Pendientes filter preset.
-  await page.waitForURL(/\/etl\/captura\?portal=aliseda&status=pending/);
-  await expect(page.getByTestId("worklist-page")).toBeVisible();
-  await expect(page.getByTestId("worklist-portal-focus")).toBeVisible();
+  // Lands on aliseda's Fuentes detail page (#642 P1: the portal is now part
+  // of the route itself, not a query param — no separate "focus" banner
+  // needed), with the Pendientes filter preset applied.
+  await page.waitForURL(/\/admin\/fuentes\/aliseda\?status=pending/);
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
   await expect(page.getByTestId("worklist-filter-pending")).toHaveAttribute(
     "aria-pressed",
     "true",

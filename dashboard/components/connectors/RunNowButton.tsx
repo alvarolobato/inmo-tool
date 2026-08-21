@@ -134,6 +134,9 @@ export function RunNowButton({
         disabled={disabled || busy}
         data-testid={`run-now-${testIdSuffix}`}
         style={{
+          display: "inline-flex",
+          alignItems: "center",
+          minHeight: 44,
           padding: "6px 12px",
           borderRadius: 6,
           border: "1px solid var(--border)",

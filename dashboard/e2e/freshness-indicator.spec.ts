@@ -390,7 +390,7 @@ test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real p
     }
   });
 
-  test("a stale capture-only portal reads due/stale on its own /etl/connectors pill", async ({
+  test("a stale capture-only portal reads due/stale on its own Fuentes detail pill", async ({
     page,
   }) => {
     // Own every precondition `listConnectors()` needs to render this row at
@@ -418,8 +418,9 @@ test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real p
       [MARKER_URL, PORTAL],
     );
 
-    await page.goto("/etl/connectors");
-    await page.getByTestId(`expand-${PORTAL}`).click();
+    // #642 P1: connector management moved to the Fuentes detail page, which
+    // starts the ConnectorCard already expanded.
+    await page.goto(`/admin/fuentes/${PORTAL}`);
     const stateBadge = page.getByTestId(`freshness-state-${PORTAL}`);
     await expect(stateBadge).toBeVisible();
     // "obsoleto, sin ciclo iniciado" (due) — never "fresco" — proving the
