@@ -359,3 +359,149 @@ class TestNormalize:
         )
         canonical = IdealistaConnector().normalize(raw)
         assert canonical.m2_built == Decimal(1234)
+
+
+class TestFullScreenGallery:
+    """Issue #654 — the connector stored exactly 3 photos for every idealista
+    listing while the HTML it was parsing already carried the whole gallery.
+
+    `config.multimediaCarrousel.multimedias[type=PICTURE].content` is only a
+    3-item preview (its sibling `totalMultimedias` reports the real count);
+    the complete set sits in a separate `fullScreenGalleryPics` array the
+    connector never read. Measured on production extension_capture id 3627
+    (437 KB of retained detail-page HTML, D-150): 3 photos parsed, 18
+    genuinely present.
+
+    Fixture: `idealista_sample_detail_full_gallery.html` — fully synthetic
+    values, real schema shape transcribed from that capture; see its header
+    comment for what is faithful and what is deliberately different.
+    """
+
+    FIXTURE = (
+        Path(__file__).parent / "fixtures" / "idealista_sample_detail_full_gallery.html"
+    )
+
+    def _normalize(self, html: str):
+        return IdealistaConnector().normalize(
+            RawListing(
+                external_id="900000001",
+                source="idealista",
+                raw={
+                    "url": "https://www.idealista.com/inmueble/900000001/",
+                    "html": html,
+                },
+            )
+        )
+
+    def test_full_gallery_extracted_not_just_carousel_preview(self):
+        """The whole gallery, not the 3-item preview.
+
+        19 = the fixture's 18 full-screen photos plus the one photo that
+        exists only in the carousel preview (a deliberate fixture departure
+        that exercises the fallback merge). The assertion is the exact
+        count on purpose: `>= 3` would have passed against the bug.
+        """
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        assert len(canonical.photo_urls) == 19
+
+    def test_floor_plans_excluded_from_photos(self):
+        """The two `isPlan: true` entries are floor plans, not photos. They
+        sit on the same `id.pro.es.image.master` bucket as the photos, so
+        only the flag distinguishes them — a URL-shape check would let them
+        through."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        # The photo immediately before the first plan in array order IS a
+        # photo (so this test can't pass vacuously on an empty/preview-only
+        # gallery) ...
+        assert any("9000000017" in u for u in canonical.photo_urls)
+        # ... and neither plan came with it.
+        assert not any("9000000018" in u for u in canonical.photo_urls)
+        assert not any("9100000001" in u for u in canonical.photo_urls)
+
+    def test_gallery_order_preserved_cover_shot_first(self):
+        """Gallery order is meaningful — the first photo is the cover shot
+        shown in the candidate feed. Array order is used, NOT the entries'
+        own `absolutePosition`: the fixture's last photo (9100000002)
+        carries its multimedia id there instead of a position, exactly as
+        the real capture's late-added items do, so sorting on that field
+        would move it out of place."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        assert canonical.photo_urls[0].endswith("9000000001.jpg")
+        assert canonical.photo_urls[1].endswith("9000000002.jpg")
+        # 17 sanely-positioned photos, then the late-added one, in array
+        # order — its bogus absolutePosition (9100000002) has not sorted it
+        # anywhere else.
+        assert canonical.photo_urls[17].endswith("9100000002.jpg")
+        # Then the carousel-only photo, appended by the fallback merge.
+        assert canonical.photo_urls[18].endswith("9200000001.jpg")
+
+    def test_size_variants_of_one_photo_dedup_to_one_entry(self):
+        """The carousel preview carries the same first three photos as the
+        gallery at a different rendition (`WEB_DETAIL-M-L` vs
+        `WEB_DETAIL`). They must collapse to one photo each — dedup is
+        keyed on the `id.*.image.master/xx/xx/xx/NNNN` path, not the full
+        URL — and the kept URL is the gallery's `WEB_DETAIL` one."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        for photo_id in ("9000000001", "9000000002", "9000000003"):
+            matching = [u for u in canonical.photo_urls if photo_id in u]
+            assert len(matching) == 1, photo_id
+            assert "/WEB_DETAIL/" in matching[0]
+        # Rendition-independent identity, so no two stored URLs are the same
+        # photo at different sizes.
+        assert len(set(canonical.photo_urls)) == len(canonical.photo_urls)
+
+    def test_stores_jpg_not_webp(self):
+        """`imageDataService` (.jpg) is stored, not its `imageDataServiceWebp`
+        sibling — see the size/format note in idealista.py."""
+        canonical = self._normalize(self.FIXTURE.read_text(encoding="utf-8"))
+        # A gallery-only photo is present, so `all(...)` below is not
+        # vacuously true over the 3-item carousel preview alone.
+        assert any("9000000017" in u for u in canonical.photo_urls)
+        assert all(u.endswith(".jpg") for u in canonical.photo_urls)
+        assert not any(".webp" in u for u in canonical.photo_urls)
+
+    def test_unquoted_keys_and_colons_inside_strings(self):
+        """`fullScreenGalleryPics` is a JS object literal with UNQUOTED
+        identifier keys mixed among quoted ones, so it needs key-quoting
+        before json.loads. That rewrite must not touch quoted values: a
+        caption containing `https://` or a brace would otherwise be
+        corrupted, or unbalance the array scan."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {fullScreenGalleryPics: ["
+            '{"isPlan":false,hoverText:"see https://example.com/a?x=1 {ojo}",'
+            'imageDataService:"https://img4.idealista.com/blur/WEB_DETAIL/0/'
+            'id.pro.es.image.master/aa/bb/cc/11.jpg",'
+            'imageDataServiceWebp:"https://img4.idealista.com/blur/WEB_DETAIL/0/'
+            'id.pro.es.image.master/aa/bb/cc/11.webp",multimediaId:11},'
+            '{"isPlan":false,hoverText:"]},{ not a delimiter",'
+            'imageDataService:"WEB_DETAIL/0/id.pro.es.image.master/dd/ee/ff/22.jpg",'
+            "multimediaId:22}]};</script></body></html>"
+        )
+        canonical = self._normalize(html)
+        host = "https://img4.idealista.com/blur/WEB_DETAIL/0/"
+        assert canonical.photo_urls == (
+            host + "id.pro.es.image.master/aa/bb/cc/11.jpg",
+            # Partial paths get the img host prefixed, same as the carousel.
+            host + "id.pro.es.image.master/dd/ee/ff/22.jpg",
+        )
+
+    def test_falls_back_to_carousel_when_fullscreen_array_unparseable(self):
+        """A malformed `fullScreenGalleryPics` must not lose the photos the
+        carousel does carry — and must not be silently coerced into
+        something wrong either."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {"
+            "fullScreenGalleryPics: [{isPlan:false, imageDataService:}],"
+            "multimediaCarrousel: "
+            '{"multimedias":[{"type":"PICTURE","content":['
+            '{"src":"WEB_DETAIL/0/id.pro.es.image.master/a1/b2/c3/7.jpg"}]}]}'
+            "};</script></body></html>"
+        )
+        canonical = self._normalize(html)
+        assert canonical.photo_urls == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/a1/b2/c3/7.jpg",
+        )

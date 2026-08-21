@@ -85,17 +85,49 @@ _STATICMAP_CENTER_RE = re.compile(
 )
 # Idealista's full photo gallery is NOT in the initial DOM (only one <img> /
 # the og:image thumbnail renders before the carousel hydrates — issue #282,
-# where only 1 of ~95 photos was being stored). Every photo lives in the same
-# inline `config.multimediaCarrousel` object this connector already reads the
-# map coordinates from (see _STATICMAP_CENTER_RE / PR #87): its `multimedias`
-# array holds a `{"type":"PICTURE","content":[{"src": "...", ...}]}` group
-# (plus separate PLAN/MAP groups we skip). The `src` values are partial paths
-# like "WEB_DETAIL/0/id.pro.es.image.master/xx/xx/xx/NNNN.jpg" — this exact
-# schema is transcribed from a real captured Idealista page's per-listing
-# `listingMultimediaCarrousels` blob (demo DB extension_capture id 10). We
-# balance-match that JS object literal, json.loads it, and collect every
-# PICTURE src, prefixing the img host onto partial paths.
+# where only 1 of ~95 photos was being stored). It lives in inline <script>
+# JS object literals, of which the page carries TWO with photo URLs in them:
+#
+#   1. `config.multimediaCarrousel` — the above-the-fold carousel. Its
+#      `multimedias` array holds a `{"type":"PICTURE","content":[...]}` group
+#      (plus separate PLAN/MAP groups we skip), and that content array is
+#      only ever a **3-item preview**, regardless of how many photos the
+#      advert really has. The same object's `totalMultimedias` reports the
+#      true per-type counts (e.g. `[{"type":"PICTURE","total":18},...]`).
+#      This is pure JSON.
+#   2. `fullScreenGalleryPics` — a flat array with one entry per multimedia
+#      item in the full-screen ("ver todas las fotos") gallery, i.e. the
+#      COMPLETE set, already in page order. Each entry carries
+#      `imageDataService` (jpg), `imageDataServiceWebp` (webp), and an
+#      `isPlan` boolean marking the floor plans. This one is a JS object
+#      literal with UNQUOTED keys, so it needs key-quoting before json.loads
+#      (see _js_object_literal_to_json).
+#
+# Issue #654: this connector read only (1), so every idealista listing stored
+# exactly 3 photos while the page it was parsing already carried all of them.
+# Verified against production extension_capture id 3627 (idealista detail
+# page, 437 KB of retained HTML): 3 photos in the carousel preview,
+# `totalMultimedias` PICTURE=18, and `fullScreenGalleryPics` holding all 20
+# multimedia items (18 photos + 2 `isPlan` floor plans). (1) is retained as a
+# fallback for pages that don't carry (2).
+#
+# Size variant: `fullScreenGalleryPics` hands out the unsuffixed `WEB_DETAIL`
+# rendition (1500px on the sample) whereas the carousel preview hands out
+# `WEB_DETAIL-M-L`. We store each URL exactly as the page gave it — never
+# rewritten into a variant we haven't seen resolve — and prefer the `.jpg`
+# (`imageDataService`) over the `.webp` sibling, matching what every other
+# connector stores and what the photo-hash fetcher is exercised on.
+#
+# Deduplication is therefore keyed on the size-and-extension-independent
+# `id.<x>.es.image.master/xx/xx/xx/NNNN` path (_PHOTO_MASTER_RE), not on the
+# full URL: the same photo appears across both objects at different
+# renditions, and a raw-URL key would store it twice.
 _MULTIMEDIA_HOST = "https://img4.idealista.com/blur/"
+# The rendition-independent identity of an Idealista photo: everything from
+# the `id.*.image.master` bucket marker through the numeric multimedia id,
+# with the size segment (WEB_DETAIL / WEB_DETAIL-M-L / WEB_DETAIL_TOP-L-L)
+# and the .jpg/.webp extension excluded.
+_PHOTO_MASTER_RE = re.compile(r"(id\.[a-z0-9.]+\.image\.master/(?:[0-9a-f]{2}/){3}\d+)")
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -249,10 +281,12 @@ class IdealistaConnector(Connector):
             field="m2_built",
         )
 
-        # Full gallery from the embedded carousel JSON (issue #282); the
-        # og:image is only the single hydration thumbnail and is used solely
-        # as a fallback when the carousel object is absent/unparseable.
-        gallery = _gallery_from_carousel(html)
+        # Full gallery from the embedded fullScreenGalleryPics array,
+        # falling back to the carousel's 3-item preview (issue #282, #654 —
+        # see the _MULTIMEDIA_HOST comment block); the og:image is only the
+        # single hydration thumbnail and is used solely as a fallback when
+        # neither inline object is present or parseable.
+        gallery = _photo_gallery(html)
         if gallery:
             photo_urls: tuple[str, ...] = gallery
         else:
@@ -408,12 +442,165 @@ def _extract_js_object(text: str, key: str) -> str | None:
     return None
 
 
+def _extract_js_array(text: str, key: str) -> str | None:
+    """Return the raw `[...]` array literal assigned to `key:` in an inline
+    <script>, or None. Same string-aware balanced scan as
+    _extract_js_object, but anchored on `[` and counting both bracket
+    kinds, so a `]`/`}` inside a quoted value (a photo caption, a URL query
+    string) can't unbalance it. The result is a JS array literal, which is
+    not necessarily valid JSON — see _js_object_literal_to_json."""
+    match = re.search(re.escape(key) + r"\s*:\s*\[", text)
+    if not match:
+        return None
+    start = text.index("[", match.end() - 1)
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+_UNQUOTED_KEY_RE = re.compile(r"(?<=[{,])(\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)")
+
+
+def _js_object_literal_to_json(literal: str) -> str:
+    """Quote the bare identifier keys of a JS object literal so json.loads
+    can read it.
+
+    `fullScreenGalleryPics` mixes quoted and unquoted keys in the same
+    object (`{"isPlan":false,hoverText:"Salón",...}`), which is legal
+    JavaScript but not JSON. The rewrite is applied only to the regions of
+    the literal that are OUTSIDE double-quoted strings — a caption or a URL
+    containing something that looks like `foo:` (e.g. `https:`) must never
+    be rewritten. Values are left untouched, so a genuinely malformed
+    literal still fails at json.loads rather than being silently coerced.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    in_str = False
+    escaped = False
+    for ch in literal:
+        if in_str:
+            buf.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+                out.append("".join(buf))
+                buf = []
+        elif ch == '"':
+            out.append(_UNQUOTED_KEY_RE.sub(r'\1"\2"\3', "".join(buf)))
+            buf = [ch]
+            in_str = True
+        else:
+            buf.append(ch)
+    tail = "".join(buf)
+    out.append(tail if in_str else _UNQUOTED_KEY_RE.sub(r'\1"\2"\3', tail))
+    return "".join(out)
+
+
+def _photo_identity(url: str) -> str:
+    """Rendition-independent dedup key for a photo URL: the
+    `id.*.image.master/xx/xx/xx/NNNN` path if the URL is an Idealista image
+    CDN URL (so `WEB_DETAIL/....jpg` and `WEB_DETAIL-M-L/....webp` of the
+    same photo collapse to one), otherwise the URL itself (an unrecognised
+    shape dedups exactly, as before — never more loosely)."""
+    match = _PHOTO_MASTER_RE.search(url)
+    return match.group(1) if match else url
+
+
+def _absolutise(src: str) -> str:
+    return src if src.startswith("http") else _MULTIMEDIA_HOST + src.lstrip("/")
+
+
+def _photo_gallery(html: str) -> tuple[str, ...]:
+    """Every real photo on the page, in the page's own gallery order,
+    deduplicated across renditions (see _photo_identity).
+
+    `fullScreenGalleryPics` is the complete set and is read first, so its
+    order — which is the gallery order, and therefore puts the cover shot
+    first — is the order stored. `config.multimediaCarrousel` is then read
+    for anything the full-screen array didn't already cover, which on a
+    normal page is nothing (its 3-item preview is the first three gallery
+    entries) but keeps this working on a page that carries only the
+    carousel. Empty tuple if neither object is present or parseable (the
+    caller then falls back to the og:image thumbnail).
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+    for url in _gallery_from_fullscreen(html) + _gallery_from_carousel(html):
+        identity = _photo_identity(url)
+        if identity not in seen:
+            seen.add(identity)
+            urls.append(url)
+    return tuple(urls)
+
+
+def _gallery_from_fullscreen(html: str) -> tuple[str, ...]:
+    """Every non-plan photo from the `fullScreenGalleryPics` array, in page
+    order, as its `imageDataService` (.jpg) URL.
+
+    Entries with `isPlan: true` are floor plans, not photos, and are
+    skipped — the same exclusion the carousel path makes by only reading
+    its PICTURE group. `isPlan` is the only reliable discriminator here:
+    on the real sample the plans sit on the same `id.pro.es.image.master`
+    bucket as the photos, so a URL-shape check would not catch them.
+
+    Array order is used deliberately in preference to the entries' own
+    `absolutePosition` field: on the real sample (capture 3627) the two
+    most recently added items carry their multimedia id there instead of a
+    position (a 10-digit id where a 1-18 index belongs), so sorting on it
+    would throw them to the end and, worse, imply an ordering the page never had.
+    """
+    raw = _extract_js_array(html, "fullScreenGalleryPics")
+    if not raw:
+        return ()
+    try:
+        data = json.loads(_js_object_literal_to_json(raw))
+    except (ValueError, TypeError):
+        return ()
+    if not isinstance(data, list):
+        return ()
+    urls: list[str] = []
+    for item in data:
+        if not isinstance(item, dict) or item.get("isPlan"):
+            continue
+        src = item.get("imageDataService")
+        if not isinstance(src, str) or not src:
+            continue
+        urls.append(_absolutise(src))
+    return tuple(urls)
+
+
 def _gallery_from_carousel(html: str) -> tuple[str, ...]:
     """Every PICTURE `src` from `config.multimediaCarrousel.multimedias`, in
     page order, deduplicated, prefixed with the img host for partial paths
     (see _MULTIMEDIA_HOST). PLAN/MAP groups are skipped — only real photos
-    become photo_urls. Empty tuple if the object is absent or unparseable
-    (the caller then falls back to the og:image thumbnail).
+    become photo_urls. Empty tuple if the object is absent or unparseable.
+
+    This is the FALLBACK path (#654): on a real detail page this array is
+    only ever a 3-item preview of the full gallery, so _photo_gallery reads
+    `fullScreenGalleryPics` first and only falls back here. Kept because a
+    page that carries the carousel and not the full-screen array still
+    yields those three rather than dropping to the og:image thumbnail.
 
     `multimediaCarrousel` (singular) is the detail page's own object; the
     plural `listingMultimediaCarrousels` (a search page's per-listing map,
@@ -439,7 +626,7 @@ def _gallery_from_carousel(html: str) -> tuple[str, ...]:
             src = item.get("src")
             if not isinstance(src, str) or not src:
                 continue
-            url = src if src.startswith("http") else _MULTIMEDIA_HOST + src.lstrip("/")
+            url = _absolutise(src)
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
