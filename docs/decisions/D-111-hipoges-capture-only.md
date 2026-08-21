@@ -144,9 +144,11 @@ read-only from production Postgres and used to build a real fixture,
 replacing the synthetic one referenced below. `_SELECTORS_CALIBRATED` is
 now `True` — price/m²/rooms/bathrooms/reference/photos/property_type/
 operation/city/province are real-capture-grounded; title/description
-flipped from OG-meta-only to DOM-first (the real page's OG meta turned out
-to be generic site branding, not per-listing content — a genuine surprise,
-not just a confirmation). Floor and energy_rating stay uncalibrated
+flipped from OG-meta-only to DOM-ONLY, no fallback at all (the real page's
+OG meta turned out to be generic site branding, not per-listing content —
+and a fresh-context review of this PR caught that falling back to it was
+actively HARMFUL, not just weaker: it could turn a real sale listing's
+`operation` into `"rent"`). Floor and energy_rating stay uncalibrated
 (ambiguous single-sample risk). Full details, including which class-based
 selector guesses turned out to match literally nothing on the real page:
 [D-146](D-146-hipoges-selectors-calibrated.md).

@@ -3,7 +3,7 @@ id: D-146
 title: Hipoges connector selectors calibrated against one real capture — flip _SELECTORS_CALIBRATED True, single-observation confidence
 date: 2026-08-21
 group: Data / connectors
-rule: 'Hipoges `_SELECTORS_CALIBRATED` is True: price/m2/rooms/bathrooms/reference/photos/property_type/operation/city/province are grounded in ONE real capture (RARE-04347, #547) — SINGLE-OBSERVATION confidence, re-verify against a second listing before trusting fully. Floor and energy_rating stay uncalibrated (ambiguous single-sample risk); OG meta was proven generic site branding, not per-listing content.'
+rule: 'Hipoges `_SELECTORS_CALIBRATED` is True: price/m2/rooms/bathrooms/reference/photos/property_type/operation/city/province are grounded in ONE real capture (RARE-04347, #547) — SINGLE-OBSERVATION confidence, re-verify against a second listing before trusting fully. Floor and energy_rating stay uncalibrated (ambiguous single-sample risk). Title/description are DOM-ONLY, never an OG-meta fallback — OG meta is generic site branding whose "alquiler" text corrupted `operation` into "rent" for a real sale listing (PR #657 review); never reintroduce that fallback.'
 ---
 
 # D-146: Hipoges connector selectors calibrated against one real capture
@@ -33,9 +33,15 @@ assumptions were wrong, not just unconfirmed:**
   (populated from that exact OG title, not "Piso en venta en urbanización
   Maria Teresa Leon"). The draft's "OG-meta-only, deliberately not an
   h1-guess" design (PR #548, C2) was the right call given no real page
-  existed to check against, but the real page proves OG is useless for
-  either field. Both are now DOM-first (a real `<h1>`, the real description
-  paragraph) with OG meta only as a last-resort fallback.
+  existed to check against, but the real page proves OG is not just
+  useless but KNOWN-HARMFUL: `map_operation()` checks "alquil" before
+  "venta", so the generic OG title's own word "alquiler" returned `"rent"`
+  for a real SALE listing whenever the real `<h1>` had not rendered yet — a
+  reachable capture state, since the extension's `readySelectors` gate is
+  satisfied by `main` alone (caught in review, PR #657, before merge; fixed
+  same-day). Both title and description are therefore DOM-ONLY when
+  calibrated — a missing DOM node degrades straight to `None`, with NO
+  OG-meta fallback of any kind.
 
 - **No element on the real page carries a `price`/`precio` CSS class** —
   the draft's entire price selector (`[class*="price" i], [class*="precio"
@@ -105,7 +111,9 @@ exactly as unconfirmed as before; this capture simply never exercised them.
 from `False` to `True`. `normalize()` now writes price, m2_built, rooms,
 bathrooms, reference_code, photo_urls, property_type, operation, city, and
 province from real, capture-grounded selectors; title/description are
-DOM-first with OG-meta fallback (reversed from D-111's OG-only design).
+DOM-ONLY, with no OG-meta fallback at all (reversed from D-111's
+OG-only design — not merely reprioritized, since the OG fallback itself
+proved harmful, see above).
 `floor`, `energy_rating`, `address`, `lat`/`lon`, `postal_code`,
 `m2_plot`, `features`, `cadastral_ref`, and `has_elevator`/`year_built`
 remain `None` — either genuinely absent from the page or deliberately left
@@ -125,13 +133,19 @@ against dozens of live samples (Fotocasa, Milanuncios).
 **Fixture**: `etl/tests/fixtures/hipoges_detail_SYNTHETIC.html` (a fully
 fabricated fixture, never matched real markup) is removed —
 `etl/tests/fixtures/hipoges_detail_RARE-04347.html` replaces it, trimmed
-from the real ~358-369 KB capture (`extension_capture` ids 3614-3617,
-byte-identical modulo tracking/cookie noise) down to the load-bearing tag
-names and class attributes every calibrated selector reads, with the
-lead-gen contact form, the real Hipoges call-center phone number, and all
-tracking/cookie markup scrubbed (no PII of any kind was present — Hipoges
-is a REO servicer with no private-seller contact info — but the form/phone
-carried no test value either, so they are simply not there).
+from the real capture (`extension_capture` ids 3614-3617 — 366,081 /
+366,763 / 366,763 / 368,552 bytes; NOT byte-identical, but their
+load-bearing listing content is, the size differences are entirely
+tracking/cookie-consent noise) down to the load-bearing tag names and
+class attributes every calibrated selector reads. Scrubbed: the lead-gen
+contact form and the real Hipoges call-center phone number ("O llámenos")
+— these carry no personal data (Hipoges is a REO servicer with no
+private-seller contact info; the number is the servicer's own corporate
+switchboard, not a data subject's), but are removed anyway since they add
+nothing to the parser tests and this repo's policy is to keep contact
+details of any kind out of committed fixtures, not just data-subject PII —
+plus all tracking/cookie markup, which was already valueless for the
+tests.
 
 **Alternatives rejected**:
 - *Keep the gate `False` and just fix the draft selectors in place*:

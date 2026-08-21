@@ -3,9 +3,13 @@
   browser extension on 2026-08-21 (issue #547) — external_id RARE-04347,
   https://realestate.hipoges.com/es/detail/RARE-04347. Preserved via
   etl/capture.py's selectors_calibrated-gated HTML retention (D-111 / #548
-  C3) as `extension_capture` rows 3614-3617, all four byte-for-byte
-  identical except cookie/tracking noise and one harmless map-widget CSS
-  class — pulled read-only from production Postgres, never re-fetched live.
+  C3) as `extension_capture` rows 3614-3617 (366,081 / 366,763 / 366,763 /
+  368,552 bytes — NOT byte-identical; the size differences are entirely
+  tracking/cookie-consent payload noise) — pulled read-only from production
+  Postgres, never re-fetched live. The LOAD-BEARING listing content (title,
+  price, location, reference, feature cards, description, gallery, similar-
+  properties rail) is identical across all four captures except one
+  harmless map-widget CSS class that only appears on the largest one.
 
   This is NOT a literal full-page dump (the real capture was ~358-369 KB of
   tracking pixels, PrimeNG carousel internals, a lead-gen contact form with
@@ -31,6 +35,11 @@
   data — trimmed to a representative excerpt (the real block is ~1350
   chars of similar marketing copy) that keeps the one genuinely useful
   signal it carries ("Esta propiedad se encuentra alquilada").
+
+  Photo order: the real gallery repeats each image (a desktop/mobile
+  duplicate rendering) in the sequence 2nd/3rd/1st image, not 1st/2nd/3rd —
+  this fixture simplifies to a single, numerically-ordered rendering per
+  photo for readability. See `_photos()`'s own docstring in hipoges.py.
 
   SINGLE OBSERVATION — one property, one servicer template. See
   docs/decisions/D-111-hipoges-capture-only.md's amendment for which fields

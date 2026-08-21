@@ -112,10 +112,19 @@ table's own text, still never observed on a real page.
       "Piso en venta en urbanización Maria Teresa Leon". The pre-#547
       "title/description: OpenGraph ONLY" design (Opus review, PR #548, C2)
       was reasonable given no real capture existed, but the real page
-      proves OG meta is USELESS for either field. Both are now DOM-first
-      (a real `<h1>` for title, the real description paragraph for
-      description) with OG meta only as a last-resort fallback if the DOM
-      node is ever absent — same fallback posture, opposite priority order.
+      proves OG meta is USELESS for either field — and worse than useless:
+      it is KNOWN-HARMFUL, not merely a weaker signal (Opus review, PR
+      #657). `map_operation()` checks "alquil" before "venta", so the
+      generic OG title's word "alquiler" (from "Venta y alquiler...")
+      returned `"rent"` for a real 266.000EUR SALE listing whenever the
+      real `<h1>` hadn't rendered yet — a reachable capture state, since
+      `browser-extension/detect.js`'s `readySelectors` gate is satisfied by
+      `main` alone. Both title and description are therefore DOM-ONLY when
+      calibrated, with NO OG-meta fallback at all: a missing `<h1>`/
+      description node degrades straight to `None`, exactly like every
+      other calibrated field on a miss — never to content proven to
+      actively corrupt a downstream derived field (`operation`,
+      `property_type`).
 
     - **No element anywhere on the real page carries a `price`/`precio`
       CSS class.** `soup.select('[class*="price" i], [class*="precio" i]')`
@@ -474,16 +483,23 @@ class HipogesConnector(Connector):
         scoped_soup = scoped_node(soup, drop=_CONTAMINATION_SELECTORS)
 
         if _SELECTORS_CALIBRATED:
-            title = first_present(
-                lambda: _title_from_dom(scoped_soup),
-                lambda: _og_meta(soup, "og:title"),
-                field="hipoges.title",
-            )
-            description = first_present(
-                lambda: _description_from_dom(scoped_soup),
-                lambda: _og_meta(soup, "og:description"),
-                field="hipoges.description",
-            )
+            # DOM-ONLY, no OG-meta fallback (Opus review, PR #657) — the OG
+            # meta is not merely a weaker signal than the real <h1>/
+            # description, it is KNOWN-HARMFUL: it is generic site branding
+            # ("Venta y alquiler de inmuebles al mejor precio | Hipoges"),
+            # and its "alquiler" substring made map_operation() below return
+            # "rent" for what was a real 266.000EUR SALE listing whenever
+            # the real <h1> hadn't rendered yet (a real, reachable capture
+            # state: the extension's readySelectors gate is satisfied by
+            # `main` alone, per browser-extension/detect.js, so an
+            # unrendered <h1> can still pass capture). Feeding that fallback
+            # into map_operation()/map_property_type() below is exactly the
+            # "plausible-looking wrong data" the _SELECTORS_CALIBRATED gate
+            # exists to prevent (D-057/D-098/D-059) — so unlike every other
+            # calibrated field, there is NO fallback here: a missing DOM
+            # node degrades straight to None, never to OG content.
+            title = _title_from_dom(scoped_soup)
+            description = _description_from_dom(scoped_soup)
             raw_type = first_present(
                 lambda: _detail_row_value(scoped_soup, "Tipo de propiedad"),
                 lambda: title,
@@ -575,8 +591,20 @@ class HipogesConnector(Connector):
 
 
 def _photos(soup: BeautifulSoup, page_url: str | None) -> tuple[str, ...]:
-    """Real gallery photo URLs, absolute, deduped, in document order
-    (issue #547).
+    """Real gallery photo URLs, absolute, deduped, in the order the `<img>`
+    tags appear in whatever HTML is passed in (issue #547).
+
+    That is document order of the INPUT markup, not necessarily the site's
+    own canonical photo ordering — the real RARE-04347 capture's gallery
+    repeats each image (a desktop/mobile duplicate rendering pattern, same
+    shape as the `init-feature-card` duplication documented on
+    `_feature_card_value`) in the sequence "second image, third image,
+    first image, second image, ..."; only the FIRST occurrence of each
+    unique URL survives dedup, so the real output order is 2nd/3rd/1st, not
+    1st/2nd/3rd. The committed fixture (`hipoges_detail_RARE-04347.html`)
+    simplifies this to a single, numerically-ordered rendering per photo
+    for readability — a reconstruction in this one respect, not a literal
+    copy of the real tag order (see the fixture's own header comment).
 
     The real subject-property gallery is the `init-asset-detail-gallery`
     custom element — the "similar properties" rail's photos live in a

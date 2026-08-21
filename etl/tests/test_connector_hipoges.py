@@ -297,6 +297,46 @@ class TestSelectorMutationBreaksExtraction:
         assert "alquilada" not in _normalize(mutated).description
 
 
+class TestOgMetaNeverCorruptsCalibratedFields:
+    """Opus review (PR #657): the real og:title/og:description are generic
+    site branding ("Venta y alquiler de inmuebles al mejor precio |
+    Hipoges") — and that generic title's own word "alquiler" made
+    map_operation() return "rent" for a real SALE listing whenever the
+    real <h1> hadn't rendered yet, which browser-extension/detect.js's
+    `readySelectors` gate (satisfied by `main` alone) does not prevent.
+    Proves the fix: when calibrated but the DOM node is missing, title and
+    description degrade straight to None — never to OG content — so
+    operation/property_type (derived from title) degrade to None too,
+    never to a wrong-but-plausible value."""
+
+    # An Angular page that rendered <main> (satisfying detect.js's
+    # readySelectors gate) but not yet the async listing content below it —
+    # a real, reachable capture state, not a hypothetical. Carries the same
+    # generic OG meta every real Hipoges page carries.
+    _UNRENDERED_MAIN_HTML = """<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta property="og:title" content="Venta y alquiler de inmuebles al mejor precio | Hipoges">
+<meta property="og:description" content="Encuentra aquí las mejores oportunidades de apartamentos, pisos, locales, naves y oficinas.">
+</head><body><app-root><main></main></app-root></body></html>"""
+
+    def test_operation_does_not_become_rent_for_a_sale_listing(self):
+        c = _normalize(self._UNRENDERED_MAIN_HTML, external_id="RARE-04347")
+        assert c.operation is None
+        assert c.operation != "rent"
+
+    def test_property_type_stays_none(self):
+        c = _normalize(self._UNRENDERED_MAIN_HTML, external_id="RARE-04347")
+        assert c.property_type is None
+
+    def test_title_and_description_stay_none_not_og_content(self):
+        c = _normalize(self._UNRENDERED_MAIN_HTML, external_id="RARE-04347")
+        assert c.raw_extra["title"] is None
+        assert c.description is None
+        assert c.raw_extra["title"] != (
+            "Venta y alquiler de inmuebles al mejor precio | Hipoges"
+        )
+
+
 class TestGateOffFallsBackToDraftBehavior:
     """Proves the calibration gate itself still works — if a future
     regression flips `_SELECTORS_CALIBRATED` back to False (e.g. a
