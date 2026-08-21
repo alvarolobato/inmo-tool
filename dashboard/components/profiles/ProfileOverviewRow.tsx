@@ -457,6 +457,38 @@ function ValidProfileRow({
           )}
         </div>
 
+        {/*
+          Issue #667 "Ver novedades": one tap from the Perfiles row straight
+          to this profile's feed filtered to exactly the candidates the
+          "N nuevos" metric above just promised (same `new_count` value —
+          the button shows no count of its own, so there is only ever one
+          number to keep in sync, per the metric span above). HIDDEN
+          entirely when there is nothing new — same pattern this file
+          already uses for "N con alertas" above (`metrics.flagged_count >
+          0 && (...)`)  — a button that opens a confirmed-empty list is
+          worse than no button. `.profile-novedades-link` (globals.css)
+          carries the ≥44px mobile tap target (D-121/D-124 ladder), same
+          shape as `.profile-enter-btn` just below.
+        */}
+        {metrics.new_count > 0 && (
+          <Link
+            href={`/profiles/${profile.id}?onlyNew=true`}
+            data-testid="profile-ver-novedades"
+            className="profile-novedades-link"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              color: "var(--accent)",
+              border: "1px solid var(--accent)",
+              borderRadius: 6,
+              textDecoration: "none",
+              fontWeight: 500,
+            }}
+          >
+            Ver novedades
+          </Link>
+        )}
+
         {metrics.matched_count === 0 && (
           <button
             type="button"

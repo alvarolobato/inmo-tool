@@ -72,6 +72,18 @@ export interface CandidateFilters {
   alerts: "" | "1" | "0";
   /** #422/#379 preset. Param: `view` (`seguimiento`/`descartadas`; absent = Todas). */
   view: CandidateView;
+  /**
+   * Issue #667 ("Ver novedades"): keep only candidates that are effectively
+   * new right now — the SAME predicate `lib/candidates.ts`'s `ranked.is_new`
+   * (and `lib/db/profile-overview.ts`'s `new_count`) already compute: the
+   * earliest active-source listing's `first_seen_at` is after this profile's
+   * `previous_viewed_at` (fallback `created_at - 1 day`). Deliberately the
+   * RAW predicate, not the cold-start-suppressed value the NUEVO badge
+   * sometimes hides, so the Perfiles row's "N nuevos" count and this
+   * filter's result count agree by construction (extends the #447
+   * count⇔feed invariant). `false` = off. Param: `onlyNew` (`"true"`).
+   */
+  onlyNew: boolean;
 }
 
 export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
@@ -87,6 +99,7 @@ export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
   isVpo: "",
   alerts: "",
   view: "all",
+  onlyNew: false,
 };
 
 /** `trackedOnly` (sends `state=accept`) is derived from the segmented view. */
@@ -127,6 +140,7 @@ export function hasActiveFilters(f: CandidateFilters): boolean {
     f.minDiscount !== "" ||
     f.alerts !== "" ||
     f.view !== "all" ||
+    f.onlyNew ||
     moreFiltersActiveCount(f) > 0
   );
 }
@@ -151,6 +165,9 @@ export function parseCandidateFilters(search: string): CandidateFilters {
     // narrowing the feed in an unintended direction.
     alerts: p.get("alerts") === "1" || p.get("alerts") === "0" ? (p.get("alerts") as "1" | "0") : "",
     view: view === "seguimiento" || view === "descartadas" ? view : "all",
+    // Issue #667: only the exact string "true" turns the filter on — same
+    // strict-parse discipline as `heritageZone` just above.
+    onlyNew: p.get("onlyNew") === "true",
   };
 }
 
@@ -172,6 +189,7 @@ export function candidateFiltersToParams(f: CandidateFilters): URLSearchParams {
   if (f.isVpo !== "") p.set("vpo", f.isVpo);
   if (f.alerts !== "") p.set("alerts", f.alerts);
   if (f.view !== "all") p.set("view", f.view);
+  if (f.onlyNew) p.set("onlyNew", "true");
   return p;
 }
 

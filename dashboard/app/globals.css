@@ -258,6 +258,23 @@ body {
   }
 }
 
+/* Issue #667 "Ver novedades" row link — a secondary affordance (not the
+   Entrar CTA), so it stays compact on desktop; below 768px it grows to the
+   D-121/D-124 44px tap-target floor, same ladder as .profile-enter-btn. */
+.profile-novedades-link {
+  margin-top: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+@media (max-width: 767px) {
+  .profile-novedades-link {
+    margin-top: 10px;
+    padding: 12px 16px;
+    min-height: 44px;
+    font-size: 13px;
+  }
+}
+
 /* ============================================================
    Animations
    ============================================================ */

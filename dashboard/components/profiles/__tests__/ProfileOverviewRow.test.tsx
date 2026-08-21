@@ -125,6 +125,28 @@ describe("ProfileOverviewRow (issue #193)", () => {
     expect(flags).toHaveAttribute("href", "/profiles/13?alerts=1");
   });
 
+  it("issue #667: renders 'Ver novedades' as a link to the profile's onlyNew-filtered feed when new_count > 0", () => {
+    const entry: ProfileOverviewEntry = {
+      ok: true,
+      profile: profile({ id: 13 }),
+      metrics: metrics({ new_count: 5 }),
+    };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    const link = screen.getByTestId("profile-ver-novedades");
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/profiles/13?onlyNew=true");
+  });
+
+  it("issue #667: hides 'Ver novedades' entirely when new_count is 0 (no disabled/zero state)", () => {
+    const entry: ProfileOverviewEntry = {
+      ok: true,
+      profile: profile(),
+      metrics: metrics({ new_count: 0 }),
+    };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    expect(screen.queryByTestId("profile-ver-novedades")).not.toBeInTheDocument();
+  });
+
   it("omits the price chip entirely when no matched property has a priced active listing (absence, not 0 EUR)", () => {
     const entry: ProfileOverviewEntry = {
       ok: true,

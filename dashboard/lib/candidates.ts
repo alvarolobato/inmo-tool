@@ -608,6 +608,25 @@ export interface CandidateFilters {
    * ordering (`ts_rank_cd`) is a deliberately deferred optional phase.
    */
   q?: string | null;
+  /**
+   * Issue #667 ("Ver novedades" button on `/profiles`): keep only candidates
+   * that are effectively new right now. Reads `ranked.is_new` VERBATIM — the
+   * same `COALESCE(nov.is_new, false)` column the NUEVO badge is derived
+   * from (`novelty` CTE, anchored on `previous_viewed_at`) and the SAME raw
+   * predicate `lib/db/profile-overview.ts`'s `new_count` computes. This is
+   * deliberately the RAW value, not the cold-start-suppressed one the
+   * mapping below applies to the badge (`suppressNovelty`): the Perfiles
+   * row's displayed "N nuevos" count is also raw (profile-overview.ts never
+   * applies cold-start suppression), so filtering on the same raw predicate
+   * keeps the button's count and this filter's result count equal BY
+   * CONSTRUCTION — extending the #447 count⇔feed alignment invariant rather
+   * than opening a second place the two could drift apart. Trade-off,
+   * accepted: on a cold-start profile a card returned here may not show its
+   * own NUEVO badge (still suppressed for cosmetic reasons) even though it
+   * matched the filter — rare and self-clearing (one profile visit ends
+   * cold-start). `null`/undefined = off (default, byte-identical to before).
+   */
+  onlyNew?: boolean | null;
 }
 
 /**
@@ -1900,6 +1919,11 @@ export async function listCandidates(
   // a parameter to websearch_to_tsquery, never interpolated.
   const q: string | null =
     typeof opts.q === "string" && opts.q.trim() !== "" ? opts.q.trim() : null;
+  // Issue #667 "Ver novedades" hard filter — a plain boolean toggle (unlike
+  // isVpo/hasAlerts, this has no bidirectional/negative form): only an
+  // explicit `true` turns it on; anything else (including `false`) collapses
+  // to off, matching heritageZone's normalisation.
+  const onlyNew: boolean = opts.onlyNew === true;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -2295,6 +2319,15 @@ export async function listCandidates(
               AND psd.doc @@ websearch_to_tsquery('es_unaccent', $25::text)
          )
        )
+       -- Issue #667 "Ver novedades" hard filter ($26). $26=false (default) =
+       -- off. $26=true = keep only candidates ranked.is_new (the RAW
+       -- COALESCE(nov.is_new,false) value — see CandidateFilters.onlyNew's
+       -- doc for why this deliberately does NOT read the cold-start-
+       -- suppressed value the mapping below applies to the badge). Applied
+       -- in the OUTER query like every other #310/#392/#398/#593 filter —
+       -- never inside pool, so it can't move the below-market median; the
+       -- keyset key/cursor are untouched (a FILTER, not a re-sort).
+       AND ($26::boolean IS NOT TRUE OR ranked.is_new = true)
      -- #425 fresh-first: novelty tier leads, then the #309 blended score, then
      -- id as the deterministic tiebreak. MUST match the keyset WHERE above AND
      -- getAdjacentCandidates' ordering, or prev/next silently desyncs (D-057 cl.4).
@@ -2334,6 +2367,8 @@ export async function listCandidates(
       // #470 free-text search term ($25). NULL = off; otherwise bound verbatim
       // to websearch_to_tsquery in the OUTER WHERE's FTS EXISTS (never interpolated).
       q,
+      // Issue #667 "Ver novedades" onlyNew toggle ($26). false = off (default).
+      onlyNew,
     ],
   );
 

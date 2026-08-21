@@ -214,6 +214,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
   });
 
@@ -261,6 +262,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
   });
 
@@ -321,6 +323,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
   });
 
@@ -428,6 +431,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE2,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
 
     mockPoolQuery.mockClear();
@@ -443,6 +447,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
   });
 
@@ -462,6 +467,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
     expect(sql).toContain("EXISTS");
     expect(sql).toContain("lf.source = $5");
@@ -480,6 +486,7 @@ describe("listCandidates", () => {
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
       null, // #470 q ($25), off by default
+      false, // issue #667 onlyNew ($26), off by default
     ]);
   });
 

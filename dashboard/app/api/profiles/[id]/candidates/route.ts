@@ -52,6 +52,12 @@
  *                 — the materialized property_search_doc). Trimmed; empty = off;
  *                 >200 chars → 400. A FILTER, not a re-sort: composes with every
  *                 other filter and leaves the keyset ordering intact.
+ *   onlyNew     — issue #667 "Ver novedades" hard filter: `true` keeps only
+ *                 candidates whose earliest active-source listing is newer than
+ *                 this profile's last-visit anchor (the same predicate the
+ *                 NUEVO badge and the Perfiles row's "N nuevos" count use — see
+ *                 lib/candidates.ts's `CandidateFilters.onlyNew` doc). Absent/
+ *                 empty = off (default). Any other value → 400.
  *   All #310 filters combine with each other, with `source`, and with
  *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
  *   data (empty until #316) and correctly return an empty feed until it flows;
@@ -248,6 +254,22 @@ export async function GET(
     hasAlerts = rawHasAlerts === "true";
   }
 
+  // Issue #667 "Ver novedades" onlyNew filter. Only the exact string "true"
+  // turns it on; any other non-empty value is a malformed request (400),
+  // never silently ignored — mirrors the hasAlerts/isVpo strict parse above.
+  // Absent/empty = off (default feed).
+  const rawOnlyNew = searchParams.get("onlyNew");
+  let onlyNew = false;
+  if (rawOnlyNew !== null && rawOnlyNew !== "") {
+    if (rawOnlyNew !== "true") {
+      return NextResponse.json(
+        formatApiError("Filtro de novedades no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    onlyNew = true;
+  }
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -367,6 +389,7 @@ export async function GET(
       includeRejected,
       state,
       q,
+      onlyNew,
     });
     return NextResponse.json(page);
   } catch (err) {

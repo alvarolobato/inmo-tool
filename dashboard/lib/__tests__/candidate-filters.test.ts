@@ -41,9 +41,26 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
       isVpo: "false",
       alerts: "1",
       view: "descartadas",
+      onlyNew: true,
     };
     const search = candidateFiltersToSearch(full);
     expect(parseCandidateFilters(search)).toEqual(full);
+  });
+
+  it("issue #667: 'Ver novedades' maps to the onlyNew=true URL param and round-trips", () => {
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, onlyNew: true };
+    const p = candidateFiltersToParams(f);
+    expect(p.get("onlyNew")).toBe("true");
+    expect(parseCandidateFilters("?onlyNew=true").onlyNew).toBe(true);
+    // A default (off) emits nothing.
+    expect(candidateFiltersToParams(DEFAULT_CANDIDATE_FILTERS).get("onlyNew")).toBeNull();
+    expect(parseCandidateFilters("").onlyNew).toBe(false);
+    // A malformed value degrades to off, never a silent unintended filter.
+    expect(parseCandidateFilters("?onlyNew=garbage").onlyNew).toBe(false);
+    expect(parseCandidateFilters("?onlyNew=1").onlyNew).toBe(false);
+    // hasActiveFilters picks it up; it is not one of the popover-group filters.
+    expect(hasActiveFilters(f)).toBe(true);
+    expect(moreFiltersActiveCount(f)).toBe(0);
   });
 
   it("#466: the 'Con alertas' state maps to the alerts=1 URL param (old links/bookmarks keep working)", () => {

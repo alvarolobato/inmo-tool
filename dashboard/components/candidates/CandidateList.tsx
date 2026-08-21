@@ -111,6 +111,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
     isVpo,
     alerts,
     view,
+    onlyNew,
   } = filters;
   // Derived from the segmented `view`: what the fetch layer / card rendering
   // used to read off two booleans.
@@ -215,6 +216,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       // definition of the predicate — see lib/candidates.ts).
       if (alerts === "1") url.searchParams.set("hasAlerts", "true");
       else if (alerts === "0") url.searchParams.set("hasAlerts", "false");
+      // Issue #667 "Ver novedades": omitted (default) = off, same as heritageZone.
+      if (onlyNew) url.searchParams.set("onlyNew", "true");
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
@@ -319,6 +322,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       heritageZone,
       isVpo,
       alerts,
+      onlyNew,
       showRejected,
       trackedOnly,
     ],
@@ -519,6 +523,45 @@ export function CandidateList({ profileId }: { profileId: number }) {
           >
             Todavía no sigues ninguna propiedad. Pulsa &quot;Seguir&quot; (✓) en
             una tarjeta para añadirla a tu seguimiento.
+          </p>
+        </div>
+      );
+    }
+    // Issue #667: "Ver novedades" is on but nothing is new right now (a race
+    // between the Perfiles row's count and this fetch, or the owner navigated
+    // here directly). Not broken and not a missing-data case — say so and
+    // offer a one-click way back to the full feed, same pattern as the
+    // free-text-search empty state below.
+    if (onlyNew) {
+      return (
+        <div>
+          {filterBar}
+          <p
+            data-testid="no-candidates-only-new"
+            style={{
+              marginTop: 16,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              margin: 0,
+            }}
+          >
+            No hay candidatos nuevos desde tu última visita.{" "}
+            <button
+              type="button"
+              data-testid="clear-only-new-empty-state"
+              onClick={() => updateFilters({ ...filters, onlyNew: false })}
+              style={{
+                padding: 0,
+                border: "none",
+                background: "transparent",
+                color: "var(--accent)",
+                cursor: "pointer",
+                fontSize: 13,
+                textDecoration: "underline",
+              }}
+            >
+              Ver todos
+            </button>
           </p>
         </div>
       );
