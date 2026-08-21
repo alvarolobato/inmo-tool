@@ -769,6 +769,120 @@ class TestUncalibratedConnectorRetainsHtml:
             _cleanup(pg_conn)
 
 
+class TestRetainCaptureHtmlForParsing:
+    """DB-free: `etl.config.retain_capture_html_for` (issue #654, D-150) parses
+    the CSV connector-name list correctly, independent of any DB/capture
+    plumbing. Reverting the parsing to a naive `value.split(",")` with no
+    normalization would fail the whitespace/case/empty-entry cases below."""
+
+    def test_default_is_empty(self, monkeypatch):
+        monkeypatch.delenv("ETL_RETAIN_CAPTURE_HTML_FOR", raising=False)
+        from etl.config import retain_capture_html_for
+
+        assert retain_capture_html_for() == frozenset()
+
+    def test_parses_and_normalizes_csv_list(self, monkeypatch):
+        monkeypatch.setenv(
+            "ETL_RETAIN_CAPTURE_HTML_FOR", " Idealista, hipoges ,, aliseda "
+        )
+        from etl.config import retain_capture_html_for
+
+        assert retain_capture_html_for() == frozenset(
+            {"idealista", "hipoges", "aliseda"}
+        )
+
+    def test_empty_string_is_no_retention(self, monkeypatch):
+        monkeypatch.setenv("ETL_RETAIN_CAPTURE_HTML_FOR", "")
+        from etl.config import retain_capture_html_for
+
+        assert retain_capture_html_for() == frozenset()
+
+
+class TestConfigDrivenHtmlRetention:
+    """Issue #654 / D-150: `etl.retain_capture_html_for` lets an operator
+    retain a CALIBRATED connector's captured HTML (Idealista is calibrated —
+    see D-145) for diagnosis, independent of D-146's existing
+    calibration-based retention (`TestUncalibratedConnectorRetainsHtml`
+    above). Real Postgres + the real Idealista connector/fixture, same
+    pattern as that suite's control test — only the config knob differs.
+    """
+
+    def test_idealista_html_retained_when_connector_is_listed(
+        self, pg_conn, monkeypatch
+    ):
+        """The core fix: naming 'idealista' in the config keeps its HTML
+        even though the connector is fully calibrated. Reverting the OR
+        clause in etl/capture.py's `retain_html` computation to D-146's
+        calibration check alone makes this fail."""
+        monkeypatch.setenv("ETL_RETAIN_CAPTURE_HTML_FOR", "idealista")
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, html FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, stored_html = cur.fetchone()
+            assert status == "done"
+            assert stored_html == _FIXTURE_HTML, (
+                "etl.retain_capture_html_for=idealista must retain the "
+                "captured HTML for issue #654's diagnosis, even though "
+                "Idealista is a calibrated connector"
+            )
+        finally:
+            _cleanup(pg_conn)
+
+    def test_idealista_html_still_nulled_when_retention_off(self, pg_conn, monkeypatch):
+        """Off case (explicit, regardless of ambient environment): with the
+        config knob unset, Idealista's HTML must still be nulled after
+        processing — the default must be 'no extra retention', not
+        accidentally-on."""
+        monkeypatch.delenv("ETL_RETAIN_CAPTURE_HTML_FOR", raising=False)
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                (stored_html,) = cur.fetchone()
+            assert stored_html is None, (
+                "etl.retain_capture_html_for defaults to empty — Idealista's "
+                "HTML must still be nulled after processing when it isn't "
+                "explicitly named"
+            )
+        finally:
+            _cleanup(pg_conn)
+
+    def test_listing_a_different_connector_does_not_retain_idealista_html(
+        self, pg_conn, monkeypatch
+    ):
+        """The list is per-connector, not a global switch: naming some other
+        connector must not retain Idealista's HTML too."""
+        monkeypatch.setenv("ETL_RETAIN_CAPTURE_HTML_FOR", "hipoges")
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                (stored_html,) = cur.fetchone()
+            assert stored_html is None
+        finally:
+            _cleanup(pg_conn)
+
+
 class TestCaptureTriggersMaterialize:
     """Issue #269: a browser-extension capture that lands a real listing must
     trigger the same dashboard re-materialize + scoring the connector
