@@ -98,14 +98,6 @@ services:
       CONFIG_SCHEMA_PATH: /app/config/schema.yaml
       ETL_DASHBOARD_BASE_URL: ${ETL_DASHBOARD_BASE_URL-http://dashboard:4000}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
-      # Issue #654 / D-150: this service's `environment:` block is an explicit
-      # allowlist, not a passthrough — a var set in the host .env but not
-      # listed here never reaches the container, regardless of what
-      # config/schema.yaml declares for it. Add each new env-backed schema
-      # key here explicitly if it's meant to be operator-settable via .env.
-      # (The admin config UI's config.yaml route is NOT gated by this list —
-      # see D-151 — and is the one already live for etl.* tunables today.)
-      ETL_RETAIN_CAPTURE_HTML_FOR: ${ETL_RETAIN_CAPTURE_HTML_FOR:-}
       OTEL_SERVICE_NAME: inmo-tool-etl
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
