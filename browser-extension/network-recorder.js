@@ -23,7 +23,7 @@
  * become a back door around that: it is a DIAGNOSTIC tool the owner
  * explicitly arms for one reload, never an ingestion channel, and nothing it
  * captures may feed a connector without its own separate decision (see the
- * D-1xx record for this feature).
+ * D-153 record for this feature).
  *
  * Concretely, before anything is buffered for possible storage:
  *   - `Authorization`, `Cookie`, `Set-Cookie`, and any header/query-param that

@@ -2,7 +2,7 @@
  * "Forzar captura + diagnóstico" — server-only DB access (issue #671).
  *
  * `extension_diagnostic` is a DIAGNOSTIC channel, never an ingest path — see
- * etl/schema/init.sql's table comment and the D-1xx record for this feature.
+ * etl/schema/init.sql's table comment and the D-153 record for this feature.
  * `insertDiagnostic` uses the write pool (@/lib/db-write); never import this
  * from a client component. The list/get readers use the read-only pool
  * (@/lib/db), same split as every other admin data reader in this repo.

@@ -21,8 +21,8 @@
  *   - no error surface anywhere (the D-041 bar).
  *
  * Extensión (#509) and Descubrimiento (#511) have now been removed — their
- * function moved to inline CTAs / Salud de datos. The strip is down to its
- * intended 8-tab set, asserted here.
+ * function moved to inline CTAs / Salud de datos. Diagnósticos (#671) was
+ * added on top. The strip's exact tab set is asserted here, exhaustively.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -33,7 +33,13 @@ import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 // The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
-// were removed by #509 / #511; "URLs capturadas" was deleted outright by #653.
+// were removed by #509 / #511; "URLs capturadas" was deleted outright by #653;
+// Diagnósticos was added by #671 (extension force-capture diagnostics, D-153).
+//
+// This list is EXHAUSTIVE — `toHaveText` below compares it against every link
+// in the strip, so adding an entry to `lib/admin-nav.ts` without adding it
+// here fails this spec. That is deliberate: the strip is the one surface where
+// a silently-appearing admin tab should be a conscious decision.
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
   "Conectores",
@@ -43,6 +49,7 @@ const EXPECTED_STRIP_LABELS = [
   "Duplicados",
   "LLM",
   "Configuración",
+  "Diagnósticos",
 ];
 
 // Labels that must NOT appear in the consolidated strip anymore.

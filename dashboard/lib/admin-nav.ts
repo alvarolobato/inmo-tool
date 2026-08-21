@@ -104,7 +104,7 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   },
   // "Forzar captura + diagnóstico" (issue #671): recent extension diagnostics
   // (HTML + detection state), retrievable without SQL — see
-  // lib/db/extension-diagnostics.ts and the D-1xx record for this feature.
+  // lib/db/extension-diagnostics.ts and the D-153 record for this feature.
   {
     href: "/admin/diagnostics",
     label: "Diagnósticos",

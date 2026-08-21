@@ -2821,7 +2821,7 @@ async function handleCheckStatus(captureId) {
 // A DIAGNOSTIC channel, never an ingest path: sendDiagnostic POSTs to
 // /api/extension/diagnostic — a dedicated route/table `/api/extension/capture`
 // never touches and etl/capture.py's poller never reads (see the route's own
-// docstring and the D-1xx record for this feature). Works on ANY page —
+// docstring and the D-153 record for this feature). Works on ANY page —
 // content-script.js's CAPTURE_DIAGNOSTIC handler degrades every field to
 // null/false for a page detect.js doesn't recognise, by construction.
 //

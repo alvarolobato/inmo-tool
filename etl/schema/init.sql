@@ -3191,7 +3191,7 @@ CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
 -- here; the extension never calls /api/extension/capture for this flow.
 --
 -- Retention is the whole point of this feature (three real investigations
--- this week depended on page HTML surviving by accident — see the D-1xx
+-- this week depended on page HTML surviving by accident — see the D-153
 -- record for this table). It ALWAYS keeps the HTML, regardless of connector
 -- calibration state or #670's `etl.retain_capture_html_for` config (which
 -- only governs `extension_capture.html`, a completely different column on a
