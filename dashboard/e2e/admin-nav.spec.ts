@@ -22,9 +22,9 @@
  *
  * Extensión (#509) and Descubrimiento (#511) have now been removed — their
  * function moved to inline CTAs / Salud de datos. #642 P1 merges "Conectores"
- * + "Captura (admin)" into one "Fuentes" tab. The strip is down to its
- * current 7-tab set, asserted here — an intermediate state on the way to
- * #636's 6-section end state (P2 retires Monitor ETL + Salud de datos).
+ * + "Captura (admin)" into one "Fuentes" tab, and Diagnósticos (#671) was
+ * added on top — an 8-tab intermediate state on the way to #636's 6-section
+ * end state (P2 retires Monitor ETL + Salud de datos). Asserted exhaustively.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -36,10 +36,16 @@ import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 // The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
 // were removed by #509 / #511; "URLs capturadas" was deleted outright by
-// #653; #642 P1 merges "Conectores" + "Captura (admin)" into "Fuentes". P2
-// (still ahead) retires "Monitor ETL" + "Salud de datos" into Actividad/
+// #653; #642 P1 merges "Conectores" + "Captura (admin)" into "Fuentes";
+// Diagnósticos was added by #671 (extension force-capture diagnostics, D-153).
+// P2 (still ahead) retires "Monitor ETL" + "Salud de datos" into Actividad/
 // Estado, reaching the 6-section end state (#636's own EC-1 wording) — this
 // strip is the P1-scoped intermediate state, not that end state yet.
+//
+// This list is EXHAUSTIVE — `toHaveText` below compares it against every link
+// in the strip, so adding an entry to `lib/admin-nav.ts` without adding it
+// here fails this spec. That is deliberate: the strip is the one surface where
+// a silently-appearing admin tab should be a conscious decision.
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
   "Fuentes",
@@ -48,6 +54,7 @@ const EXPECTED_STRIP_LABELS = [
   "Duplicados",
   "LLM",
   "Configuración",
+  "Diagnósticos",
 ];
 
 // Labels that must NOT appear in the consolidated strip anymore.

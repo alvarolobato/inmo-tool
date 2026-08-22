@@ -179,6 +179,21 @@
     </div>
   </div>
 
+  <!-- "Forzar captura + diagnóstico" (issue #671) — ALWAYS visible, outside
+       every #state-* panel toggled by showState(), so it's reachable on
+       every page class: supported, unsupported, detail, results, a
+       validation/guide panel, or a blocked/challenge page. Sends the raw
+       HTML plus what the extension thought about the page to a dedicated,
+       ingest-free diagnostic channel — never /api/extension/capture. -->
+  <footer id="diagnostic-footer" class="diagnostic-footer">
+    <div class="diagnostic-actions">
+      <button id="diagnostic-btn" class="btn btn-secondary btn-small">
+        Forzar captura + diagnóstico
+      </button>
+    </div>
+    <p id="diagnostic-status" class="state-sub diagnostic-status hidden"></p>
+  </footer>
+
   <script src="capture-search-url.js"></script>
   <script src="popup.js"></script>
 </body>
