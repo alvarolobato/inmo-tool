@@ -9,10 +9,14 @@
  * merge order, not the session split, and not the DST-safe day boundary —
  * i.e. it would test nothing that can actually break.
  *
- * Skips cleanly when no Postgres is reachable, matching the other
- * `*.integration.test.ts` files here. Under `npm test` the harness points
- * these at a throwaway per-run database (issue #159), so the seeded rows can
- * never collide with anything.
+ * Skips cleanly when no Postgres is reachable; `REQUIRE_DB=1` makes that a
+ * hard failure (AGENTS.md / etl/tests/conftest.py's contract, issue #160).
+ * The skip is a real `describe.skipIf`, NOT an `if (!dbAvailable) return;`
+ * inside each `it()` — Vitest counts an empty body as a PASS, so that idiom
+ * reports this file green while asserting nothing, which is precisely the
+ * silent-skip regression #160 exists to stop. Under `npm test` the harness
+ * points these at a throwaway per-run database (issue #159), so the seeded
+ * rows can never collide with anything.
  *
  * Fixed calendar day: **2026-03-05**, deliberately in CET (UTC+1) rather
  * than "today", so the Madrid-local window is a stable, hand-checkable
@@ -33,7 +37,32 @@ const WINDOW = { fromDay: DAY, toDayExclusive: NEXT };
 const TAG = "e2e644";
 
 let pool: Pool;
-let dbAvailable = false;
+
+const REQUIRE_DB = process.env.REQUIRE_DB === "1";
+
+/**
+ * Probed at module scope (not in `beforeAll`) because `describe.skipIf` is
+ * evaluated at collection time, before any hook has run.
+ */
+const dbAvailable = await (async () => {
+  const probe = new Pool(buildPgPoolConfig({ max: 1 }));
+  try {
+    await probe.query("SELECT 1");
+    return true;
+  } catch (err) {
+    if (REQUIRE_DB) {
+      throw new Error(
+        "REQUIRE_DB=1 but Postgres is unreachable for activity.integration.test.ts: " +
+          String(err),
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.warn("[activity.integration.test] no reachable Postgres — skipping.");
+    return false;
+  } finally {
+    await probe.end().catch(() => {});
+  }
+})();
 const seededListingIds: number[] = [];
 const seededPropertyIds: number[] = [];
 
@@ -171,15 +200,8 @@ async function cleanup(): Promise<void> {
 }
 
 beforeAll(async () => {
+  if (!dbAvailable) return;
   pool = new Pool(buildPgPoolConfig({ max: 2 }));
-  try {
-    await pool.query("SELECT 1");
-    dbAvailable = true;
-  } catch {
-    // eslint-disable-next-line no-console
-    console.warn("[activity.integration.test] no reachable Postgres — skipping.");
-    return;
-  }
   await cleanup();
   await seed();
 });
@@ -193,9 +215,8 @@ function only(events: ActivityEvent[], kind: string): ActivityEvent[] {
   return events.filter((e) => e.kind === kind);
 }
 
-describe("getActivityEvents — the merged ingest ledger", () => {
+describe.skipIf(!dbAvailable)("getActivityEvents — the merged ingest ledger", () => {
   it("merged timeline: crawl, capture, dedup and manual events come back in one time-ordered stream (EC-1)", async () => {
-    if (!dbAvailable) return;
     const { events, truncated } = await getActivityEvents(WINDOW);
     expect(truncated).toBe(false);
 
@@ -257,7 +278,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("session grouping: 15 captures within 30-min gaps collapse into one row; a 31-min gap splits a second (EC-2)", async () => {
-    if (!dbAvailable) return;
     const { events } = await getActivityEvents(WINDOW);
     const sessions = only(events, "captura").filter((e) => e.source === `${TAG}_idealista`);
 
@@ -287,7 +307,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("the 23:30Z capture lands on the NEXT Madrid day, not this one", async () => {
-    if (!dbAvailable) return;
     const { events } = await getActivityEvents({ fromDay: NEXT, toDayExclusive: "2026-03-07" });
     const sessions = only(events, "captura").filter((e) => e.source === `${TAG}_idealista`);
     expect(sessions.length).toBe(1);
@@ -295,7 +314,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("a sweep gets a row of its own ONLY when it recorded no per-connector outcome", async () => {
-    if (!dbAvailable) return;
     const { events } = await getActivityEvents(WINDOW);
     const sweeps = only(events, "sweep");
     // The 08:00 run has two result rows, so its connectors speak for it and
@@ -310,7 +328,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("status changes group per source and transition, count their evidence, and exclude first sightings", async () => {
-    if (!dbAvailable) return;
     const { events } = await getActivityEvents(WINDOW);
     const estado = only(events, "estado").filter((e) => e.source === `${TAG}_fotocasa`);
 
@@ -330,7 +347,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("re-capture batches and block episodes are in the same stream", async () => {
-    if (!dbAvailable) return;
     const { events } = await getActivityEvents(WINDOW);
 
     const recola = only(events, "recola").filter((e) => e.source === `${TAG}_idealista`);
@@ -347,7 +363,6 @@ describe("getActivityEvents — the merged ingest ledger", () => {
   });
 
   it("getPreviousActivityDay finds the newest day strictly before the window", async () => {
-    if (!dbAvailable) return;
     // Everything seeded is on 2026-03-05 (Madrid), so from 2026-03-06 the
     // previous day with activity is 2026-03-05 itself.
     const prev = await getPreviousActivityDay(NEXT);

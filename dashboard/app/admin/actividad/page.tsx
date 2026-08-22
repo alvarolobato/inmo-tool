@@ -15,9 +15,14 @@
  *          aviso chips, all in the same stream and in time order.
  *   - "¿por qué esta pasada no produjo nada?"
  *        → the `Pasada` rows: a sweep that recorded no per-connector outcome
- *          at all (production run #212: 0 conectores, 3 ms — the D-009
- *          crash-loop guard declining to sweep), which no existing surface
- *          could distinguish from a healthy quiet run.
+ *          at all, plus the `Omitidos` metric that says WHICH quiet run it
+ *          was — `Conectores N · Omitidos N` when every connector is
+ *          disabled, `Conectores 0 · Omitidos 0` when none was due (D-050
+ *          freshness gate) or none had a scope to cover (#71/#99). No
+ *          existing surface could tell those apart. (Production run #212 —
+ *          0 conectores, 3 ms — is one of the latter two; it is NOT the
+ *          D-009 restart guard, which returns before creating a
+ *          `connector_runs` row and so never reaches this timeline.)
  *
  * ── Boundaries with the other two #642 sections ─────────────────────────
  * Estado (#638/#640) is "what is TRUE NOW" — queue depth, freshness, the
@@ -65,6 +70,14 @@ import type {
 
 /** Days fetched per request, and per "ver más" click. */
 const PAGE_DAYS = 3;
+/**
+ * The narrower window offered when a page comes back truncated. The
+ * MAX_EVENTS cap (400, lib/db/activity.ts) applies per REQUEST, not per day,
+ * so asking for one day at a time gives each day the whole budget instead of
+ * a third of it — which is an actual route to the dropped rows rather than
+ * just an apology for them.
+ */
+const NARROW_DAYS = 1;
 
 export default function ActividadPage() {
   const [pages, setPages] = useState<ActivityResponse[]>([]);
@@ -73,14 +86,21 @@ export default function ActividadPage() {
   const [error, setError] = useState<string | null>(null);
   const [kinds, setKinds] = useState<ActivityKind[]>([]);
   const [source, setSource] = useState<string | null>(null);
+  /** Switched on from the truncation banner; never back off automatically. */
+  const [narrow, setNarrow] = useState(false);
 
-  const fetchPage = useCallback(async (before: string | null): Promise<ActivityResponse | null> => {
-    const qs = new URLSearchParams({ days: String(PAGE_DAYS) });
+  const fetchPage = useCallback(
+    async (before: string | null, days: number): Promise<ActivityResponse | null> => {
+    const qs = new URLSearchParams({ days: String(days) });
     if (before) qs.set("before", before);
     const res = await fetch(`/api/etl/activity?${qs.toString()}`);
     if (!res.ok) throw new Error("No se pudo cargar la actividad.");
     return (await res.json()) as ActivityResponse;
-  }, []);
+    },
+    [],
+  );
+
+  const pageDays = narrow ? NARROW_DAYS : PAGE_DAYS;
 
   useEffect(() => {
     let cancelled = false;
@@ -88,7 +108,7 @@ export default function ActividadPage() {
       setLoading(true);
       setError(null);
       try {
-        const first = await fetchPage(null);
+        const first = await fetchPage(null, pageDays);
         if (!cancelled && first) setPages([first]);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Error al cargar la actividad.");
@@ -99,7 +119,7 @@ export default function ActividadPage() {
     return () => {
       cancelled = true;
     };
-  }, [fetchPage]);
+  }, [fetchPage, pageDays]);
 
   const last = pages[pages.length - 1];
   const nextBefore = last?.nextBefore ?? null;
@@ -112,14 +132,14 @@ export default function ActividadPage() {
     setLoadingMore(true);
     setError(null);
     try {
-      const page = await fetchPage(nextBefore);
+      const page = await fetchPage(nextBefore, pageDays);
       if (page) setPages((prev) => [...prev, page]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar más actividad.");
     } finally {
       setLoadingMore(false);
     }
-  }, [fetchPage, nextBefore]);
+  }, [fetchPage, nextBefore, pageDays]);
 
   const allDays = useMemo(() => pages.flatMap((p) => p.days), [pages]);
   const sources = useMemo(() => sourcesIn(allDays), [allDays]);
@@ -221,9 +241,33 @@ export default function ActividadPage() {
         </label>
       </div>
 
+      {/* The cap is per REQUEST, so a narrower window is a real route to the
+          dropped rows, not a consolation. Only offered while it would
+          actually change something: once already at one day per request,
+          the honest message is that the cap is hit and there is no further
+          narrowing left. */}
       {truncated && (
         <p className="act-degraded" data-testid="actividad-truncated">
-          Se ha alcanzado el límite de eventos de la ventana: faltan los más antiguos de estos días.
+          Se ha alcanzado el límite de eventos de la ventana: faltan los más antiguos de estos
+          días.{" "}
+          {narrow ? (
+            <>
+              Ya se está cargando un día por petición, que es la ventana más estrecha disponible:
+              este día por sí solo supera el límite.
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="act-narrow-btn"
+                data-testid="actividad-narrow"
+                onClick={() => setNarrow(true)}
+              >
+                Cargar un día por petición
+              </button>{" "}
+              para recuperarlos.
+            </>
+          )}
         </p>
       )}
 
@@ -275,7 +319,15 @@ function DaySection({ day, events }: { day: string; events: ActivityEvent[] }) {
   if (roll.guardados) parts.push(`${formatCount(roll.guardados)} anuncios guardados`);
   if (roll.capturas) parts.push(`${formatCount(roll.capturas)} capturas`);
   if (roll.retiradas) parts.push(`${formatCount(roll.retiradas)} retiradas`);
-  if (roll.errores) parts.push(`${formatCount(roll.errores)} errores`);
+  // Two units, never summed into one figure: `errores` counts ANUNCIOS that
+  // failed, `eventosConError` counts whole runs/sessions that failed. Adding
+  // them yielded a "30 errores" that was neither 30 listings nor 30 runs.
+  if (roll.errores)
+    parts.push(`${formatCount(roll.errores)} ${roll.errores === 1 ? "anuncio" : "anuncios"} con error`);
+  if (roll.eventosConError)
+    parts.push(
+      `${formatCount(roll.eventosConError)} ${roll.eventosConError === 1 ? "evento" : "eventos"} con error`,
+    );
   if (roll.enCurso) parts.push(`${formatCount(roll.enCurso)} en curso`);
 
   return (
@@ -351,8 +403,15 @@ function ActivityRow({ event }: { event: ActivityEvent }) {
         </span>
         <span className="act-metrics">
           {metrics.map((m) => (
-            <span key={m.label} className="act-metric">
-              <span className="act-metric-label">{m.label}</span>
+            <span key={m.label} className="act-metric" title={m.note}>
+              <span className="act-metric-label">
+                {m.label}
+                {m.note && (
+                  <abbr className="act-metric-caveat" title={m.note} aria-label={m.note}>
+                    *
+                  </abbr>
+                )}
+              </span>
               <span
                 className="act-metric-value"
                 style={m.emphasis ? { color: STATUS_COLOR[m.emphasis === "bad" ? "error" : "aviso"] } : undefined}
@@ -369,9 +428,16 @@ function ActivityRow({ event }: { event: ActivityEvent }) {
             value we do not know yet is shown rather than swallowed. */}
         {event.codes.length > 0 && (
           <span className="act-codes">
-            {event.codes.map((code) => (
+            {/* Keyed by position, not by value: `codes` is not guaranteed to
+                hold distinct short codes. `verification_alarm` (#643) is free
+                text — init.sql's own examples are 'ratio 8/10 >= 80%' and
+                'baseline 60% vs 0% histórico' — so two rolled-up rows can
+                carry the identical string and a value key would collide. The
+                array is render-only and never reordered, so the index is
+                stable here. */}
+            {event.codes.map((code, i) => (
               <span
-                key={code}
+                key={`${i}-${code}`}
                 className="act-code"
                 title={code}
                 style={{ color: codeColor(event.kind, code) }}

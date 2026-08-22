@@ -54,6 +54,8 @@
  * renders "—" rather than a division.
  */
 
+import { formatDepth } from "@/lib/queues";
+
 // ─── Event vocabulary ────────────────────────────────────────────────────
 
 export type ActivityKind =
@@ -267,10 +269,21 @@ export const ESTADO_LABEL: Record<string, string> = {
 
 // ─── Formatting ──────────────────────────────────────────────────────────
 
-/** A count, Spanish thousands separators. `null` → "—", never "0". */
+/**
+ * A count, Spanish thousands separators. `null` → "—", never "0".
+ *
+ * Delegates to `formatDepth` (lib/queues.ts, D-163) rather than calling
+ * `toLocaleString("es-ES")`: CLDR Spanish sets `minimumGroupingDigits: 2`, so
+ * the locale route does NOT group four-digit numbers — 5445 would render
+ * "5445" and only cross to "10.000" above 9.999. That is exactly the range
+ * this timeline's headline counts live in (4.912 captures, 5.445 anuncios),
+ * so the separator would appear to switch on at random. One implementation,
+ * shared, also keeps the output independent of whether the runtime ships
+ * full ICU.
+ */
 export function formatCount(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return n.toLocaleString("es-ES");
+  return formatDepth(n) ?? "—";
 }
 
 /** A duration in ms as a short human string. `null` → "—". */
@@ -362,7 +375,23 @@ export interface ActivityMetric {
   value: string;
   /** Draw attention: a nonzero error/withdrawal count, an alarm. */
   emphasis?: "bad" | "warn";
+  /**
+   * A caveat about how far this number can be trusted, rendered as the
+   * chip's `title`. Only set where the figure is genuinely not settled —
+   * see `RECOLA_CAVEAT`.
+   */
+  note?: string;
 }
+
+/**
+ * Why a `recola` count is not a settled historical fact.
+ * `capture_worklist.requeued_at` holds only the LAST requeue per row, so
+ * re-requeueing a batch moves it out of the day it was first shown under and
+ * silently shrinks that day's figure. A history feed must disclose that
+ * rather than let the number read as final.
+ */
+export const RECOLA_CAVEAT =
+  "El recuento de recoladas puede cambiar: capture_worklist.requeued_at guarda solo la última recolada de cada fila, así que volver a recolar estos anuncios los mueve a la fecha nueva y reduce este día.";
 
 const c = (ev: ActivityEvent, k: string): number | null => ev.counts[k] ?? null;
 
@@ -401,8 +430,22 @@ export function metricsFor(ev: ActivityEvent): ActivityMetric[] {
       // The "¿por qué esta pasada no produjo nada?" row. A sweep only gets a
       // row of its own when it recorded no per-connector outcome at all —
       // otherwise its connectors speak for it and this would be a duplicate.
+      //
+      // `Omitidos` is what makes the row answer that question (D-166 point 5).
+      // `_finish_connector_run` writes total_connectors = ok + failed +
+      // skipped, and the routes to a childless sweep are not the same event:
+      //   · every connector disabled in connector_config increments `skipped`
+      //     → `Conectores N · Omitidos N`;
+      //   · every connector fresh and not due (D-050 cadence gate), or with no
+      //     scope to cover (#71/#99), `continue`s WITHOUT touching a counter
+      //     → `Conectores 0 · Omitidos 0`.
+      // Rendered unconditionally, zero included: the distinction IS the zero,
+      // so suppressing it would merge the two cases back together. (This row
+      // is never the D-009 restart guard — that path returns before any
+      // connector_runs row exists. See lib/db/activity.ts's header.)
       return [
         { label: "Conectores", value: formatCount(c(ev, "connectors")) },
+        { label: "Omitidos", value: formatCount(c(ev, "skipped")) },
         { label: "Duración", value: formatMs(c(ev, "durationMs")) },
       ];
     }
@@ -429,7 +472,7 @@ export function metricsFor(ev: ActivityEvent): ActivityMetric[] {
       return out;
     }
     case "recola":
-      return [{ label: "Recoladas", value: formatCount(c(ev, "rows")) }];
+      return [{ label: "Recoladas", value: formatCount(c(ev, "rows")), note: RECOLA_CAVEAT }];
     case "dedup": {
       const out: ActivityMetric[] = [
         { label: "Pares comparados", value: formatCount(c(ev, "pairs")) },
@@ -480,8 +523,18 @@ export interface DayRollup {
   capturas: number;
   /** Listings that changed to a non-active status that day. */
   retiradas: number;
-  /** Events in an `error` state, plus per-listing crawl/capture failures. */
+  /**
+   * ANUNCIOS that failed: per-listing crawl errors + capture failures.
+   * Unit: listings.
+   */
   errores: number;
+  /**
+   * EVENTS whose own status is `error` (a whole run/session that failed).
+   * Unit: events. Kept separate from `errores` on purpose — summing the two
+   * produced a figure like "30 errores" that was 12 broken listings plus 18
+   * failed runs, a number in no unit at all and comparable to nothing.
+   */
+  eventosConError: number;
   /** Events still in flight at the moment of the read. */
   enCurso: number;
   /** Timeline rows (after rollup), not raw table rows. */
@@ -501,12 +554,13 @@ export function rollupDay(events: readonly ActivityEvent[]): DayRollup {
     capturas: 0,
     retiradas: 0,
     errores: 0,
+    eventosConError: 0,
     enCurso: 0,
     eventos: events.length,
   };
   for (const ev of events) {
     if (ev.status === "curso") roll.enCurso += 1;
-    if (ev.status === "error") roll.errores += 1;
+    if (ev.status === "error") roll.eventosConError += 1;
     switch (ev.kind) {
       case "crawl":
         roll.guardados += ev.counts.fetched ?? 0;

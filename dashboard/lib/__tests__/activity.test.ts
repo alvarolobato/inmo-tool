@@ -52,6 +52,22 @@ describe("formatting — not measured is not zero (D-162)", () => {
     expect(formatMs(null)).toBe("—");
   });
 
+  it("groups thousands from the FIRST four-digit number, not from 10.000 (D-163)", () => {
+    // Regression guard. `toLocaleString("es-ES")` sets
+    // minimumGroupingDigits: 2, so it renders 5445 as "5445" and only starts
+    // grouping above 9.999 — meaning the separator would appear to switch on
+    // at random across exactly the range these counts occupy. formatCount
+    // delegates to lib/queues.ts's formatDepth to avoid that.
+    expect(formatCount(1530)).toBe("1.530");
+    expect(formatCount(4912)).toBe("4.912");
+    expect(formatCount(5445)).toBe("5.445");
+    expect(formatCount(9999)).toBe("9.999");
+    expect(formatCount(10000)).toBe("10.000");
+    expect(formatCount(999)).toBe("999");
+    // The exact figure the PR body quoted, which used to render "5445".
+    expect(`${formatCount(5445)} anuncios guardados`).toBe("5.445 anuncios guardados");
+  });
+
   it("refuses to divide by a zero denominator", () => {
     expect(msPer(1000, 0)).toBeNull();
     expect(msPer(null, 10)).toBeNull();
@@ -139,6 +155,38 @@ describe("metricsFor — one vocabulary, no per-kind prose", () => {
     expect(timed.find((m) => m.label.startsWith("Espera de render"))!.value).toBe("1.5 s");
   });
 
+  it("a Pasada distinguishes 'all disabled' from 'nothing was due' (D-166 point 5)", () => {
+    // The whole reason the row exists. Without `Omitidos` both of these
+    // render as an identical, chip-less, apparently-ordinary sweep.
+    const allDisabled = metricsFor(
+      ev({ kind: "sweep", source: null, counts: { connectors: 3, skipped: 3, durationMs: 4 } }),
+    );
+    expect(allDisabled.map((m) => m.label)).toEqual(["Conectores", "Omitidos", "Duración"]);
+    expect(allDisabled.find((m) => m.label === "Conectores")!.value).toBe("3");
+    expect(allDisabled.find((m) => m.label === "Omitidos")!.value).toBe("3");
+
+    // Production run #212's shape: nothing was due (D-050 cadence gate) or
+    // nothing had a scope to cover (#71/#99) — NOT the D-009 restart guard,
+    // which never writes a connector_runs row at all.
+    const nothingDue = metricsFor(
+      ev({ kind: "sweep", source: null, counts: { connectors: 0, skipped: 0, durationMs: 3 } }),
+    );
+    expect(nothingDue.find((m) => m.label === "Omitidos")!.value).toBe("0");
+
+    // The zero must survive: suppressing it collapses the two cases back
+    // into the one unreadable row.
+    expect(nothingDue.map((m) => m.label)).toContain("Omitidos");
+  });
+
+  it("a recola count discloses that it is retroactively mutable", () => {
+    // capture_worklist.requeued_at holds only the LAST requeue, so this
+    // figure can shrink after the fact. A history feed must say so.
+    const m = metricsFor(ev({ kind: "recola", counts: { rows: 2840 } }));
+    expect(m[0].value).toBe("2.840");
+    expect(m[0].note).toBeTruthy();
+    expect(m[0].note).toContain("requeued_at");
+  });
+
   it("a withdrawal always states how much of it is evidence-backed (D-157)", () => {
     const m = metricsFor(
       ev({ kind: "estado", note: "withdrawn", counts: { rows: 25, withEvidence: 0 } }),
@@ -178,6 +226,19 @@ describe("rollupDay — the answer to '¿cuántos datos se han cargado?'", () =>
     const roll = rollupDay([ev({ kind: "crawl", counts: { fetched: null, errors: null } })]);
     expect(roll.guardados).toBe(0);
     expect(roll.errores).toBe(0);
+  });
+
+  it("never mixes failed ANUNCIOS with failed EVENTS in one figure", () => {
+    // These are different units. Summing them produced a headline like
+    // "30 errores" that was 12 broken listings plus 18 failed runs — a
+    // number comparable to nothing and equal to neither.
+    const roll = rollupDay([
+      ev({ kind: "crawl", counts: { fetched: 100, errors: 12 } }),
+      ev({ kind: "crawl", status: "error", counts: { fetched: 0, errors: 0 } }),
+      ev({ kind: "dedup", status: "error", counts: {} }),
+    ]);
+    expect(roll.errores).toBe(12); // listings
+    expect(roll.eventosConError).toBe(2); // whole runs
   });
 });
 
@@ -251,6 +312,46 @@ describe("typed failure kinds — one copy of the vocabulary", () => {
       "uncovered",
       "unresolvable",
     ]);
+  });
+
+  it("no file anywhere re-declares the failure-class label map", async () => {
+    // The check above pins ONE file and ONE identifier, so a copy under a
+    // different name, or in a file nobody thought to name here, slips
+    // through. This sweeps the whole dashboard tree instead and keys on the
+    // label STRINGS, which a copy cannot avoid carrying whatever it calls
+    // itself. A file is a re-declaration if it pairs two distinct labels that
+    // only this map pairs; a legitimate single reuse (RunDetail.tsx's
+    // GEO_OUTCOME_LABELS shares "Sin cobertura" for a different enum, D-079)
+    // stays under the threshold by design.
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { resolve, dirname, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+    const SENTINELS = ["Bloqueo temporal", "Cambio de estructura", "Geografía no resoluble"];
+    const SKIP_DIRS = new Set(["node_modules", ".next", "coverage", "dist", ".git"]);
+    const OWNER = resolve(root, "lib", "activity.ts");
+
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        if (SKIP_DIRS.has(entry)) continue;
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.(ts|tsx)$/.test(entry)) continue;
+        if (full === OWNER) continue; // the one legitimate home
+        if (full === resolve(root, "lib", "__tests__", "activity.test.ts")) continue; // this file
+        const text = readFileSync(full, "utf8");
+        const hits = SENTINELS.filter((label) => text.includes(label));
+        if (hits.length >= 2) offenders.push(`${full} (${hits.join(", ")})`);
+      }
+    };
+    walk(root);
+
+    expect(offenders).toEqual([]);
   });
 });
 

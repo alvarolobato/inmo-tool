@@ -1751,6 +1751,16 @@ select.recapture-input {
 .act-metric-label {
   color: var(--fg-subtle);
 }
+/* Marks a metric whose value is not a settled historical fact (today: the
+   `recola` count — see RECOLA_CAVEAT in lib/activity.ts). The explanation
+   lives in the `title`/`aria-label`, so the glyph itself stays out of the
+   accessibility tree's text flow via `text-decoration: none` on <abbr>. */
+.act-metric-caveat {
+  margin-left: 2px;
+  cursor: help;
+  text-decoration: none;
+  border-bottom: none;
+}
 .act-metric-value {
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
@@ -1797,6 +1807,18 @@ select.recapture-input {
 .act-more-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+/* Inline link-style action inside the truncation banner (not a block button
+   like .act-more-btn — it sits mid-sentence). 44px tap target per D-121 is
+   met by the banner line-height plus the padding here. */
+.act-narrow-btn {
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .act-empty {
   margin: 18px 0 0;

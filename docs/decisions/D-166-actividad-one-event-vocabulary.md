@@ -3,7 +3,7 @@ id: D-166
 title: Actividad is one rolled-up event vocabulary over eight ingest tables; the run-level row appears only when it has something its connectors cannot say
 date: 2026-08-22
 group: Frontend / UI
-rule: 'Every Actividad row is {kind, source, t, counts, status} rolled up in SQL at read time; error_msg never renders, only short stable codes. A sweep gets its own row only when it recorded no per-connector outcome. Page by Madrid-local days, never a row cursor.'
+rule: 'Actividad rows are {kind, source, t, counts, status} rolled up in SQL at read time; short codes only, never error_msg. A childless sweep renders Omitidos. Page by Madrid days.'
 ---
 
 # D-166: Actividad is one rolled-up event vocabulary over eight ingest tables; the run-level row appears only when it has something its connectors cannot say
@@ -32,10 +32,31 @@ Measured in production on 2026-08-22 before designing anything:
 | `extension_block_episode` | 0 | #637's history, and the section #642 P2 would delete by omission |
 
 Two numbers set the whole design. **4.912 captures** means a raw feed is a log
-tail, not a chronology. And **`total_connectors = 0, duration_ms = 3`** — the
-D-009 crash-loop guard declining to sweep — is byte-identical, in every
-existing surface, to a healthy quiet run. That row *is* the "¿por qué esta
-pasada no produjo nada?" question.
+tail, not a chronology. And **`total_connectors = 0, duration_ms = 3`** is, in
+every existing surface, an unreadable row: it says a pass happened and
+produced nothing, without saying why.
+
+Traced through `etl/orchestrator.py`, that row means every registered
+connector `continue`d before writing a `connector_run_results` row —
+`_finish_connector_run` stores `total_connectors = ok + failed + skipped`, so
+three routes reach it: **disabled** in `connector_config` (increments
+`skipped`), **fresh and not due** under the D-050 cadence gate, and **no
+scope to cover** (#71/#99); the latter two increment nothing. All finish
+`status = 'success'` in a few ms. It is the *healthy quiet run* — and the
+open question is which of those three it was.
+
+> **Correction.** An earlier draft of this record, and of the PR that
+> introduced it, attributed that row to the **D-009 crash-loop guard
+> declining to sweep**. That is wrong and is recorded here rather than
+> quietly edited out.
+> `run_all_connectors_respecting_restart_guard` returns `None` *before*
+> `run_all_connectors` reaches `_create_connector_run`, so a suppressed
+> restart sweep writes **no `connector_runs` row at all** and cannot appear
+> on this timeline under any status. The mistake inverted the design story —
+> it cast the row as a guard refusing to work when it is in fact the quiet
+> healthy pass — and it is the reason this decision now mandates the
+> `Omitidos` metric (see point 5) instead of treating the bare row as
+> self-explanatory.
 
 **Decision**:
 
@@ -68,10 +89,19 @@ pasada no produjo nada?" question.
    happened.
 
 5. **A sweep gets a row of its own ONLY when it recorded no per-connector
-   outcome.** Otherwise its connectors already speak for it, at their real
-   times, and a sweep row would restate them. This inversion is the point, not
-   an optimisation: the only case where a run has something its children cannot
-   say is the case where it has no children.
+   outcome, and it MUST render `Omitidos` alongside `Conectores`.** Otherwise
+   its connectors already speak for it, at their real times, and a sweep row
+   would restate them. This inversion is the point, not an optimisation: the
+   only case where a run has something its children cannot say is the case
+   where it has no children.
+
+   `Omitidos` is not decoration — it is what makes the row answer its
+   question, and it is rendered even when zero, because the whole distinction
+   lives in that zero: `Conectores N · Omitidos N` is "every connector is
+   switched off", `Conectores 0 · Omitidos 0` is "nothing was due" (D-050
+   cadence gate) or "nothing had a scope to cover" (#71/#99). Suppress the
+   zero and the two collapse back into the same unreadable row this decision
+   exists to split apart.
 
 6. **Paging is by whole Madrid-local days, never a row cursor.** A session is
    only well defined relative to the window it is computed over; a cursor

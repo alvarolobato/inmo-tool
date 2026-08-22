@@ -25,13 +25,33 @@
  *
  * 1. **A sweep only gets a row of its own when it produced no per-connector
  *    outcome.** Otherwise its connectors already speak for it and a sweep
- *    row would restate them. That inversion is the point rather than an
- *    optimisation: production run #212 stored `total_connectors = 0,
- *    duration_ms = 3` — the D-009 crash-loop guard declining to sweep — and
- *    under the old run-list that is indistinguishable from a healthy quiet
- *    run. It is the literal "¿por qué esta pasada no produjo nada?" case,
- *    and it is the ONLY case where a sweep has something to say that its
- *    (nonexistent) children cannot.
+ *    row would restate them. It is the literal "¿por qué esta pasada no
+ *    produjo nada?" case, and the ONLY case where a sweep has something to
+ *    say that its (nonexistent) children cannot.
+ *
+ *    What such a row actually means — traced through `etl/orchestrator.py`,
+ *    where `_finish_connector_run` writes
+ *    `total_connectors = ok + failed + skipped`. Every registered connector
+ *    `continue`d before producing a `connector_run_results` row, by one of
+ *    three routes:
+ *      · **disabled** in `connector_config` — increments `skipped`, so the
+ *        row reads `Conectores N · Omitidos N`;
+ *      · **fresh and not due** under the D-050 freshness cadence gate —
+ *        `continue`s WITHOUT touching any counter, so `Conectores 0 ·
+ *        Omitidos 0`;
+ *      · **no scope to cover** (no override, no active profile reaching its
+ *        coverage, #71/#99) — likewise increments nothing, also `0 · 0`.
+ *    All three finish `status = 'success'` in a few ms. Production run #212
+ *    (`total_connectors = 0, duration_ms = 3`) is one of the latter two:
+ *    the healthy quiet run, not a failure.
+ *
+ *    NOT the D-009 crash-loop guard, which an earlier draft of this comment
+ *    claimed. `run_all_connectors_respecting_restart_guard` returns `None`
+ *    *before* `run_all_connectors` ever calls `_create_connector_run`, so a
+ *    suppressed restart sweep writes **no row at all** and can never appear
+ *    on this timeline. The value of the row is therefore not "a guard
+ *    declining to sweep" but separating *why* a pass was quiet — which is
+ *    what the `Omitidos` metric renders.
  *
  * 2. **Disabled sources are NOT filtered out.** `activeSourceClause()` /
  *    `DISABLED_SOURCES_CTE` (lib/db/source-active.ts) exist so a switched-off
@@ -232,6 +252,16 @@ captura AS (
 -- ── recola: one row per re-capture batch (D-156) ────────────────────────
 -- A bulk requeue stamps every row it touches with the SAME requeued_at, so
 -- the batch is already a group key — no gap heuristic needed.
+--
+-- KNOWN LIMITATION, surfaced in the UI rather than hidden (see
+-- lib/activity.ts's RECOLA_CAVEAT). capture_worklist.requeued_at is a
+-- single mutable column holding only the LAST requeue of each row, not an
+-- append-only history. So a batch shown under Tuesday stops being under
+-- Tuesday the moment those same rows are requeued again — its rows move
+-- wholesale to the newer date and Tuesday's count silently shrinks. This is
+-- unavoidable without an event table; what is NOT acceptable is a history
+-- feed that presents a retroactively mutable figure as settled fact, so the
+-- row carries the caveat explicitly.
 recola AS (
   SELECT 'recola'                                   AS kind,
          w.source_portal                            AS source,
@@ -377,7 +407,18 @@ bloqueo AS (
          NULL::text                                 AS note,
          ARRAY[e.signature]                         AS codes,
          'bloqueo:' || e.id::text                   AS id,
-         '/admin/fuentes/' || e.portal              AS detail_href,
+         -- NO drill-through, deliberately. This pointed at
+         -- '/admin/fuentes/' || e.portal, but that page renders nothing
+         -- whatsoever about blocks (no extension_block_episode read
+         -- anywhere under app/admin/fuentes/), so the link was a promise to
+         -- a dead end — worse than no link, because it costs a navigation to
+         -- discover there is nothing there. A null detail_href degrades to a
+         -- non-link row, and the episode's signature still renders as its
+         -- code chip, so nothing is hidden. Re-point this the moment a
+         -- surface actually shows block episodes; the owed half is the
+         -- ACTIVE-block chip on Estado, which neither #706 nor #702 built —
+         -- tracked for #642 P2.
+         NULL::text                                 AS detail_href,
          1::bigint                                  AS rolled_up,
          jsonb_build_object('rows', 1)              AS counts
     FROM extension_block_episode e
