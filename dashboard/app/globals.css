@@ -1519,3 +1519,21 @@ select.recapture-input {
     padding-right: 16px;
   }
 }
+
+/* ── Estado "Colas" band (issue #640) ────────────────────────────────────────
+   Mobile-first per D-121: the one value that varies with width lives here as
+   a class, never as an inline style on QueueBand.tsx (whose inline styles
+   carry only colour/size, which do not vary by breakpoint).
+
+   `auto-fill` + a 150px minimum needs NO media query to be phone-correct:
+   inside `.route-shell` at 390px the content box is 366px (24px desktop
+   padding drops to `--pad-x`, 12px, below 768px), which fits exactly two
+   150px tracks plus the 8px gap and no more — a third would need 466px. On a
+   desktop 720px shell it settles at four. D-124 does not apply: this is a
+   grid with real track sizes, not a flex row of basis-0 children that can
+   never wrap. */
+.queue-band-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
