@@ -103,7 +103,14 @@ cmd_copy_data() { exec "${REPO_ROOT}/deploy/copy-data-to-prod.sh" "$@"; }
 # image around the untracked artifacts some earlier hand-run had left on the
 # host, which is how production served extension 0.14.9 — and reported
 # servedVersion 0.14.9, so the update prompt never fired — for weeks after main
-# had moved to 0.16.0 (#693).
+# had moved on (#693).
+#
+# Both guards run, because they fail on different things. The mtime guard is the
+# one that would have caught #693: `git pull` rewrites the mtime of every file it
+# changes, so a manifest bump leaves the source newer than a frozen zip and
+# `find -newer` reports STALE. It was simply never invoked on this path. The
+# content guard covers the narrower residue it cannot see — bytes that predate an
+# un-versioned source edit behind a timestamp that does not.
 #
 # Failure policy, by consequence rather than by convenience:
 #   - packaging fails but nothing stale is staged -> warn and continue. The
@@ -118,8 +125,22 @@ stage_extension_remote() {
     if ! on_prod "bash scripts/build-extension-zip.sh"; then
         echo -e "${YELLOW}warning: could not package the browser extension on the host.${NC}" >&2
     fi
-    # Content check, not mtime: the #693 artifacts carried a recent mtime with
-    # stale content, which check-extension-zip-fresh.sh reads as fresh.
+    # Freshness (mtime): did the packager actually run over the source we just
+    # pulled? This is the #693 shape — a bumped manifest sitting next to an
+    # untouched zip — and the check that was missing from this path entirely.
+    #
+    # Gated on the zip existing, so the "nothing staged -> warn and continue"
+    # policy above survives: the guard counts a MISSING zip as an error, but a
+    # host with nothing staged is the safe degrade (servedVersion null, no
+    # prompt), not a reason to refuse an unrelated backend deploy. A zip that IS
+    # present and older than the pulled source is never safe.
+    if ! on_prod "test ! -f dashboard/public/inmo-tool-extension.zip || bash scripts/check-extension-zip-fresh.sh"; then
+        echo -e "${RED}ps prod deploy: the staged extension zip is older than browser-extension/.${NC}" >&2
+        echo -e "${RED}Refusing to build — packaging did not run, or silently failed, over the pulled source.${NC}" >&2
+        exit 1
+    fi
+    # Version content: the residue mtime cannot see — a staged artifact whose
+    # bytes predate an un-versioned source edit but whose timestamp does not.
     if ! on_prod "bash scripts/check-extension-version-sync.sh"; then
         echo -e "${RED}ps prod deploy: the staged extension disagrees with browser-extension/manifest.json.${NC}" >&2
         echo -e "${RED}Refusing to build — the dashboard would report a wrong servedVersion and serve a stale zip.${NC}" >&2

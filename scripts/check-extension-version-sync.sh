@@ -15,17 +15,24 @@
 #
 # So if staging is skipped, the dashboard reports a stale `servedVersion`, decides
 # no update is available, and serves that same stale zip to anyone who asks. That
-# is exactly how production sat frozen at 0.14.9 while main shipped 0.16.0: the
+# is exactly how production sat frozen at 0.14.9 while main had moved on: the
 # artifacts were baked on the host once by hand and `ps prod deploy` never
-# re-staged them (see #693, D-060).
+# re-staged them, nor ran any freshness guard over them (see #693, D-060, D-161).
 #
 # HOW THIS DIFFERS FROM check-extension-zip-fresh.sh
 # --------------------------------------------------
 # That guard compares **mtimes** (`find -newer`) and catches "someone edited the
-# extension and rebuilt the image without repackaging". It cannot catch the #693
-# failure, where the staged artifacts carry a RECENT mtime but STALE content — an
-# mtime comparison calls that fresh. This guard compares **content**: the version
-# string, three ways. The two are complementary; run both.
+# extension and rebuilt the image without repackaging" — the broader net, and the
+# one that DOES catch #693: `git pull` rewrites the mtime of every file it
+# changes, so a manifest bump leaves the source newer than a frozen zip. #693
+# shipped because that guard was never invoked on the `ps prod deploy` path, not
+# because it was blind to the state (see D-161).
+#
+# This guard compares **content**: the version string, three ways. It covers the
+# narrower case mtime genuinely cannot see — a staged artifact whose bytes predate
+# an un-versioned source edit but whose timestamp does not, which is reachable
+# when artifacts are copied in from elsewhere rather than built in place. Neither
+# guard subsumes the other; run both.
 #
 # WHAT IS CHECKED
 #   browser-extension/manifest.json            (source of truth)
@@ -60,8 +67,15 @@ ZIP_FILE="${PUBLIC_DIR}/inmo-tool-extension.zip"
 # checker cannot disagree about what "the version" is. `"manifest_version": 3`
 # never matches: the key needs a literal leading quote, and the value must be a
 # quoted string.
+#
+# The `|| true` is load-bearing under `set -euo pipefail`: `grep` exits 1 when it
+# matches nothing, `pipefail` propagates that out of the pipeline, and the
+# command substitution at the call site would then abort the whole script — so
+# every "could not parse" / "<unparseable>" branch below became dead code and an
+# unparseable file exited 1 with NO diagnostic at all. Swallow it here and return
+# the empty string, so the callers can actually report what they found.
 extract_version() {
-  grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$1" 2>/dev/null \
+  { grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$1" 2>/dev/null || true; } \
     | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/'
 }
 
@@ -113,7 +127,7 @@ except Exception:
   fi
 
   if [ -n "${zip_manifest}" ]; then
-    ZIP_VERSION="$(printf '%s' "${zip_manifest}" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
+    ZIP_VERSION="$({ printf '%s' "${zip_manifest}" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' || true; } | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
     if [ "${ZIP_VERSION}" != "${SRC_VERSION}" ]; then
       echo "check-extension-version-sync: STALE ${ZIP_FILE}" >&2
       echo "  manifest.json says '${SRC_VERSION}' but the packaged zip contains '${ZIP_VERSION:-<unparseable>}'." >&2

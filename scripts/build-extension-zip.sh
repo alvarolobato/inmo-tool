@@ -66,7 +66,9 @@ VERSION_FILE="${OUT_DIR}/extension-version.json"
 if [ -f "${MANIFEST}" ]; then
   # First "version": "..." line (manifest_version has no leading quote before
   # `version`, so it never matches this pattern).
-  VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${MANIFEST}" | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
+  # `|| true`: grep exits 1 on no match and `pipefail` would abort the script
+  # here, making the "could not parse" branch below unreachable.
+  VERSION="$({ grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${MANIFEST}" || true; } | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
   if [ -n "${VERSION}" ]; then
     printf '{"version":"%s"}\n' "${VERSION}" > "${VERSION_FILE}"
     echo "build-extension-zip: wrote ${VERSION_FILE} (v${VERSION})"

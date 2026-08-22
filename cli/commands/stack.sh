@@ -38,9 +38,10 @@ stage_extension() {
     bash "${REPO_ROOT}/scripts/check-extension-zip-fresh.sh" || \
       echo -e "${YELLOW}warning: extension zip looks stale after packaging — the served extension may be out of date.${NC}" >&2
   fi
-  # And the content check the mtime one structurally cannot make: #693's staged
-  # artifacts had a RECENT mtime with STALE content, which `find -newer` calls
-  # fresh. This compares the actual version strings.
+  # And the content check, for the residue mtime cannot reach: bytes that predate
+  # an un-versioned source edit behind a timestamp that does not. (Not #693 — that
+  # one the mtime guard above catches; it was never wired into `ps prod deploy`,
+  # which is why it shipped. See D-161.) This compares the actual version strings.
   if [ -f "${REPO_ROOT}/scripts/check-extension-version-sync.sh" ]; then
     bash "${REPO_ROOT}/scripts/check-extension-version-sync.sh" || \
       echo -e "${YELLOW}warning: the staged extension version disagrees with browser-extension/manifest.json — the dashboard will report a wrong servedVersion.${NC}" >&2
