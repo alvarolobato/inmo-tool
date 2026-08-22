@@ -99,6 +99,7 @@
 
     var anchorCount = hrefs.length;
     var extractDetailUrlsCount = 0;
+    var mediaRefMisses = 0;
     try {
       // Anchors, as always, from the hrefs the CALLER collected — that stays
       // the contract, so this function is still testable from a plain array.
@@ -110,16 +111,22 @@
       // — and would go on corroborating a bug that had already been fixed.
       // Deduplicated on matchKey against the anchor set, exactly as the real
       // harvest does, so a portal exposing both never double-counts.
-      if (D.detailUrlsFromMedia && D.mediaSourcesFromDoc && D.matchKey) {
+      if (D.mediaHarvestStats && D.mediaSourcesFromDoc && D.matchKey) {
         var seenKeys = Object.create(null);
         for (var ai = 0; ai < anchorUrls.length; ai++) {
           seenKeys[D.matchKey(anchorUrls[ai])] = true;
         }
-        var mediaUrls = D.detailUrlsFromMedia(
+        var mediaStats = D.mediaHarvestStats(
           D.mediaSourcesFromDoc(doc),
           url,
           effectivePortal || undefined
         );
+        // Right CDN, unreadable path (issue #701 review L1). Reported next to
+        // pendingPlaceholders because it answers the same kind of question: is
+        // there nothing here, or has something we rely on quietly stopped
+        // working? A stale ref rule otherwise shows up only as "0 adverts".
+        mediaRefMisses = mediaStats.refMisses;
+        var mediaUrls = mediaStats.urls;
         for (var mi = 0; mi < mediaUrls.length; mi++) {
           var mk = D.matchKey(mediaUrls[mi]);
           if (!mk || seenKeys[mk]) continue;
@@ -199,6 +206,7 @@
         anchorCount: anchorCount,
         extractDetailUrlsCount: extractDetailUrlsCount,
         pendingPlaceholders: pendingPlaceholders,
+        mediaRefMisses: mediaRefMisses,
       },
       block: {
         blocked: blockVerdict.blocked,

@@ -161,6 +161,16 @@ describe("detailPortalForUrl — only real listing-detail pages", () => {
     ["https://realestate.hipoges.com/es", null],
     ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", null],
     ["https://realestate.hipoges.com/es/detail", null],
+    // Editorial sections walking through the `:investment` slot (issue #701
+    // review L2). `blog` is denied by name; the whole CLASS is closed by
+    // requiring a digit in the `:id`, which every real asset reference has and
+    // no prose slug does. MUST stay in lockstep with etl/listing_detect.py.
+    ["https://realestate.hipoges.com/es/news/detail/nuevas-oficinas-en-madrid", null],
+    ["https://realestate.hipoges.com/es/prensa/detail/hipoges-crece-en-espana", null],
+    ["https://realestate.hipoges.com/es/detail/quienes-somos", null],
+    // The real reference shapes must survive that narrowing.
+    ["https://realestate.hipoges.com/es/detail/RARE-04347", "hipoges"],
+    ["https://realestate.hipoges.com/es/venta/detail/GTRE-01142", "hipoges"],
     // Unsupported host → null even on a detail-shaped path.
     ["https://www.fotocasa.es/inmueble/123/", null],
     ["https://example.com/inmueble/123/", null],

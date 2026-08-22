@@ -307,13 +307,29 @@ about a second; Hipoges gets 45 s because it server-renders its chrome first
 and streams its adverts in afterwards. Raising the global number instead would
 make every portal's give-up slower to pay for one portal's slowness.
 
-**Readiness is asked separately for detail and listing pages** (`portal.detailReadySelectors` / `listingReadySelectors`). A results page's
+**Readiness is asked separately for detail and listing pages**
+(`portal.detailReadySelectors` / `listingReadySelectors`). A results page's
 readiness is not a selector question at all: `isRenderReadyListing()` waits for
-the harvest itself to return something and hold steady. If you are tempted to
-add a card selector for a portal whose rendered results list has never been
-captured, don't — that is exactly how Hipoges shipped `["main","h1"]` as
-though it were calibrated, and it cost two owner reports and a production total
-of two listings. See D-165.
+the harvest itself to return something, hold steady, **and look complete** —
+complete meaning it reached the total the page's own heading states
+(`expectedResultCount`), or the list has no pending result left, or the page
+states no total to compare against. "Has it stopped changing" on its own is too
+weak: 3 polls × 500 ms is 1.5 s, and a stall mid-paint satisfies it at 9 of 17.
+
+Two traps worth knowing before you touch any of this:
+
+- **A pending-result count is not a count of placeholder tags.** On Hipoges
+  every *painted* card carries a `<p-skeleton>` for its photo carousel, so the
+  raw tag count never reaches zero and anything gating on it deadlocks.
+  `pendingPlaceholderCount()` excludes placeholders inside a
+  `resultCardSelectors` element for exactly this reason.
+- **Selectors read off a real capture are not guesses; selectors chosen for a
+  page nobody has looked at are.** Hipoges shipped `["main","h1"]` as though it
+  were calibrated and it cost two owner reports and a production total of two
+  listings — but the fix for that is to go read a capture, not to refuse
+  selectors on principle.
+
+See D-165.
 
 The crawl-side counterpart is **Tiempo por anuncio (rastreo)**:
 `connector_run_results.fetch_ms_total / fetched_count`, with the rate limiter's

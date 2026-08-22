@@ -666,6 +666,8 @@
             reason: "no_detail_urls",
             placeholders: ready.placeholders,
             harvested: 0,
+            expected: ready.expected,
+            refMisses: ready.refMisses,
           });
           return;
         }
@@ -739,6 +741,11 @@
         reason: ready.reason,
         placeholders: ready.placeholders,
         harvested: urls.length,
+        // How many the page SAID there were, and how many of its own CDN
+        // photos the ref rule could not read (issue #701 review M3/L1). Without
+        // these, "harvested 0" cannot be told apart from "the rule broke".
+        expected: ready.expected,
+        refMisses: ready.refMisses,
       });
       return;
     }

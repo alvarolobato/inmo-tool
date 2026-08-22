@@ -84,7 +84,15 @@ function describeNeverRendered(body: CaptureBody): string {
   if (typeof body.role === "string" && body.role) parts.push(`tipo=${body.role}`);
   if (typeof d.reason === "string" && d.reason) parts.push(`motivo=${d.reason}`);
   if (typeof d.harvested === "number") parts.push(`anuncios=${d.harvested}`);
+  if (typeof d.expected === "number") parts.push(`esperados=${d.expected}`);
   if (typeof d.placeholders === "number") parts.push(`placeholders=${d.placeholders}`);
+  // Media on the portal's own CDN whose path the reference rule could not read
+  // (issue #701 review L1). Named separately from `anuncios=0` on purpose: the
+  // two look identical in the table and mean opposite things — "this page has
+  // no adverts" versus "the rule that finds adverts has stopped matching".
+  if (typeof d.refMisses === "number" && d.refMisses > 0) {
+    parts.push(`refs_ilegibles=${d.refMisses}`);
+  }
   if (typeof d.bodyTextLength === "number") parts.push(`texto=${d.bodyTextLength}`);
   return parts.join(" ").slice(0, 500);
 }

@@ -202,14 +202,39 @@
       // was open — the same defect #690/D-159 closed for Idealista's
       // non-advert pages.
       //
-      // Excluded by NAME, not by shape: the asset-category tokens the bundle
-      // hints at (auction/cdr/npl/occupied/rented/special) are unconfirmed, so
-      // an allow-list would repeat the D-115 mistake of making a real URL
-      // vanish because the vocabulary guess was wrong. A deny-list of the
-      // non-asset sections actually OBSERVED linking through `detail/` keeps
-      // the wildcard's tolerance and closes the one hole we can prove.
+      // TWO independent narrowings, because the `:investment` slot alone
+      // cannot carry the weight (issue #701 review L2).
+      //
+      // 1. `blog` excluded by NAME, not by shape. The asset-category tokens
+      //    the bundle hints at (auction/cdr/npl/occupied/rented/special) are
+      //    unconfirmed, so an allow-list would repeat the D-115 mistake of
+      //    making a real URL vanish because the vocabulary guess was wrong.
+      //    A deny-list of the non-asset sections actually OBSERVED linking
+      //    through `detail/` closes the hole we can prove.
+      //
+      // 2. …but a deny-list closes a HOLE, not a CLASS: `/es/news/detail/…`
+      //    or `/es/prensa/detail/…` would still classify as adverts. So the
+      //    `:id` slot must now contain at least one DIGIT. Every non-asset
+      //    `detail/` link ever observed on this portal is a prose slug
+      //    (`es/blog/detail/pisos-en-alcala-de-henares-oportunidades`, six of
+      //    them in id 3577); every asset reference ever observed carries
+      //    digits — RARE-04347, FRRE-20005, FRRE-20171, REGA-06247,
+      //    GTRE-01142, RARE-01643, RARE-03256, RARE-01287, GTRE-01073,
+      //    GTRE-01166, read off the CDN paths of ids 3576/3577/3617.
+      //
+      // Why a DIGIT and not the harvest's own `[a-z]{4}-\d{4,6}`, which would
+      // close the class harder: because the two uses fail in opposite
+      // directions. In mediaDetailRef a too-narrow shape yields no URL — a
+      // miss that costs one card and that harvestStats() now COUNTS
+      // (`refMisses`), so a stale rule announces itself. Here a too-narrow
+      // shape makes a real advert stop being recognised as one, silently and
+      // with no counter anywhere. The very scenario that motivates counting
+      // refMisses — a servicer whose prefix is not four letters — is the
+      // scenario in which importing that shape here would lose real adverts.
+      // "An asset reference carries digits" is the weaker assumption, and it
+      // rejects every prose slug the class is made of.
       isDetailPath: function (p) {
-        return /^\/[a-z]{2}\/(?:(?!blog\/)[^/]+\/)?detail\/[^/]+/i.test(p);
+        return /^\/[a-z]{2}\/(?:(?!blog\/)[^/]+\/)?detail\/(?=[^/?#]*\d)[^/?#]+/i.test(p);
       },
       // Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
       // <town>[/<features>]` (5+ path segments after the domain) or the
@@ -297,13 +322,45 @@
       // skeletons, so on its own it proves nothing. It is kept only as the
       // "we are on the right page" half; the settle loop supplies the rest.
       listingReadySelectors: ["init-front-list"],
-      // Skeleton placeholders are PrimeNG's loading state and are a real,
-      // observed negative signal: id 3576 carried 13 of them, one per
-      // not-yet-painted result. Soft, never absolute — the DETAIL page carries
-      // 5 skeletons of its own, and below-the-fold results may be lazy, so
-      // this only DELAYS readiness within the budget and can never deadlock
-      // (see isRenderReadyListing: it is ignored once the harvest has settled).
+      // The result-card element. Grounded exactly as strongly as the detail
+      // selectors are: id 3576 contains FOUR of these, fully painted, with
+      // real titles, m² and prices — reading them is how the no-anchor finding
+      // was established in the first place.
+      //
+      // It is NOT used to harvest. A card selector adds nothing there: the
+      // harvest already derives one detail URL per card from that card's own
+      // photo, so card count and harvest count are 1:1 by construction, and a
+      // second count of the same thing cannot disagree usefully. What it IS
+      // used for is scoping the placeholder count below, which needs to tell a
+      // painted card's internal placeholder apart from a whole result that has
+      // not arrived — a distinction no count of bare `p-skeleton` can make.
+      resultCardSelectors: ["init-similar-card"],
+      // Skeleton placeholders are PrimeNG's loading state.
+      //
+      // CAREFUL — the raw tag count is NOT the pending-result count, and
+      // reading it as one is a live trap. Capture id 3576 carries SEVENTEEN
+      // `<p-skeleton>` elements: thirteen standalone (`<div class="item">`
+      // wrappers, one per result still to paint) and FOUR MORE, one inside
+      // each of the four painted cards, holding that card's photo-carousel
+      // slot. So a FULLY painted 17-result page still carries seventeen of
+      // them, and "no skeletons left" is a state this portal never reaches.
+      //
+      // pendingPlaceholderCount() therefore subtracts any placeholder sitting
+      // inside a resultCardSelectors element. What survives is the count of
+      // results that have genuinely not arrived — 13 on id 3576, 0 on a fully
+      // painted page — which is what the name promises, what the diagnostic
+      // reports, and what isRenderReadyListing's fallback leans on.
       loadingSelectors: ["p-skeleton"],
+      // The page's own statement of how many results the search has, so
+      // readiness can ask "have we got them all" instead of only "has the
+      // count stopped changing" — see isRenderReadyListing.
+      //
+      // Grounded in id 3576, whose <h1> is "17 Pisos y casas en venta en Dos
+      // Hermanas, Sevilla" and whose list holds exactly 17 items (4 painted +
+      // 13 skeletons). Only a LEADING integer counts: a heading that opens
+      // with prose yields null and the settle window decides alone, which is
+      // also what happens on any page whose heading we cannot parse.
+      resultCountSelectors: ["h1"],
       // Per-portal render budget (issue #701). Hipoges is the reason the
       // single global MAX_WAIT_MS is the wrong shape: Idealista is ready in
       // about a second, and a ceiling tuned for it truncates a portal that
@@ -1294,17 +1351,29 @@
    * URL matches the page the operator is actually on. A portal that declares
    * no `mediaDetailRef` gets an empty array, which is what every other portal
    * wants.
+   *
+   * Returns the FULL stats, not just the URLs, because of how this fails.
+   * `mediaDetailRef` is a shape guess — `[a-z]{4}-\d{4,6}` — and a five-letter
+   * servicer prefix, or a CDN that restructures its path, yields zero refs
+   * while every other signal on the page looks perfectly healthy. The page
+   * then lands as `never_rendered` with `motivo=no_detail_urls`, which is
+   * INDISTINGUISHABLE from "this page genuinely never painted" — precisely
+   * the conflation issue #701 exists to end. `refMisses` counts media URLs
+   * that matched the CDN host but whose path did not yield a reference, so a
+   * broken rule announces itself as "the photos are there, the rule stopped
+   * reading them" instead of hiding inside a render complaint.
    */
-  function detailUrlsFromMedia(srcs, pageUrl, portal) {
-    var out = [];
+  function mediaHarvestStats(srcs, pageUrl, portal) {
+    var res = { urls: [], hostMatched: 0, refMisses: 0 };
     var cfg = portalConfigByName(portal);
-    if (!cfg || typeof cfg.mediaDetailRef !== "function") return out;
-    if (!srcs || typeof srcs.length !== "number") return out;
+    if (!cfg || typeof cfg.mediaDetailRef !== "function") return res;
+    if (!srcs || typeof srcs.length !== "number") return res;
+    var out = res.urls;
     var base;
     try {
       base = new URL(String(pageUrl));
     } catch (e) {
-      return out;
+      return res;
     }
     // `:lang` of the page we're on, so a Portuguese or Greek operator doesn't
     // get Spanish detail URLs built for them.
@@ -1324,17 +1393,29 @@
       var wantHost = String(cfg.mediaDetailHostSuffix || "").toLowerCase();
       if (!wantHost) continue;
       if (mediaHost !== wantHost && !endsWithSuffix(mediaHost, "." + wantHost)) continue;
+      res.hostMatched += 1;
       var ref = null;
       try {
         ref = cfg.mediaDetailRef(parsed.pathname);
       } catch (e) {
         ref = null;
       }
-      if (!ref || seen[ref]) continue;
+      if (!ref) {
+        // Right CDN, unreadable path. This is the signal that the shape guess
+        // has gone stale, and it must not stay silent (issue #701 review L1).
+        res.refMisses += 1;
+        continue;
+      }
+      if (seen[ref]) continue;
       seen[ref] = true;
       out.push(base.origin + cfg.mediaDetailPath(ref, lang));
     }
-    return out;
+    return res;
+  }
+
+  /** URLs-only view of mediaHarvestStats() — every existing caller's shape. */
+  function detailUrlsFromMedia(srcs, pageUrl, portal) {
+    return mediaHarvestStats(srcs, pageUrl, portal).urls;
   }
 
   /**
@@ -1380,7 +1461,7 @@
    * not links (Hipoges — issue #701). Deduplicated on the same matchKey the
    * anchor path uses, so a portal that exposes BOTH never double-counts.
    */
-  function harvestDetailUrls(doc, portal, pageUrl) {
+  function harvestStats(doc, portal, pageUrl) {
     var hrefs = [];
     if (doc && typeof doc.querySelectorAll === "function") {
       try {
@@ -1391,41 +1472,137 @@
       }
     }
     var out = extractDetailUrls(hrefs, portal);
+    var anchorCount = out.length;
     var seen = Object.create(null);
     for (var k = 0; k < out.length; k++) seen[matchKey(out[k])] = true;
-    var media = detailUrlsFromMedia(mediaSourcesFromDoc(doc), pageUrl, portal);
+    var stats = mediaHarvestStats(mediaSourcesFromDoc(doc), pageUrl, portal);
+    var media = stats.urls;
     for (var m = 0; m < media.length; m++) {
       var key = matchKey(media[m]);
       if (!key || seen[key]) continue;
       seen[key] = true;
       out.push(media[m]);
     }
-    return out;
+    return {
+      urls: out,
+      fromAnchors: anchorCount,
+      fromMedia: out.length - anchorCount,
+      // Media on the portal's own CDN whose path the ref rule could not read
+      // (issue #701 review L1) — the difference between "no adverts here" and
+      // "the rule that finds adverts has gone stale".
+      refMisses: stats.refMisses,
+    };
+  }
+
+  /** URLs-only view of harvestStats() — every existing caller's shape. */
+  function harvestDetailUrls(doc, portal, pageUrl) {
+    return harvestStats(doc, portal, pageUrl).urls;
   }
 
   /**
-   * Does `doc` still show LOADING placeholders for this portal (issue #701)?
+   * How many results has `doc` still not painted (issue #701)?
    *
-   * Grounded on Hipoges' PrimeNG `<p-skeleton>`: production capture id 3576
-   * carried 13 of them, one per result that had not painted yet, alongside 4
-   * real cards — the owner's 17. A soft signal only: callers use it to keep
-   * waiting, never as a hard veto, because the DETAIL page carries 5 skeletons
-   * of its own and below-the-fold results may be lazily rendered.
+   * Grounded on Hipoges' PrimeNG `<p-skeleton>`, and on one detail of capture
+   * id 3576 that is easy to get wrong: the page carries SEVENTEEN of those
+   * elements, not thirteen. Thirteen are standalone — one per result still to
+   * arrive — and the other four sit INSIDE the four painted cards, holding
+   * each card's photo-carousel slot while the image loads.
+   *
+   * So the raw tag count never reaches zero on this portal: a fully painted
+   * 17-result page carries seventeen skeletons, one per card. Any caller that
+   * read the raw count as "results still loading" would be told "still
+   * loading" forever, including on a page that had finished — and this value
+   * is exactly what the diagnostic reports as `pendingPlaceholders` and what
+   * the never_rendered `motivo=` line names, so being wrong here is being
+   * wrong in the one place a human looks to find out what happened.
+   *
+   * Placeholders inside a `resultCardSelectors` element are therefore excluded
+   * — that card has painted, whatever its own image is doing. What remains is
+   * the honest pending-result count: 13 on id 3576, 0 once all 17 have landed.
+   *
+   * Still a soft signal. isRenderReadyListing uses it to choose a reason and,
+   * when the expected total is unknowable, as a "nothing more is coming"
+   * release valve — never as a veto that could hold readiness back forever.
    */
   function pendingPlaceholderCount(doc, portal) {
     var cfg = portalConfigByName(portal);
     if (!cfg || !cfg.loadingSelectors || !doc || typeof doc.querySelectorAll !== "function") {
       return 0;
     }
+    var cardSel =
+      cfg.resultCardSelectors && cfg.resultCardSelectors.length
+        ? cfg.resultCardSelectors.join(",")
+        : null;
     var n = 0;
     for (var i = 0; i < cfg.loadingSelectors.length; i++) {
+      var nodes;
       try {
-        n += doc.querySelectorAll(cfg.loadingSelectors[i]).length;
+        nodes = doc.querySelectorAll(cfg.loadingSelectors[i]);
       } catch (e) {
         /* a selector this browser can't parse simply contributes nothing */
+        continue;
+      }
+      for (var j = 0; j < nodes.length; j++) {
+        if (cardSel) {
+          var inCard = null;
+          try {
+            inCard = nodes[j].closest ? nodes[j].closest(cardSel) : null;
+          } catch (e) {
+            inCard = null;
+          }
+          if (inCard) continue; // this result HAS painted; its photo hasn't
+        }
+        n += 1;
       }
     }
     return n;
+  }
+
+  /**
+   * How many results does the page itself SAY the search has (issue #701)?
+   *
+   * The settle window alone answers "has the harvest stopped changing", and
+   * that is a weaker question than it looks on a portal that paints
+   * progressively: a 1.5 s stall mid-paint on a slow connection satisfies it
+   * at 9 of 17, and the listing handler then autostarts on that partial set as
+   * a SUCCESS rather than as a deadline fallback. The ground truth was on the
+   * page the whole time — id 3576's <h1> opens "17 Pisos y casas en venta en
+   * Dos Hermanas, Sevilla", and its list holds exactly those 17 items.
+   *
+   * Deliberately only a LEADING integer, and deliberately null-on-doubt: a
+   * heading that opens with prose, a portal with no resultCountSelectors, an
+   * unparseable or absurd number all return null, and readiness falls straight
+   * back to the settle window. Guessing a total wrong in the HIGH direction
+   * would stall every page to its deadline, so this only ever speaks when the
+   * page's own heading is unambiguous.
+   *
+   * Thousands separators are accepted in both Spanish and English form ("1.234
+   * viviendas", "1,234 homes") because the portal is multilingual and the
+   * separator follows the locale, not the site.
+   */
+  function expectedResultCount(doc, portal) {
+    var cfg = portalConfigByName(portal);
+    if (!cfg || !cfg.resultCountSelectors || !doc || typeof doc.querySelector !== "function") {
+      return null;
+    }
+    for (var i = 0; i < cfg.resultCountSelectors.length; i++) {
+      var el = null;
+      try {
+        el = doc.querySelector(cfg.resultCountSelectors[i]);
+      } catch (e) {
+        el = null;
+      }
+      if (!el) continue;
+      var text = String(el.textContent || "").trim();
+      var m = /^(\d{1,3}(?:[.,]\d{3})*|\d+)\b/.exec(text);
+      if (!m) continue;
+      var n = parseInt(m[1].replace(/[.,]/g, ""), 10);
+      // 0 is not a count we can act on (an empty search has nothing to settle
+      // on either way), and a wild number is a parse we should not trust.
+      if (!isFinite(n) || n <= 0 || n > 100000) continue;
+      return n;
+    }
+    return null;
   }
 
   /**
@@ -1517,31 +1694,73 @@
    *   2. the portal's listing selectors match (we are on the right page), and
    *   3. the harvest has produced at least one detail URL, and
    *   4. that count has held STEADY for `harvestSettlePolls` consecutive
-   *      polls, and no loading placeholders remain.
+   *      polls, and
+   *   5. we have reason to believe the harvest is COMPLETE.
    *
-   * (4) is what stops the extension firing on a partially painted list. Hipoges
-   * paints progressively — 4 of 17 at the moment of id 3576 — so the first
-   * non-zero harvest is not the final one, and capturing it would silently
-   * drop the rest of the search.
+   * (4) alone was the original gate and it is too weak, which is worth being
+   * precise about because the failure is silent. `harvestSettlePolls: 3` at a
+   * 500 ms poll is 1.5 s of an unchanged count; Hipoges paints progressively,
+   * so a 1.5 s stall mid-paint on a slow connection satisfies it at, say, 9 of
+   * 17 — and the listing handler then autostarts on that partial set as a
+   * SUCCESS, not as a deadline fallback. "Has it stopped changing" is not the
+   * same question as "have we got them all".
+   *
+   * (5) asks the second question, and the page answers it. Completeness holds
+   * when ANY of these is true:
+   *
+   *   a. the harvest has reached the page's OWN stated total —
+   *      expectedResultCount(), id 3576's `<h1>` "17 Pisos y casas en venta
+   *      en…" — the strongest form, since it is the site's own number; or
+   *   b. no result placeholder is left (pendingPlaceholderCount() === 0), i.e.
+   *      the list itself says nothing more is coming. This is the release
+   *      valve that keeps (a) from stalling a page whose stated total counts
+   *      results this view will never hold — a paginated search, say, where
+   *      the heading totals the query and the DOM holds one page of it. No
+   *      capture we have shows Hipoges paginating (id 3576's list holds all 17
+   *      of its 17, and its only `p-paginator` mention is a CSS rule, not a
+   *      rendered control), so this is a guard against a shape we have not
+   *      seen rather than one we have; or
+   *   c. the page states no total we can read at all — then there is no second
+   *      question to ask and the settle window decides alone, exactly as
+   *      before. Every portal other than Hipoges is in this case today.
    *
    * `state` is the caller's running settle state ({count, stable}); it is
    * threaded through rather than held here so this stays pure and testable.
    * Returns the FULL verdict plus the state to pass to the next poll.
    *
-   * IMPORTANT — this can never deadlock on placeholders. Once the harvest count
-   * has settled, a lingering skeleton (a lazy below-the-fold card, or the 5 the
-   * DETAIL template always carries) no longer holds readiness back: the
-   * `stable` counter is what gates, and a stuck skeleton with a steady count
-   * still reaches `ready`. The budget in maxWaitMsFor() is the outer bound.
+   * IMPORTANT — placeholders can never deadlock this, and the reason is
+   * pendingPlaceholderCount(), not this function. A lingering skeleton is a
+   * real possibility (a lazy below-the-fold card; the DETAIL template's own
+   * five; and on Hipoges EVERY painted card holds one for its photo carousel,
+   * so the raw tag count never reaches zero at all). Route (b) is safe only
+   * because that counter excludes placeholders inside painted cards — read its
+   * docstring before touching either. Beyond that, routes (a) and (c) are
+   * independent of placeholders entirely, and maxWaitMsFor() is the outer
+   * bound on all three: at the deadline content-script.js captures whatever
+   * partial harvest it has, which still beats the zero this portal was giving.
    */
   function isRenderReadyListing(doc, portal, pageUrl, state) {
     var prev = state && typeof state.count === "number" ? state : { count: -1, stable: 0 };
+    // Local, ES5, no Object.assign — this file stays parseable by the oldest
+    // runtime that could ever load the extension.
+    var assign = function (verdict, common) {
+      for (var k in common) {
+        if (Object.prototype.hasOwnProperty.call(common, k) && !(k in verdict)) {
+          verdict[k] = common[k];
+        }
+      }
+      return verdict;
+    };
     var fail = function (reason, urls, next) {
       return {
         ready: false,
         reason: reason,
         detailUrls: urls || [],
         placeholders: 0,
+        // Nothing was harvested and nothing was read off the page, so these
+        // report "not measured" rather than a misleading zero/absence.
+        expected: null,
+        refMisses: 0,
         state: next || { count: prev.count, stable: 0 },
       };
     };
@@ -1565,38 +1784,41 @@
     }
     if (!matched) return fail("no_key_node");
 
-    var urls = harvestDetailUrls(doc, portal, pageUrl);
+    var harvest = harvestStats(doc, portal, pageUrl);
+    var urls = harvest.urls;
     var placeholders = pendingPlaceholderCount(doc, portal);
+    var expected = expectedResultCount(doc, portal);
     // Count steady since the last poll? (A first observation is never steady.)
     var stable = urls.length === prev.count ? prev.stable + 1 : 1;
     var next = { count: urls.length, stable: stable };
+    var common = {
+      detailUrls: urls,
+      placeholders: placeholders,
+      expected: expected,
+      refMisses: harvest.refMisses,
+      state: next,
+    };
 
     if (urls.length === 0) {
-      return {
-        ready: false,
-        reason: placeholders > 0 ? "still_loading" : "no_detail_urls",
-        detailUrls: [],
-        placeholders: placeholders,
-        state: next,
-      };
+      // `refMisses` first: right CDN, unreadable paths means the ref rule has
+      // gone stale, which must never be reported as "this page has no adverts".
+      var emptyReason = "no_detail_urls";
+      if (harvest.refMisses > 0) emptyReason = "ref_shape_unmatched";
+      else if (placeholders > 0) emptyReason = "still_loading";
+      return assign({ ready: false, reason: emptyReason, detailUrls: [] }, common);
     }
     var needed = harvestSettlePollsFor(portal);
     if (stable < needed) {
-      return {
-        ready: false,
-        reason: placeholders > 0 ? "still_loading" : "not_settled",
-        detailUrls: urls,
-        placeholders: placeholders,
-        state: next,
-      };
+      return assign(
+        { ready: false, reason: placeholders > 0 ? "still_loading" : "not_settled" },
+        common
+      );
     }
-    return {
-      ready: true,
-      reason: null,
-      detailUrls: urls,
-      placeholders: placeholders,
-      state: next,
-    };
+    // Settled — but settled is not the same as complete. See (5) above.
+    if (expected !== null && urls.length < expected && placeholders > 0) {
+      return assign({ ready: false, reason: "partial_harvest" }, common);
+    }
+    return assign({ ready: true, reason: null }, common);
   }
 
   /**
@@ -2035,9 +2257,12 @@
     isRenderReadyDetail: isRenderReadyDetail,
     isRenderReadyListing: isRenderReadyListing,
     harvestDetailUrls: harvestDetailUrls,
+    harvestStats: harvestStats,
     detailUrlsFromMedia: detailUrlsFromMedia,
+    mediaHarvestStats: mediaHarvestStats,
     mediaSourcesFromDoc: mediaSourcesFromDoc,
     pendingPlaceholderCount: pendingPlaceholderCount,
+    expectedResultCount: expectedResultCount,
     readySelectorsFor: readySelectorsFor,
     maxWaitMsFor: maxWaitMsFor,
     harvestSettlePollsFor: harvestSettlePollsFor,

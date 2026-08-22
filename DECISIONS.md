@@ -126,7 +126,7 @@
 | [D-157](docs/decisions/D-157-evidence-not-time-for-withdrawal.md) | Time only nominates; only source evidence (HTTP 404/410 or identified retired page) may change a listing status. Soft block or unparseable 200 changes nothing. Mark, don't delete. |
 | [D-159](docs/decisions/D-159-idealista-retired-notice-evidence.md) | Withdraw on an Idealista retired notice only if its reference equals the captured external_id and its stated size/rooms fit the stored row; date from it, not before last_seen_at. |
 | [D-160](docs/decisions/D-160-challenge-page-is-a-soft-block.md) | An anti-bot challenge is a THIRD outcome ranked above withdrawal and failure: halt the batch, write nothing, leave the worklist row pending. Two accent-folded phrases from the shared table; never per-visit data. |
-| [D-165](docs/decisions/D-165-hipoges-render-readiness-and-cdn-harvest.md) | Hipoges detail URLs come from the photo CDN path (`/imageshams/<bucket>/<lot>/<ref>/`), never from `a[href]` — its cards are not links. Listing readiness is a settled non-zero harvest, never a selector. |
+| [D-165](docs/decisions/D-165-hipoges-render-readiness-and-cdn-harvest.md) | Hipoges detail URLs come from the photo CDN ref, never `a[href]` — its cards are not links. Listing readiness is a COMPLETE harvest, never a selector or a bare settle. |
 
 ## Product / candidate feed
 

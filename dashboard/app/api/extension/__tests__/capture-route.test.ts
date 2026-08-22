@@ -319,6 +319,52 @@ describe("POST /api/extension/capture — outcome: never_rendered", () => {
     expect(msg).toContain("tipo=listing");
     expect(msg).toContain("motivo=still_loading");
     expect(msg).toContain("placeholders=13");
+    // No CDN misses on this one, so the field stays out of the line entirely
+    // rather than reading a reassuring "refs_ilegibles=0".
+    expect(msg).not.toContain("refs_ilegibles");
+  });
+
+  it("names how many results the page claimed, next to how many were harvested", async () => {
+    // issue #701 review M3: "anuncios=4" alone cannot be read. "anuncios=4
+    // esperados=17" says the page painted a quarter of itself and stopped.
+    await POST(
+      makeRequest(
+        {
+          url: HIPOGES_URL,
+          html: "<html></html>",
+          outcome: "never_rendered",
+          role: "listing",
+          diagnostic: { reason: "partial_harvest", harvested: 4, expected: 17, placeholders: 13 },
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const msg = String((mockSql.mock.calls[0] as [string, unknown[]])[1][3]);
+    expect(msg).toContain("motivo=partial_harvest");
+    expect(msg).toContain("anuncios=4");
+    expect(msg).toContain("esperados=17");
+  });
+
+  it("distinguishes a stale CDN rule from a page with no adverts on it", async () => {
+    // issue #701 review L1. Both cases report `anuncios=0`; only one of them
+    // means "the rule that finds adverts has stopped matching", and reading
+    // that as a render failure is the conflation #701 exists to end.
+    await POST(
+      makeRequest(
+        {
+          url: HIPOGES_URL,
+          html: "<html></html>",
+          outcome: "never_rendered",
+          role: "listing",
+          diagnostic: { reason: "ref_shape_unmatched", harvested: 0, refMisses: 17 },
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const msg = String((mockSql.mock.calls[0] as [string, unknown[]])[1][3]);
+    expect(msg).toContain("motivo=ref_shape_unmatched");
+    expect(msg).toContain("anuncios=0");
+    expect(msg).toContain("refs_ilegibles=17");
   });
 
   it("accepts a page that produced no HTML at all", async () => {

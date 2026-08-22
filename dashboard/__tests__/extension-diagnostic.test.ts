@@ -39,7 +39,12 @@ interface DiagnosticBlock {
     pageRole: string | null;
   };
   renderReady: RenderReadyDetail;
-  harvest: { anchorCount: number; extractDetailUrlsCount: number; pendingPlaceholders: number };
+  harvest: {
+    anchorCount: number;
+    extractDetailUrlsCount: number;
+    pendingPlaceholders: number;
+    mediaRefMisses: number;
+  };
   block: { blocked: boolean; signature: string | null };
   mode: { discoverSignalPresent: boolean; validationActive: boolean; autoCaptureEnabled: boolean };
   autoCaptureWouldFire: boolean;
@@ -199,6 +204,36 @@ describe("buildDiagnosticBlock — supported RESULTS/listing page", () => {
     expect(block.harvest.extractDetailUrlsCount).toBe(0);
     // Nothing is loading either — this shell is not a page mid-render.
     expect(block.harvest.pendingPlaceholders).toBe(0);
+    expect(block.harvest.mediaRefMisses).toBe(0);
+  });
+
+  it("counts Hipoges CDN photos whose path the reference rule cannot read", () => {
+    // issue #701 review L1. This page is healthy — four painted cards, real
+    // photos on the portal's own CDN — but the reference shape has stopped
+    // matching them. `extractDetailUrlsCount: 0` on its own is
+    // indistinguishable from "this page has no adverts"; `mediaRefMisses: 4`
+    // is what says the harvest rule, not the page, is what broke.
+    document.body.innerHTML = `
+      <main><init-front-list>
+        <h1>17 Pisos y casas en venta en Dos Hermanas, Sevilla</h1>
+        ${[1, 2, 3, 4]
+          .map(
+            (i) =>
+              `<init-similar-card><img src="https://hipoges.azureedge.net/imageshams/hams_es_nuevo/rnew0${i}/referencia-nueva/${i}.png"></init-similar-card>`,
+          )
+          .join("")}
+      </init-front-list></main>`;
+    const url = "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla";
+
+    const block = buildDiagnosticBlock(D, document, url, { hrefs: [] });
+
+    expect(block.harvest.extractDetailUrlsCount).toBe(0);
+    expect(block.harvest.mediaRefMisses).toBe(4);
+    // A photo on someone else's host is not a miss — it was never ours to read.
+    document.body.innerHTML = `<main><init-front-list>
+      <img src="https://cdn.example.com/imageshams/a/b/referencia-nueva/1.png">
+    </init-front-list></main>`;
+    expect(buildDiagnosticBlock(D, document, url, { hrefs: [] }).harvest.mediaRefMisses).toBe(0);
   });
 });
 
