@@ -27,7 +27,7 @@ poll interval's midpoint.
 Hipoges' mean over the same metric was 5.3s. Idealista's was 5.8s. **The two
 numbers were the same number — half of ten seconds — measured twice**, and
 neither said anything whatsoever about how long a listing takes. Worse, the
-column was written at three sites and read by *zero* production queries, so
+column was written at four sites and read by *zero* production queries, so
 nothing had ever forced the interpretation to be checked.
 
 The crawl side had the mirror-image trap waiting: `throttle` is
@@ -92,5 +92,8 @@ what makes it answerable.
 `dashboard/app/admin/fuentes/[[...name]]/page.tsx`,
 `etl/tests/test_rate_limit.py`, `etl/tests/test_orchestrator.py`
 (`TestPerListingFetchTiming`), `etl/tests/test_capture.py`
-(`TestCaptureTiming`). Related: D-150 (capture HTML retention), D-157
-(stale verification), #644 (activity timeline), #640 (Estado tile).
+(`TestCaptureTiming`), `dashboard/__tests__/extension-render-wait.test.ts`,
+`dashboard/app/api/extension/__tests__/capture-route.test.ts`.
+Tracked by #700. Related: D-150 (capture HTML retention), D-157
+(stale verification), #644 (activity timeline), #640 (Estado tile),
+#696 (dashboard OTel emits nothing).

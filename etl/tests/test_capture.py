@@ -1488,7 +1488,7 @@ class TestNulByteRejectedByPostgres:
 
 
 class TestCaptureTiming:
-    """Per-listing timing (issue #687).
+    """Per-listing timing (issue #700).
 
     Why this class exists at all: before it, the ONLY per-listing number the
     pipeline stored was `processed_at - created_at`, and that number is
@@ -1566,7 +1566,7 @@ class TestCaptureTiming:
         the "no capture-capable connector" branch with no side effects at all.
         """
         _apply_schema(pg_conn)
-        url = "https://not-a-portal-687.example.com/anuncio/1"
+        url = "https://not-a-portal-700.example.com/anuncio/1"
         try:
             capture_id = _insert_pending(pg_conn, url, "<html><body>x</body></html>")
             capture.process_pending_captures(pg_conn)
@@ -1595,7 +1595,7 @@ class TestCaptureTiming:
         permanent state — not a migration window. It must store NULL ("not
         measured"), never default to 0 ("rendered instantly")."""
         _apply_schema(pg_conn)
-        url = "https://www.idealista.com/inmueble/687000001/"
+        url = "https://www.idealista.com/inmueble/700000001/"
         try:
             capture_id = _insert_pending(pg_conn, url, "<html></html>")
             with pg_conn.cursor() as cur:

@@ -272,7 +272,7 @@ they are separate on purpose:
 
 **Do not add them up and report one number, and do not reach for
 `processed_at - created_at`.** That subtraction is what made "hipoges tarda
-mucho por anuncio" unanswerable for months: measured over 3906 production
+mucho por anuncio" unanswerable: measured over 3906 production
 captures it is flat-uniform across 0–10s (pure poll wait), so Hipoges (5.3s
 mean) and Idealista (5.8s mean) were indistinguishable — both were just half
 the poll interval. Full trace in
@@ -281,6 +281,15 @@ the poll interval. Full trace in
 `—` means **not measured**, which is different from 0. `render_wait_ms` is NULL
 for captures from an extension build that predates it and for the
 manual/forced path, which never waits for render.
+
+**Any change to `browser-extension/` that alters what the extension SENDS must
+bump `manifest.json`'s version in the same PR.** The dashboard prompts the
+operator to reload only when `updateAvailable(installed, served)` sees a
+higher served version, so shipping a new field without a bump leaves every
+operator on the old build: the server-side column exists, nothing ever
+populates it, and the column reads `—` forever with no error anywhere. That is
+the #693 failure shape, and `render_wait_ms` (0.17.0 → 0.18.0) is the second
+time it nearly landed.
 
 **Known gap (belongs to #644, not here):** a page that never satisfies
 `isRenderReady` burns the full `MAX_WAIT_MS` (20s) and then gives up *without

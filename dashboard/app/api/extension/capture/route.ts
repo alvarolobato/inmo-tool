@@ -43,7 +43,7 @@ interface CaptureBody {
   html?: string;
   /**
    * How long the extension waited for this page to render before snapshotting
-   * it (issue #687), in ms. OPTIONAL and frequently absent — the extension is
+   * it (issue #700), in ms. OPTIONAL and frequently absent — the extension is
    * an independently-installed Chrome artifact that does not upgrade in
    * lockstep with the server, and its own manual/forced-capture path doesn't
    * wait for render at all. Absent, null, and non-finite all store NULL

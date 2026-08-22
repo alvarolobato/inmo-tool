@@ -1262,7 +1262,7 @@ ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_count INTEGER
 -- (deep-captured new/changed) as the "sin-cambio vs deep-capturados" counters.
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_unchanged_count INTEGER NOT NULL DEFAULT 0;
 
--- Issue #687: cumulative milliseconds of REAL per-listing work this run —
+-- Issue #700: cumulative milliseconds of REAL per-listing work this run —
 -- fetch_detail() + normalize() + upsert, summed over every successfully
 -- fetched listing across every scope — with the rate limiter's own sleep
 -- SUBTRACTED OUT (etl.connectors.rate_limit.RateLimiter.slept_seconds).
@@ -1275,7 +1275,8 @@ ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_unchanged_cou
 -- as work, reproducing exactly the misreading that made
 -- `extension_capture.processed_at - created_at` worthless (see the note on
 -- those columns below: measured flat-uniform over the 10s poll interval, i.e.
--- ~100% queue idle, yet read as processing cost for months).
+-- ~100% queue idle, yet read as processing cost for the column's whole
+-- life).
 --
 -- Successful fetches only: an error path's duration describes a failure, not
 -- throughput, and averaging the two hides both. 0 (not NULL) for a run that
@@ -1953,7 +1954,7 @@ ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
     CHECK (status IN ('pending','done','failed','listing','blocked'));
 
--- ── Per-listing timing (issue #687) ─────────────────────────────────────────
+-- ── Per-listing timing (issue #700) ─────────────────────────────────────────
 -- Why these two columns exist at all: before them the ONLY per-listing timing
 -- in the whole pipeline was `processed_at - created_at`, and that number is
 -- almost entirely IDLE. `run_capture_poll_loop` polls every 10s, so a capture

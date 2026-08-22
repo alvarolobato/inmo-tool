@@ -62,7 +62,7 @@ export interface ConnectorHealth {
   /** The genuine error message when the last run needs attention. */
   error_msg: string | null;
   /**
-   * Mean milliseconds of real work per listing on the last run (issue #687):
+   * Mean milliseconds of real work per listing on the last run (issue #700):
    * `fetch_ms_total / fetched_count`, i.e. fetch_detail + normalize + upsert,
    * with rate-limit sleep already excluded at the write site. This is the
    * CRAWLED-portal counterpart to the capture path's median_processing_ms_7d.
@@ -96,7 +96,7 @@ export interface PortalCaptureHealth {
   /** Avg photo count per done capture over the 7d window, or null. */
   avg_photo_count_7d: number | null;
   /**
-   * ── Per-listing timing (issue #687) ──────────────────────────────────────
+   * ── Per-listing timing (issue #700) ──────────────────────────────────────
    * Medians, not means: capture durations are long-tailed (one 20s render
    * behind a cold CDN drags a mean that a median shrugs off), and the owner's
    * question is "how long does a listing normally take", not "what is the

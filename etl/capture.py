@@ -296,7 +296,7 @@ def process_pending_captures(conn) -> int:
         # (before this is reassigned) must never leak a PRIOR url's resolved
         # connector into this one's failure record (issue #638 review S1).
         resolved = None
-        # Issue #687: a SECOND timer, for the unexpected-error path only. The
+        # Issue #700: a SECOND timer, for the unexpected-error path only. The
         # normal paths are timed inside _process_one (which owns its own
         # start); this one covers a raise from _connector_for_url/the enabled
         # lookup, before _process_one is ever entered — otherwise the slowest
@@ -646,7 +646,7 @@ def _elapsed_ms(started: float | None) -> int | None:
     the caller didn't time this path. None means "not measured" and must never
     be coerced to 0 — a 0 would claim a capture was processed instantly, which
     is exactly the kind of plausible-looking wrong number the whole point of
-    issue #687 is to stop producing (the pre-existing `processed_at -
+    issue #700 is to stop producing (the pre-existing `processed_at -
     created_at` was misread as processing time for months).
 
     Monotonic, not wall-clock: an NTP step or a DST change during a slow
@@ -721,7 +721,7 @@ def _process_one(
     processing by hours (a paused connector, an outage keep rows `pending`).
     Passed through to `_record_sightings` as the sighting's true observation
     instant rather than letting it default to "now"."""
-    # Issue #687: the clock starts HERE, not in the poll loop, so
+    # Issue #700: the clock starts HERE, not in the poll loop, so
     # `processing_ms` measures this capture's own work and nothing else — not
     # the U(0,10)s the row spent waiting for the next poll tick, and not the
     # other rows in the same batch. Every terminal path below (done / listing /

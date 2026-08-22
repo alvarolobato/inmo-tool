@@ -6697,7 +6697,7 @@ class TestActiveProfileScopesEverywhereSentinel:
 
 class TestPerListingFetchTiming:
     """`fetch_ms_total` must measure WORK, never the rate limiter's pacing
-    sleep (issue #687).
+    sleep (issue #700).
 
     This is the whole reason the column can be trusted. `throttle` IS
     `limiter.acquire`, and connectors call it as fetch_detail's first action,

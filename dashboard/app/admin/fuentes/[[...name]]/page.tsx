@@ -379,7 +379,7 @@ function formatRatio(fraction: number | null): string {
 }
 
 /**
- * A per-listing duration in ms → a short human string (issue #687). Null is
+ * A per-listing duration in ms → a short human string (issue #700). Null is
  * "—": NOT MEASURED, which is a genuinely different statement from "0 ms" and
  * must never be rendered as a number. Sub-second stays in ms (a 340 ms
  * processing step reads wrong as "0,3 s"); a second or more goes to one
@@ -642,7 +642,7 @@ function FuenteDetail({ name }: { name: string }) {
   const showWorklist = isCapturePortal(name);
 
   const portalHealth = dataHealth?.portals.find((p) => p.portal === name) ?? null;
-  // Issue #687: the CRAWL-side counterpart to portalHealth's capture timings.
+  // Issue #700: the CRAWL-side counterpart to portalHealth's capture timings.
   // A source has one or the other, essentially never both — a capture-only
   // portal never runs a sweep, and a crawled one never produces captures — so
   // the two render as separate sections rather than as one merged table that
@@ -1088,7 +1088,7 @@ function FuenteDetail({ name }: { name: string }) {
                 <dd style={{ fontWeight: 600 }}>{formatNum(portalHealth.avg_photo_count_7d)}</dd>
               </div>
 
-              {/* ── Tiempo por anuncio (issue #687) ────────────────────────
+              {/* ── Tiempo por anuncio (issue #700) ────────────────────────
                   Three separate rows, never one total, because the middle one
                   is IDLE and the other two are not. Collapsing them is what
                   made this unanswerable before: `processed_at - created_at`
@@ -1146,7 +1146,7 @@ function FuenteDetail({ name }: { name: string }) {
         </section>
       )}
 
-      {/* ── Tiempo por anuncio, lado rastreo (issue #687) ───────────────
+      {/* ── Tiempo por anuncio, lado rastreo (issue #700) ───────────────
           Only for a source whose last sweep actually fetched something;
           `ms_per_listing` is null when fetched_count was 0, and a section
           reading "—" tells the operator nothing they didn't already know from

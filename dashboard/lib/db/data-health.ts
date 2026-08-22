@@ -72,7 +72,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
            SELECT c.connector_name, c.status, c.started_at,
                   c.discovered_count, c.fetched_count, c.error_count,
                   c.skipped_count, c.error_msg,
-                  -- Issue #687: real work per listing on this run. NULLIF
+                  -- Issue #700: real work per listing on this run. NULLIF
                   -- guards the no-fetch run — a 0 denominator must yield NULL
                   -- ("didn't fetch"), never 0 ("instant").
                   ROUND(c.fetch_ms_total::numeric
@@ -116,7 +116,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
            AVG(COALESCE(array_length(l.photo_urls, 1), 0))
              FILTER (WHERE ec.status = 'done'
                AND ec.created_at > NOW() - INTERVAL '7 days')              AS avg_photo_count_7d,
-           -- Issue #687: the three legs of per-listing latency, kept apart.
+           -- Issue #700: the three legs of per-listing latency, kept apart.
            -- percentile_cont ignores NULLs, so a portal with no measured
            -- sample yields NULL rather than a fabricated 0. The FILTER
            -- deliberately does NOT require status='done': a capture that
@@ -125,10 +125,15 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
            -- exactly when it is breaking most.
            percentile_cont(0.5) WITHIN GROUP (ORDER BY ec.render_wait_ms)
              FILTER (WHERE ec.created_at > NOW() - INTERVAL '7 days')      AS median_render_wait_ms_7d,
+           -- processing_ms IS NOT NULL is required, not COALESCEd to 0:
+           -- D-162 rule 2 — a row captured before processing_ms existed has
+           -- an UNKNOWN work leg, and coercing it to 0 would silently bill
+           -- its whole created→processed delta as queue idle.
            percentile_cont(0.5) WITHIN GROUP (
              ORDER BY EXTRACT(EPOCH FROM (ec.processed_at - ec.created_at)) * 1000
-               - COALESCE(ec.processing_ms, 0))
+               - ec.processing_ms)
              FILTER (WHERE ec.processed_at IS NOT NULL
+               AND ec.processing_ms IS NOT NULL
                AND ec.created_at > NOW() - INTERVAL '7 days')              AS median_queue_wait_ms_7d,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY ec.processing_ms)
              FILTER (WHERE ec.created_at > NOW() - INTERVAL '7 days')      AS median_processing_ms_7d

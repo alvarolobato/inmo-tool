@@ -9,7 +9,7 @@ approach item 2).
 `now_fn`/`sleep_fn` are injectable so tests can verify the interval math
 with a fake clock instead of a real (slow, flaky) `time.sleep`.
 
-Issue #687: the limiter also ACCOUNTS FOR the time it spends sleeping
+Issue #700: the limiter also ACCOUNTS FOR the time it spends sleeping
 (`slept_seconds`). Rate-limit sleep happens *inside* `fetch_detail` (the
 orchestrator passes `throttle=limiter.acquire` rather than acquiring at the
 call site — see the long comment there), so a naive stopwatch around
@@ -50,7 +50,7 @@ class RateLimiter:
 
     @property
     def slept_seconds(self) -> float:
-        """Total seconds spent sleeping in acquire() so far (issue #687).
+        """Total seconds spent sleeping in acquire() so far (issue #700).
 
         The orchestrator samples this before and after each listing and
         subtracts the delta from the wall time, so `fetch_ms_total` counts

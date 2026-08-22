@@ -53,7 +53,7 @@ def test_rate_limiter_rejects_non_positive_rate() -> None:
         RateLimiter(0)
 
 
-# ── slept_seconds accounting (issue #687) ────────────────────────────────────
+# ── slept_seconds accounting (issue #700) ────────────────────────────────────
 #
 # The orchestrator subtracts this from its per-listing stopwatch so that
 # `fetch_ms_total` measures work and not the pacing interval. If this ledger

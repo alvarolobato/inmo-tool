@@ -158,3 +158,103 @@ describe("NUL bytes in the captured payload (issue #207 — a real 500 in produc
     expect(params[1]).toBe(html);
   });
 });
+
+
+describe("renderWaitMs coercion (issue #700, D-162) — the value that reaches the INSERT", () => {
+  // `render_wait_ms` is the only column on this table written by a value the
+  // extension computes, and the extension is an independently-installed Chrome
+  // artifact reachable by anything holding the admin key. Two things must hold
+  // at once: a nonsense duration must never turn a perfectly good capture into
+  // a 500 at the INSERT, and "not measured" must reach the DB as NULL rather
+  // than as a 0 that asserts "instant" (D-162 rule 2).
+  beforeEach(() => {
+    mockSql.mockReset();
+    mockSql.mockResolvedValue([{ id: 7 }]);
+    vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** The third INSERT parameter — what actually lands in render_wait_ms. */
+  async function insertedRenderWait(body: Record<string, unknown>): Promise<unknown> {
+    const res = await POST(makeRequest(body, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(200);
+    const [sqlText, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    // Pin the column list too: adding a column without extending this tuple is
+    // the other way this silently becomes NULL forever.
+    expect(sqlText).toContain("(url, html, render_wait_ms)");
+    expect(params).toHaveLength(3);
+    return params[2];
+  }
+
+  const URL_OK = "https://realestate.hipoges.com/es/detail/12345";
+  const HTML_OK = "<html><body>anuncio</body></html>";
+
+  it("stores a plain measured duration", async () => {
+    expect(await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: 19500 })).toBe(
+      19500,
+    );
+  });
+
+  it("stores 0 as 0 — an instant render is a measurement, not an absence", async () => {
+    expect(await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: 0 })).toBe(0);
+  });
+
+  it("rounds a fractional duration to an integer (the column is INTEGER)", async () => {
+    expect(await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: 1234.6 })).toBe(
+      1235,
+    );
+  });
+
+  it("stores NULL when the field is absent — an older extension build", async () => {
+    expect(await insertedRenderWait({ url: URL_OK, html: HTML_OK })).toBeNull();
+  });
+
+  it.each([
+    ["explicit null", null],
+    ["a numeric string", "19500"],
+    ["a boolean", true],
+    ["an object", { ms: 100 }],
+    ["an array", [100]],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+    ["a negative duration", -1],
+    ["past the 10-minute ceiling", 10 * 60 * 1000 + 1],
+    ["past int4 range", 2_147_483_648],
+    ["Number.MAX_VALUE", Number.MAX_VALUE],
+  ])("stores NULL for %s, and still stores the capture", async (_label, value) => {
+    // Discarded, never rejected: the CAPTURE is the payload that matters, and
+    // losing a listing over a bad telemetry field would be strictly worse than
+    // losing the telemetry.
+    expect(
+      await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: value }),
+    ).toBeNull();
+  });
+
+  it("accepts the exact ceiling, rejects one past it", async () => {
+    const CEILING = 10 * 60 * 1000;
+    expect(await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: CEILING })).toBe(
+      CEILING,
+    );
+    mockSql.mockClear();
+    expect(
+      await insertedRenderWait({ url: URL_OK, html: HTML_OK, renderWaitMs: CEILING + 1 }),
+    ).toBeNull();
+  });
+
+  it("a hostile renderWaitMs never costs the capture — url and html land intact", async () => {
+    await POST(
+      makeRequest(
+        { url: URL_OK, html: HTML_OK, renderWaitMs: "'; DROP TABLE extension_capture; --" },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    expect(params[0]).toBe(URL_OK);
+    expect(params[1]).toBe(HTML_OK);
+    expect(params[2]).toBeNull();
+  });
+});

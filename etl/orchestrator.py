@@ -2544,7 +2544,7 @@ def run_connector(
     # the pattern skimmable (e.g. "SoftBlockError=5, ConnectorError=2")
     # without a schema change.
     error_kinds: Counter[str] = Counter()
-    # Issue #687: cumulative milliseconds of REAL per-listing work this scope —
+    # Issue #700: cumulative milliseconds of REAL per-listing work this scope —
     # fetch_detail() + normalize() + the upsert — with the rate limiter's own
     # sleep subtracted out. Divided by `fetched_count` downstream it is the
     # first honest "how long does one listing take on this portal" number the
@@ -2669,7 +2669,7 @@ def run_connector(
         # ~8h for ~1,500 ids). The parameter, not the call site, is the right
         # place for this: connectors that make several requests per listing
         # need to pace each one, which only they can do (issue #99).
-        # Issue #687: bracket the real work, and sample the limiter's own
+        # Issue #700: bracket the real work, and sample the limiter's own
         # sleep ledger across the same bracket so the pacing interval can be
         # subtracted rather than counted as time-per-listing.
         listing_started = time.monotonic()
@@ -2865,7 +2865,7 @@ def run_connector(
         "error_count": errors,
         "soft_block_error_count": soft_block_errors,
         "gone_count": gone,
-        # Issue #687: real per-listing work this scope, in ms, excluding
+        # Issue #700: real per-listing work this scope, in ms, excluding
         # rate-limit sleep. Pairs with `fetched_count` (its denominator).
         "fetch_ms_total": fetch_ms_total,
         # Issue #183: discovery-time price observations written to
@@ -4304,7 +4304,7 @@ def run_all_connectors(
         # Issue #435 (D-099): list-price capture-optimization skips this
         # connector, summed across scopes (distinct from skip-if-seen skips).
         skipped_unchanged_fetch_total = 0
-        # Issue #687: real per-listing work across every scope of this
+        # Issue #700: real per-listing work across every scope of this
         # connector's run, in ms, rate-limit sleep excluded.
         fetch_ms_total = 0
         error_total = 0

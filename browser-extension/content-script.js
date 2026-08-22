@@ -271,7 +271,7 @@
   }
 
   /**
-   * `renderWaitMs` (issue #687) — how long we waited, on THIS page, between
+   * `renderWaitMs` (issue #700) — how long we waited, on THIS page, between
    * starting to watch for render-readiness and actually snapshotting the DOM
    * (poll-until-ready + the QUIESCENCE_MS settle). This is the per-listing
    * cost the owner actually feels on a capture-only portal, and until now
@@ -393,7 +393,7 @@
     }
     // Gave up after MAX_WAIT_MS; manual popup capture still works.
     //
-    // KNOWN GAP, deliberately NOT filled here (issue #687 → #644): this is the
+    // KNOWN GAP, deliberately NOT filled here (issue #700 → #644): this is the
     // Hipoges shape — the page never satisfied readySelectors + the body-text
     // floor, so the owner waited the full 20s and got nothing, and because no
     // POST is ever sent the server has NO record the listing was attempted at
