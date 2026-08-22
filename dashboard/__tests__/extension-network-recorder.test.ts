@@ -42,7 +42,8 @@ interface SummarizedEntry {
   requestHeaders: Record<string, string>;
   responseHeaders: Record<string, string>;
   redactedHeaderCount: number;
-  redactedQueryParamCount: number;
+  redactedUrlPartCount: number;
+  redactedBodyValueCount: number;
   body: string | null;
   bodyTruncated: boolean;
   bodyOriginalLength: number;
@@ -56,6 +57,7 @@ const api = NR as unknown as {
   MAX_ENTRIES: number;
   redactHeaders: (headers: unknown) => RedactResult;
   redactUrl: (url: string) => UrlRedactResult;
+  redactBodyText: (text: string) => { body: string; redactedCount: number };
   truncateBody: (text: string) => TruncateResult;
   summarizeEntry: (raw: Record<string, unknown>) => SummarizedEntry;
   capEntries: (entries: unknown[]) => { entries: unknown[]; droppedCount: number };
@@ -103,9 +105,87 @@ describe("redactUrl — credential-shaped query params are removed, path/other p
     expect(result.redactedCount).toBe(2);
   });
 
-  it("never mangles a path that merely CONTAINS a redacted word as a substring (only exact param names match)", () => {
-    const result = api.redactUrl("https://example.com/session-info?foo=bar");
-    expect(result.url).toBe("https://example.com/session-info?foo=bar");
+  // #684: PR #675 matched param NAMES by exact string only, justified as
+  // avoiding an "overzealous substring match" mangling the path. That
+  // justification was wrong — `searchParams.forEach` iterates names and cannot
+  // reach the path — so the rule bought nothing and missed password/jwt/…
+  // Substring matching, aligned with the header path, and the path stays
+  // intact anyway.
+  it("matches param names by SUBSTRING now, and still cannot touch the path", () => {
+    const result = api.redactUrl(
+      "https://example.invalid/session-info?foo=bar&x_session_token=SECRET",
+    );
+    expect(result.url).toContain("/session-info");
+    expect(result.url).toContain("foo=bar");
+    expect(result.url).not.toContain("SECRET");
+    expect(result.redactedCount).toBe(1);
+  });
+
+  it("strips password / jwt / code — the params PR #675's exact list missed", () => {
+    for (const name of ["password", "pwd", "passwd", "jwt", "sid", "code", "state", "signature"]) {
+      const result = api.redactUrl(`https://example.invalid/api?${name}=LEAKED&page=2`);
+      expect(result.url, name).not.toContain("LEAKED");
+      expect(result.url, name).toContain("page=2");
+      expect(result.redactedCount, name).toBe(1);
+    }
+  });
+
+  // Over-redaction is NOT free for a URL: it is the primary diagnostic signal.
+  // The ambiguous English words stay exact-match so a Spanish portal's own
+  // params survive.
+  it("keeps a portal's legitimate params that merely CONTAIN an ambiguous word", () => {
+    const result = api.redactUrl(
+      "https://example.invalid/es/venta/pisos?provincia_code=41&estado=nuevo&monkey=1&design=x",
+    );
+    expect(result.redactedCount).toBe(0);
+    expect(result.url).toContain("provincia_code=41");
+    expect(result.url).toContain("estado=nuevo");
+  });
+
+  // #684: `redactUrl` used `url.searchParams`, which never touches `url.hash`,
+  // so a fragment survived whole — including `#access_token=…`, which is
+  // exactly the OAuth implicit-flow shape.
+  it("strips credentials from a URL FRAGMENT, not just the query string", () => {
+    const result = api.redactUrl(
+      "https://example.invalid/callback#access_token=LEAKED&token_type=bearer&expires_in=3600",
+    );
+    expect(result.url).not.toContain("LEAKED");
+    expect(result.redactedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps an SPA hash ROUTE while stripping the credential in its query half", () => {
+    const result = api.redactUrl("https://example.invalid/app#/detalle/123?jwt=LEAKED&ref=abc");
+    expect(result.url).toContain("#/detalle/123");
+    expect(result.url).toContain("ref=abc");
+    expect(result.url).not.toContain("LEAKED");
+  });
+
+  it("leaves an ordinary fragment byte-identical rather than round-tripping it", () => {
+    const result = api.redactUrl("https://example.invalid/guia#/mapa/sevilla?zoom=12");
+    expect(result.url).toBe("https://example.invalid/guia#/mapa/sevilla?zoom=12");
+    expect(result.redactedCount).toBe(0);
+  });
+
+  // #684: tokens in PATH segments, `/api/v1/session/<jwt>/refresh`.
+  it("strips a JWT path segment, and a long segment under a credential-shaped one", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl";
+    const withJwt = api.redactUrl(`https://example.invalid/api/v1/session/${jwt}/refresh`);
+    expect(withJwt.url).not.toContain(jwt);
+    expect(withJwt.url).toContain("/refresh");
+    expect(withJwt.redactedCount).toBe(1);
+
+    const underToken = api.redactUrl("https://example.invalid/api/token/AbCd1234EfGh5678/use");
+    expect(underToken.url).not.toContain("AbCd1234EfGh5678");
+    expect(underToken.redactedCount).toBe(1);
+  });
+
+  it("leaves an ordinary listing path alone — a slug or an id is the diagnostic", () => {
+    const result = api.redactUrl(
+      "https://example.invalid/es/venta/piso-en-sevilla-centro/98765432/detalle",
+    );
+    expect(result.url).toBe(
+      "https://example.invalid/es/venta/piso-en-sevilla-centro/98765432/detalle",
+    );
     expect(result.redactedCount).toBe(0);
   });
 
@@ -113,6 +193,41 @@ describe("redactUrl — credential-shaped query params are removed, path/other p
     const result = api.redactUrl("not a url");
     expect(result.url).toBe("not a url");
     expect(result.redactedCount).toBe(0);
+  });
+});
+
+// #684 recorded this as the largest exposure surface with NO redaction at all.
+// It is still not sanitised — a body is the payload the feature exists to show
+// — but the three credential shapes that carry zero diagnostic value go.
+describe("redactBodyText — best-effort, and honest about what it leaves behind", () => {
+  it("redacts a JSON value under a credential-shaped key, at any nesting depth", () => {
+    const result = api.redactBodyText(
+      JSON.stringify({ access_token: "LEAKED", price: 185000, user: { password: "LEAKED2" } }),
+    );
+    expect(result.body).not.toContain("LEAKED");
+    expect(result.body).toContain("185000");
+    expect(result.redactedCount).toBe(2);
+  });
+
+  it("redacts a Bearer literal and a bare JWT", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl";
+    const result = api.redactBodyText(`Authorization: Bearer ${jwt}`);
+    expect(result.body).not.toContain(jwt);
+    expect(result.body).toContain("Bearer");
+  });
+
+  // The honest half: a body's ordinary content — including personal data the
+  // portal returned — reaches extension_diagnostic.network intact. The bound
+  // on that is purge_extension_diagnostics(), not this function.
+  it("does NOT touch ordinary body content, personal or otherwise", () => {
+    const body = JSON.stringify({ contacto: "Nombre Apellido", telefono: "600000000" });
+    const result = api.redactBodyText(body);
+    expect(result.body).toBe(body);
+    expect(result.redactedCount).toBe(0);
+  });
+
+  it("a non-string input degrades to an empty body, never throws", () => {
+    expect(api.redactBodyText(undefined as unknown as string).body).toBe("");
   });
 });
 
@@ -160,7 +275,7 @@ describe("summarizeEntry — the full redact+truncate+shape pipeline", () => {
     expect(entry.requestHeaders.Accept).toBe("application/json");
     expect(entry.responseHeaders["Set-Cookie"]).toBeUndefined();
     expect(entry.redactedHeaderCount).toBe(2);
-    expect(entry.redactedQueryParamCount).toBe(1);
+    expect(entry.redactedUrlPartCount).toBe(1);
     expect(entry.bodyTruncated).toBe(false);
     expect(entry.body).toContain("listings");
     expect(entry.startedAtMs).toBe(100);

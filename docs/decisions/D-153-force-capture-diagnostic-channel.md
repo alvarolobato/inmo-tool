@@ -31,10 +31,15 @@ recorder outlives the diagnostic send and survives browser restarts — and the
 button was removed before merge. The pure redaction module and its tests were
 kept, unreachable, for a rebuild. **No decision is recorded here about network
 capture**; the analysis, the redaction audit and the exit criteria live in
-issue #684, and whatever ships from it needs its own decision record. In
-particular, an earlier draft of this file asserted that "a recorder can never
-outlive the diagnostic send it exists for" — that was **false as written**,
-which is exactly why the half it described did not ship.
+issue #684, and what shipped from it is recorded in
+[D-164](D-164-network-capture-armed-lifecycle.md). In particular, an earlier
+draft of this file asserted that "a recorder can never outlive the diagnostic
+send it exists for" — that was **false as written**, which is exactly why the
+half it described did not ship. **And read D-164 point 5 before quoting point 6
+or this record's summary about credentials**: a captured response BODY is
+truncated and scrubbed of three credential shapes, not sanitised, so
+`extension_diagnostic.network` can carry whatever personal data a portal's own
+API returned.
 
 **Decision**:
 

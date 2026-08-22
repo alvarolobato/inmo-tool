@@ -245,6 +245,55 @@ describe.skipIf(!dbAvailable)("extension_diagnostic persistence (real DB)", () =
       expect(survivors).toContain(ids.fresh);
     });
 
+    // #684 non-negotiable: a captured network payload must fall under the SAME
+    // retention floor as the HTML, not escape into an unbounded store. It does
+    // by construction — `network` is a column on `extension_diagnostic`, and
+    // the purge DELETEs the row — but "by construction" is exactly the kind of
+    // claim that quietly stops being true, and this payload is the one that
+    // carries response BODIES (which are truncated and credential-scrubbed,
+    // never fully sanitised — see network-recorder.js's header).
+    it("purges a diagnostic's NETWORK payload with the row, not just its HTML", async () => {
+      const url = `${URL_PREFIX}purge-network`;
+      const id = await withRealDb(async (pool) => {
+        const r = await pool.query(
+          `INSERT INTO extension_diagnostic
+             (url, html, html_bytes, network, network_dropped_count, created_at)
+           VALUES ($1, '<html></html>', 13, $2::jsonb, 0, NOW() - INTERVAL '45 days')
+           RETURNING id`,
+          [
+            url,
+            JSON.stringify({
+              entries: [
+                {
+                  url: "https://realestate.hipoges.com/api/list?page=1",
+                  method: "GET",
+                  status: 200,
+                  type: "fetch",
+                  body: '{"items":[{"precio":185000}]}',
+                  bodyTruncated: false,
+                  startedAtMs: 10,
+                  finishedAtMs: 900,
+                },
+              ],
+              droppedCount: 0,
+            }),
+          ],
+        );
+        return Number(r.rows[0].id);
+      });
+
+      await withRealDb((pool) => pool.query(`SELECT purge_extension_diagnostics()`));
+
+      const left = await withRealDb(async (pool) => {
+        const r = await pool.query(
+          `SELECT network FROM extension_diagnostic WHERE id = $1`,
+          [id],
+        );
+        return r.rowCount;
+      });
+      expect(left, "the row AND its network payload are gone").toBe(0);
+    });
+
     it("honours an explicit retention_days argument", async () => {
       const url = `${URL_PREFIX}purge-explicit`;
       const id = await withRealDb(async (pool) => {

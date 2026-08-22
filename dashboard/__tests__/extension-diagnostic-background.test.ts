@@ -12,13 +12,26 @@
  *                           granted (never requests it itself — a service
  *                           worker has no user-activation signal), then
  *                           registers the MAIN/ISOLATED dynamic content
- *                           scripts scoped to exactly one origin.
- *   recordNetworkEntry   — buffers only for a tab that's actually armed.
- *   disarmNetworkRecording — unregisters + returns the capped entries, and
- *                           is safe to call even when nothing was armed
- *                           (SEND_DIAGNOSTIC's unconditional call).
+ *                           scripts scoped to exactly one origin, with
+ *                           persistAcrossSessions:false.
+ *   recordNetworkEntry   — buffers only for the armed tab, and only with the
+ *                           session nonce.
+ *   disarmNetworkRecording — ALWAYS unregisters, whether or not anything was
+ *                           buffered, and returns the capped entries.
+ *   sweepStrandedNetworkRecorders / expireStaleNetworkRecordings — the
+ *                           respawn/restart and walked-away nets.
  *   sendDiagnostic       — POSTs to the dedicated diagnostic endpoint, never
  *                           /api/extension/capture.
+ *
+ * WHAT THESE TESTS CANNOT COVER (issue #684, and stated here so nobody reads
+ * a green run as "the lifecycle is fixed"): everything above runs against a
+ * hand-written chrome stub in Node. No MAIN-world wrapper is installed, no
+ * service worker is evicted, no browser is restarted. The eviction/restart
+ * behaviour is asserted STRUCTURALLY — teardown reads chrome.storage.session
+ * and chrome.scripting.getRegisteredContentScripts() rather than an
+ * in-memory Map, and registration passes persistAcrossSessions:false — which
+ * is the right shape, not a live proof. Only the smoke test in the D-164
+ * record proves it.
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -74,7 +87,22 @@ function makeChromeMock(opts: { hasPermission?: boolean } = {}) {
   const local: Record<string, unknown> = {};
   const session: Record<string, unknown> = {};
   const sync: Record<string, unknown> = {};
+  // Mirrors Chrome's real dynamic-content-script registry closely enough that
+  // the #684 respawn sweep is actually exercised: register/unregister mutate
+  // it, getRegisteredContentScripts reads it back, and unregistering an
+  // UNKNOWN id rejects — which is why unregisterNetworkScripts falls back to
+  // one id at a time.
+  const registered: Array<{ id: string; [k: string]: unknown }> = [];
+  const tabRemovedListeners: Array<(tabId: number) => void> = [];
+  const alarmListeners: Array<(alarm: { name: string }) => void> = [];
+  const messageListeners: Array<
+    (msg: Record<string, unknown>, sender: unknown, respond: (r?: unknown) => void) => unknown
+  > = [];
   return {
+    __registered: registered,
+    __tabRemovedListeners: tabRemovedListeners,
+    __alarmListeners: alarmListeners,
+    __messageListeners: messageListeners,
     storage: {
       local: makeStorageArea(local),
       session: makeStorageArea(session),
@@ -89,11 +117,35 @@ function makeChromeMock(opts: { hasPermission?: boolean } = {}) {
       sendMessage: vi.fn(async () => null),
       onUpdated: { addListener: vi.fn() },
       onActivated: { addListener: vi.fn() },
-      onRemoved: { addListener: vi.fn() },
+      onRemoved: {
+        addListener: vi.fn((fn: (tabId: number) => void) => {
+          tabRemovedListeners.push(fn);
+        }),
+      },
     },
-    alarms: { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: { addListener: vi.fn() } },
+    alarms: {
+      create: vi.fn(),
+      clear: vi.fn(async () => true),
+      onAlarm: {
+        addListener: vi.fn((fn: (alarm: { name: string }) => void) => {
+          alarmListeners.push(fn);
+        }),
+      },
+    },
     runtime: {
-      onMessage: { addListener: vi.fn() },
+      onMessage: {
+        addListener: vi.fn(
+          (
+            fn: (
+              msg: Record<string, unknown>,
+              sender: unknown,
+              respond: (r?: unknown) => void,
+            ) => unknown,
+          ) => {
+            messageListeners.push(fn);
+          },
+        ),
+      },
       onStartup: { addListener: vi.fn() },
       onInstalled: { addListener: vi.fn() },
       getManifest: () => ({ version: "0.16.0-test" }),
@@ -102,26 +154,69 @@ function makeChromeMock(opts: { hasPermission?: boolean } = {}) {
     action: { setBadgeText: vi.fn(), setBadgeBackgroundColor: vi.fn(), setTitle: vi.fn() },
     scripting: {
       executeScript: vi.fn(async () => {}),
-      registerContentScripts: vi.fn(async () => {}),
-      unregisterContentScripts: vi.fn(async () => {}),
+      registerContentScripts: vi.fn(async (scripts: Array<{ id: string }>) => {
+        for (const script of scripts) registered.push({ ...script });
+      }),
+      getRegisteredContentScripts: vi.fn(async () => registered.map((r) => ({ ...r }))),
+      unregisterContentScripts: vi.fn(async (filter?: { ids?: string[] }) => {
+        const ids = filter?.ids;
+        if (!ids) {
+          registered.length = 0;
+          return;
+        }
+        const missing = ids.filter((id) => !registered.some((r) => r.id === id));
+        if (missing.length) throw new Error(`Nonexistent script ID '${missing[0]}'`);
+        for (const id of ids) {
+          const idx = registered.findIndex((r) => r.id === id);
+          if (idx !== -1) registered.splice(idx, 1);
+        }
+      }),
     },
     permissions: {
       contains: vi.fn(async () => opts.hasPermission !== false),
       request: vi.fn(async () => true),
+      remove: vi.fn(async () => true),
     },
   };
+}
+
+/** Drive one `chrome.runtime.onMessage` listener chain and resolve its reply. */
+function sendMessage(
+  chromeMock: ReturnType<typeof makeChromeMock>,
+  msg: Record<string, unknown>,
+  sender: unknown = {},
+): Promise<unknown> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const respond = (r?: unknown) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    let handled = false;
+    for (const listener of chromeMock.__messageListeners) {
+      if (listener(msg, sender, respond) === true) handled = true;
+    }
+    if (!handled) setTimeout(() => respond(undefined), 0);
+  });
 }
 
 interface BackgroundModule {
   armNetworkRecording: (
     tabId: number,
     origin: string,
+    grantedNow?: boolean,
   ) => Promise<{ success: boolean; error?: { message: string } }>;
   disarmNetworkRecording: (
     tabId: number,
   ) => Promise<{ entries: unknown[]; droppedCount: number } | null>;
-  recordNetworkEntry: (tabId: number, entry: unknown) => void;
-  getNetworkRecordingState: (tabId: number) => { armed: boolean; entryCount: number };
+  recordNetworkEntry: (tabId: number, entry: unknown, nonce?: string) => Promise<void>;
+  getNetworkRecordingState: (
+    tabId: number,
+  ) => Promise<{ armed: boolean; entryCount: number; expiresAt?: number | null }>;
+  sweepStrandedNetworkRecorders: () => Promise<{ swept: string[] }>;
+  expireStaleNetworkRecordings: (nowMs?: number) => Promise<{ expired: number[] }>;
+  networkScriptIds: (tabId: number) => string[];
   sendDiagnostic: (payload: {
     url: string;
     html: string;
@@ -166,6 +261,22 @@ function makeFetchMock() {
   return vi.fn(async () => ({ ok: true, json: async () => ({ success: true, id: 99 }) }));
 }
 
+/** Let queued microtasks/timers settle (top-level sweeps, fire-and-forget). */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** The nonce background.js minted for `tabId`'s armed session. */
+async function armedNonce(
+  chromeMock: ReturnType<typeof makeChromeMock>,
+  tabId: number,
+): Promise<string> {
+  const got = (await chromeMock.storage.session.get("diagArmed")) as {
+    diagArmed?: Record<string, { nonce?: string }>;
+  };
+  return got.diagArmed?.[String(tabId)]?.nonce ?? "";
+}
+
 describe("armNetworkRecording", () => {
   it("fails without the host permission — and NEVER requests it itself (no user-activation signal in a service worker)", async () => {
     const chrome = makeChromeMock({ hasPermission: false });
@@ -192,6 +303,7 @@ describe("armNetworkRecording", () => {
       matches: string[];
       world: string;
       js: string[];
+      persistAcrossSessions?: boolean;
     }>;
     expect(registered).toHaveLength(2);
     const mainEntry = registered.find((r) => r.world === "MAIN");
@@ -205,7 +317,38 @@ describe("armNetworkRecording", () => {
       expect(entry.matches).not.toContain("<all_urls>");
     }
 
-    expect(bg.getNetworkRecordingState(7)).toEqual({ armed: true, entryCount: 0 });
+    expect(await bg.getNetworkRecordingState(7)).toMatchObject({ armed: true, entryCount: 0 });
+  });
+
+  // ── #684 B1, half two ────────────────────────────────────────────────────
+  // `chrome.scripting.registerContentScripts` DEFAULTS persistAcrossSessions
+  // to TRUE. PR #675 omitted the field, so an armed recorder survived a
+  // browser restart — while chrome.storage.session.diagArmed, the only
+  // bookkeeping that could have found it again, is wiped on restart by
+  // definition. Both scripts must opt out explicitly.
+  it("opts BOTH scripts out of persistAcrossSessions — the default is true, and a restart wipes the only state that tracked them", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+
+    await bg.armNetworkRecording(9, "https://realestate.hipoges.com");
+
+    const registered = chrome.scripting.registerContentScripts.mock.calls[0][0] as Array<{
+      persistAcrossSessions?: boolean;
+    }>;
+    for (const entry of registered) {
+      expect(entry.persistAcrossSessions).toBe(false);
+    }
+  });
+
+  it("leaves no phantom armed session behind when registration fails", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    chrome.scripting.registerContentScripts.mockRejectedValueOnce(new Error("boom"));
+
+    const res = await bg.armNetworkRecording(11, "https://realestate.hipoges.com");
+
+    expect(res.success).toBe(false);
+    expect(await bg.getNetworkRecordingState(11)).toMatchObject({ armed: false });
   });
 });
 
@@ -215,39 +358,122 @@ describe("recordNetworkEntry", () => {
     const bg = loadBackground(chrome, makeFetchMock());
 
     await bg.armNetworkRecording(3, "https://realestate.hipoges.com");
-    bg.recordNetworkEntry(3, { url: "https://realestate.hipoges.com/api/assets" });
-    bg.recordNetworkEntry(999, { url: "https://example.com/should-be-dropped" });
+    const nonce = await armedNonce(chrome, 3);
+    await bg.recordNetworkEntry(3, { url: "https://realestate.hipoges.com/api/assets" }, nonce);
+    await bg.recordNetworkEntry(999, { url: "https://example.invalid/should-be-dropped" }, nonce);
 
-    expect(bg.getNetworkRecordingState(3)).toEqual({ armed: true, entryCount: 1 });
-    expect(bg.getNetworkRecordingState(999)).toEqual({ armed: false, entryCount: 0 });
+    expect(await bg.getNetworkRecordingState(3)).toMatchObject({ armed: true, entryCount: 1 });
+    expect(await bg.getNetworkRecordingState(999)).toMatchObject({ armed: false, entryCount: 0 });
+  });
+
+  // #684 S5: the relay used to forward any same-origin postMessage carrying
+  // `source: "inmo-diag-recorder"` — all forgeable by page script. The nonce
+  // is checked in the relay AND again here, so a stale/forged relay message
+  // can't inject a fabricated entry into a diagnostic.
+  // storage.session has a hard byte quota (1 MB on older Chrome). Losing the
+  // WRITE would lose every LATER entry too, silently — the same
+  // fails-quietly-forever shape as B1, one layer down.
+  it("sheds the oldest entries and keeps recording when the session-storage quota is hit", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(41, "https://realestate.hipoges.com");
+    const nonce = await armedNonce(chrome, 41);
+    for (let i = 0; i < 4; i++) {
+      await bg.recordNetworkEntry(41, { url: `https://realestate.hipoges.com/api/${i}` }, nonce);
+    }
+
+    const realSet = chrome.storage.session.set;
+    let failNext = true;
+    chrome.storage.session.set = vi.fn(async (obj: Record<string, unknown>) => {
+      if (failNext && Object.keys(obj)[0].startsWith("diagNetBuf:")) {
+        failNext = false;
+        throw new Error("QUOTA_BYTES quota exceeded");
+      }
+      return realSet(obj);
+    }) as typeof realSet;
+
+    await bg.recordNetworkEntry(41, { url: "https://realestate.hipoges.com/api/newest" }, nonce);
+
+    const state = await bg.getNetworkRecordingState(41);
+    expect(state.armed).toBe(true);
+    expect(state.entryCount).toBeGreaterThan(0);
+    expect(state.entryCount).toBeLessThan(5);
+    const result = await bg.disarmNetworkRecording(41);
+    // The shed entries are REPORTED, never silently gone.
+    expect(result!.droppedCount).toBeGreaterThan(0);
+  });
+
+  it("drops an entry whose nonce doesn't match the armed session", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+
+    await bg.armNetworkRecording(4, "https://realestate.hipoges.com");
+    await bg.recordNetworkEntry(4, { url: "https://realestate.hipoges.com/api/x" }, "wrong-nonce");
+
+    expect(await bg.getNetworkRecordingState(4)).toMatchObject({ entryCount: 0 });
+  });
+
+  // The buffer lives in chrome.storage.session precisely so it OUTLIVES the
+  // service worker. Re-loading the module against the same storage is this
+  // suite's stand-in for an eviction + respawn: a fresh worker, the same
+  // durable state.
+  it("a buffer written before a worker eviction is still there for the disarm after the respawn", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const first = loadBackground(chrome, makeFetchMock());
+    await first.armNetworkRecording(21, "https://realestate.hipoges.com");
+    const nonce = await armedNonce(chrome, 21);
+    await first.recordNetworkEntry(21, { url: "https://realestate.hipoges.com/api/list" }, nonce);
+
+    // …worker evicted; every in-memory variable in background.js is gone.
+    const respawned = loadBackground(chrome, makeFetchMock());
+
+    const result = await respawned.disarmNetworkRecording(21);
+    expect(result).not.toBeNull();
+    expect(result!.entries).toHaveLength(1);
   });
 });
 
 describe("disarmNetworkRecording", () => {
-  // ┌─────────────────────────────────────────────────────────────────────┐
-  // │ THIS ASSERTION IS BACKWARDS AND MUST BE INVERTED — see issue #684.  │
-  // └─────────────────────────────────────────────────────────────────────┘
-  // It documents the CURRENT behaviour of parked, unreachable code, not a
-  // property worth having. `networkBuffers` is an in-memory Map in an MV3
-  // service worker that Chrome evicts after ~30s idle, so on the documented
-  // happy path (arm, reload, page settles, worker dies) disarm returns null
-  // here BEFORE unregistering — leaving the MAIN-world fetch/XHR wrapper
-  // registered on every tab of that origin, indefinitely and across browser
-  // restarts. The buffer's presence and the registration's presence are
-  // independent facts; conflating them is the B1 defect that stopped the
-  // network-capture half shipping in PR #675.
+  // ── #684 B1, half one — this assertion is the INVERSE of the one PR #675
+  // shipped. That test asserted `unregisterContentScripts` was NOT called
+  // when nothing was buffered, which locked in the defect: `networkBuffers`
+  // was an in-memory Map in an MV3 service worker Chrome evicts after ~30s
+  // idle, so on the DOCUMENTED HAPPY PATH (arm, reload, page settles, worker
+  // dies) disarm returned null before ever reaching the unregister — losing
+  // the buffer AND leaving the MAIN-world fetch/XHR wrapper registered on
+  // every tab of the origin, across restarts.
   //
-  // When #684 rebuilds the lifecycle, disarm must ALWAYS attempt
-  // `unregisterContentScripts`, and this test becomes its opposite:
-  // "unregisters even when nothing was buffered for the tab".
-  it("returns null when nothing was armed for the tab — safe to call unconditionally", async () => {
+  // "Is there a buffer for this tab" and "is there a registration for this
+  // tab" are independent facts. Disarm now unregisters FIRST, unconditionally,
+  // before it consults any state at all.
+  it("unregisters the content scripts even when nothing was buffered for the tab", async () => {
     const chrome = makeChromeMock({ hasPermission: true });
     const bg = loadBackground(chrome, makeFetchMock());
+    // A registration with no live session — exactly what a post-eviction
+    // worker sees.
+    await chrome.scripting.registerContentScripts([
+      { id: "inmo-diag-42-main" },
+      { id: "inmo-diag-42-relay" },
+    ]);
+    chrome.scripting.unregisterContentScripts.mockClear();
 
     const result = await bg.disarmNetworkRecording(42);
 
+    expect(result).toBeNull(); // nothing to send…
+    expect(chrome.scripting.unregisterContentScripts).toHaveBeenCalledWith({
+      ids: ["inmo-diag-42-main", "inmo-diag-42-relay"],
+    });
+    expect(chrome.__registered).toHaveLength(0); // …but the recorder IS gone
+  });
+
+  it("still unregisters when NOTHING is registered either — a cheap no-op that can never leave a recorder behind", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+
+    const result = await bg.disarmNetworkRecording(77);
+
     expect(result).toBeNull();
-    expect(chrome.scripting.unregisterContentScripts).not.toHaveBeenCalled();
+    expect(chrome.scripting.unregisterContentScripts).toHaveBeenCalled();
   });
 
   it("unregisters the content scripts and returns the buffered entries, then clears the buffer", async () => {
@@ -255,7 +481,12 @@ describe("disarmNetworkRecording", () => {
     const bg = loadBackground(chrome, makeFetchMock());
 
     await bg.armNetworkRecording(5, "https://realestate.hipoges.com");
-    bg.recordNetworkEntry(5, { url: "https://realestate.hipoges.com/api/assets", method: "GET" });
+    const nonce = await armedNonce(chrome, 5);
+    await bg.recordNetworkEntry(
+      5,
+      { url: "https://realestate.hipoges.com/api/assets", method: "GET" },
+      nonce,
+    );
 
     const result = await bg.disarmNetworkRecording(5);
 
@@ -266,9 +497,171 @@ describe("disarmNetworkRecording", () => {
       ids: ["inmo-diag-5-main", "inmo-diag-5-relay"],
     });
     // The buffer is gone — a second disarm is a clean no-op, not a re-send.
-    expect(bg.getNetworkRecordingState(5)).toEqual({ armed: false, entryCount: 0 });
+    expect(await bg.getNetworkRecordingState(5)).toMatchObject({ armed: false, entryCount: 0 });
     const second = await bg.disarmNetworkRecording(5);
     expect(second).toBeNull();
+  });
+
+  // #684 S7: every origin the owner ever diagnosed used to keep a standing
+  // host grant, because chrome.permissions.remove appeared nowhere. Hand back
+  // only the grant THIS recording created — an origin already granted for
+  // capture must survive, or arming a recorder would silently break batch.
+  it("revokes a host grant the recording itself created, and only that one", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+
+    await bg.armNetworkRecording(31, "https://example.invalid", true);
+    await bg.disarmNetworkRecording(31);
+    expect(chrome.permissions.remove).toHaveBeenCalledWith({
+      origins: ["https://example.invalid/*"],
+    });
+
+    chrome.permissions.remove.mockClear();
+    await bg.armNetworkRecording(32, "https://realestate.hipoges.com", false);
+    await bg.disarmNetworkRecording(32);
+    expect(chrome.permissions.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe("tab close and expiry — the two paths that used to leave a recorder armed forever", () => {
+  it("closing the armed tab disarms it (tabs.onRemoved only called endValidation before #684)", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(13, "https://realestate.hipoges.com");
+    expect(chrome.__registered.map((r) => r.id)).toContain("inmo-diag-13-main");
+
+    for (const listener of chrome.__tabRemovedListeners) listener(13);
+    await flush();
+
+    expect(chrome.__registered).toHaveLength(0);
+    expect(await bg.getNetworkRecordingState(13)).toMatchObject({ armed: false });
+  });
+
+  it("an armed session past its expiry is torn down by the expiry alarm — an owner who never sends is bounded", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(14, "https://realestate.hipoges.com");
+    expect(chrome.alarms.create).toHaveBeenCalledWith("inmo-diag-expiry", {
+      periodInMinutes: 1,
+    });
+
+    // Well past DIAG_RECORDING_TTL_MS (5 min).
+    const res = await bg.expireStaleNetworkRecordings(Date.now() + 60 * 60 * 1000);
+
+    expect(res.expired).toEqual([14]);
+    expect(chrome.__registered).toHaveLength(0);
+    expect(chrome.alarms.clear).toHaveBeenCalledWith("inmo-diag-expiry");
+  });
+
+  it("does NOT expire a session still inside its window", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(15, "https://realestate.hipoges.com");
+
+    const res = await bg.expireStaleNetworkRecordings(Date.now() + 1000);
+
+    expect(res.expired).toEqual([]);
+    expect(chrome.__registered.map((r) => r.id)).toContain("inmo-diag-15-main");
+  });
+});
+
+describe("sweepStrandedNetworkRecorders — the browser-restart net", () => {
+  // After a restart chrome.storage.session is empty by definition, so EVERY
+  // surviving inmo-diag-* registration is stranded. This matters even with
+  // persistAcrossSessions:false in place today: a recorder armed by an
+  // 0.18.0-or-earlier build was registered persistently and would otherwise
+  // wrap fetch on that origin forever, with nothing in the extension aware.
+  it("unregisters every inmo-diag-* script when no session claims it", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await chrome.scripting.registerContentScripts([
+      { id: "inmo-diag-8-main" },
+      { id: "inmo-diag-8-relay" },
+      { id: "inmo-diag-99-main" },
+    ]);
+
+    const res = await bg.sweepStrandedNetworkRecorders();
+
+    expect(res.swept.sort()).toEqual([
+      "inmo-diag-8-main",
+      "inmo-diag-8-relay",
+      "inmo-diag-99-main",
+    ]);
+    expect(chrome.__registered).toHaveLength(0);
+  });
+
+  it("leaves an ACTIVE session's scripts alone — a worker respawn mid-recording must not kill the recording", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(8, "https://realestate.hipoges.com");
+    await chrome.scripting.registerContentScripts([{ id: "inmo-diag-99-main" }]);
+
+    const res = await bg.sweepStrandedNetworkRecorders();
+
+    expect(res.swept).toEqual(["inmo-diag-99-main"]);
+    expect(chrome.__registered.map((r) => r.id).sort()).toEqual([
+      "inmo-diag-8-main",
+      "inmo-diag-8-relay",
+    ]);
+  });
+
+  it("never touches a registration that isn't ours", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await chrome.scripting.registerContentScripts([{ id: "some-other-feature" }]);
+
+    const res = await bg.sweepStrandedNetworkRecorders();
+
+    expect(res.swept).toEqual([]);
+    expect(chrome.__registered.map((r) => r.id)).toEqual(["some-other-feature"]);
+  });
+
+  it("runs on worker spawn, so an eviction respawn that no lifecycle event covers still cleans up", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    // A leftover from a previous browser session, with no live armed state.
+    await chrome.scripting.registerContentScripts([{ id: "inmo-diag-4-main" }]);
+
+    loadBackground(chrome, makeFetchMock());
+    await flush();
+
+    expect(chrome.__registered).toHaveLength(0);
+  });
+});
+
+describe("NETWORK_RECORDER_HELLO — interception is confined to the armed tab (#684 B2)", () => {
+  // registerContentScripts has no per-tab filter, so the recorder pair is
+  // installed on EVERY tab of the armed origin. This handshake is how a tab
+  // learns it isn't the one: the worker answers from _sender.tab.id, which
+  // page script cannot forge, and a tab told `armed:false` makes the
+  // MAIN-world recorder uninstall itself.
+  it("tells the armed tab it is armed, and every other tab on the same origin that it is not", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(51, "https://realestate.hipoges.com");
+
+    const armedReply = (await sendMessage(chrome, { type: "NETWORK_RECORDER_HELLO" }, {
+      tab: { id: 51 },
+    })) as { armed: boolean; nonce?: string };
+    const otherReply = (await sendMessage(chrome, { type: "NETWORK_RECORDER_HELLO" }, {
+      tab: { id: 52 },
+    })) as { armed: boolean };
+
+    expect(armedReply.armed).toBe(true);
+    expect(typeof armedReply.nonce).toBe("string");
+    expect(otherReply.armed).toBe(false);
+  });
+
+  it("an entry relayed from a non-armed tab on the same origin is neither recorded nor answered as armed", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(61, "https://realestate.hipoges.com");
+    const nonce = await armedNonce(chrome, 61);
+
+    // Same origin, same nonce (imagine it leaked) — but a different tab.
+    await bg.recordNetworkEntry(62, { url: "https://realestate.hipoges.com/api/other" }, nonce);
+
+    expect(await bg.getNetworkRecordingState(62)).toMatchObject({ armed: false, entryCount: 0 });
+    expect(await bg.getNetworkRecordingState(61)).toMatchObject({ entryCount: 0 });
   });
 });
 

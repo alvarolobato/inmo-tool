@@ -52,6 +52,16 @@ export interface DiagnosticDetectionBlock {
   autoCaptureWouldFire?: boolean;
 }
 
+/**
+ * One captured request/response, already redacted and size-capped in the
+ * browser by network-recorder.js `summarizeEntry` (issues #671, #684).
+ *
+ * `body` is the RESPONSE body: truncated at 20 KB and scrubbed of the three
+ * unambiguous credential shapes (a JSON value under a credential-shaped key, a
+ * `Bearer …` literal, a bare JWT) — and otherwise verbatim, personal data
+ * included. Nothing downstream re-redacts it; `purge_extension_diagnostics()`
+ * is the bound. Request bodies are never captured.
+ */
 export interface NetworkEntry {
   url: string;
   method: string;
@@ -59,6 +69,15 @@ export interface NetworkEntry {
   type: "fetch" | "xhr";
   body: string | null;
   bodyTruncated: boolean;
+  bodyOriginalLength?: number;
+  bodyReadable?: boolean;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  redactedHeaderCount?: number;
+  /** URL parts removed — query params, path segments and fragment params. */
+  redactedUrlPartCount?: number;
+  /** Credential-shaped values removed from the response body. */
+  redactedBodyValueCount?: number;
   startedAtMs: number | null;
   finishedAtMs: number | null;
 }
