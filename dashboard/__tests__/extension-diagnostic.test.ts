@@ -39,7 +39,7 @@ interface DiagnosticBlock {
     pageRole: string | null;
   };
   renderReady: RenderReadyDetail;
-  harvest: { anchorCount: number; extractDetailUrlsCount: number };
+  harvest: { anchorCount: number; extractDetailUrlsCount: number; pendingPlaceholders: number };
   block: { blocked: boolean; signature: string | null };
   mode: { discoverSignalPresent: boolean; validationActive: boolean; autoCaptureEnabled: boolean };
   autoCaptureWouldFire: boolean;
@@ -166,12 +166,16 @@ describe("buildDiagnosticBlock — supported RESULTS/listing page", () => {
     expect(block.autoCaptureWouldFire).toBe(false);
   });
 
-  it("Hipoges class of bug (issue #671's own motivating case): an Angular shell with enough boilerplate text to satisfy isRenderReady via the GENERIC 'main' selector, but zero real detail links — the diagnostic surfaces the too-generic selector match", () => {
+  it("Hipoges class of bug (issue #671's own motivating case, repaired in #701): an Angular shell with enough boilerplate text to have satisfied the OLD generic 'main' selector, but zero real detail links — the diagnostic now reports it as un-rendered", () => {
     document.title = "Hipoges";
-    // No portal-specific readySelectors exist for hipoges (D-111) — it falls
-    // back to ["main", "h1"]. This fixture is exactly the bug: `main` is
-    // present with enough padding text to clear MIN_BODY_TEXT (400 chars),
-    // but there isn't a single /detail/ link or price on the page.
+    // This fixture IS the bug #671 was built to expose: `main` is present with
+    // enough padding text to clear MIN_BODY_TEXT (400 chars), and there isn't
+    // a single advert on the page. Until #701 that combination reported
+    // ready=true via the generic fallback, which is how an empty shell got
+    // captured as an advert (production rows 3614-3617, 3 of 26 fields).
+    // Hipoges' detail readiness is now pinned to the advert's own component
+    // elements, so the shell is correctly rejected — and the diagnostic says
+    // WHY (`no_key_node`) rather than claiming the page had rendered.
     document.body.innerHTML = `
       <nav id="init-front-list">Hipoges navigation shell placeholder</nav>
       <main>
@@ -184,12 +188,17 @@ describe("buildDiagnosticBlock — supported RESULTS/listing page", () => {
     const block = buildDiagnosticBlock(D, document, url, { hrefs });
 
     expect(block.detection.listingPortal).toBe("hipoges");
-    // The exact field the issue exists for: ready=true via the GENERIC "main"
-    // fallback — visible at a glance, instead of an archaeology session.
-    expect(block.renderReady.ready).toBe(true);
-    expect(block.renderReady.selector).toBe("main");
-    // …yet the harvest found NOTHING — the mismatch a human needs to see.
+    // The field the issue exists for still carries the whole story at a
+    // glance — only now it tells the truth about the shell.
+    expect(block.renderReady.ready).toBe(false);
+    expect(block.renderReady.selector).toBeNull();
+    expect(block.renderReady.reason).toBe("no_key_node");
+    expect(block.renderReady.bodyTextLength).toBeGreaterThan(400);
+    // …and the harvest found NOTHING, which on this page is the correct
+    // answer: there is no advert on it at all.
     expect(block.harvest.extractDetailUrlsCount).toBe(0);
+    // Nothing is loading either — this shell is not a page mid-render.
+    expect(block.harvest.pendingPlaceholders).toBe(0);
   });
 });
 

@@ -74,6 +74,14 @@ _DETAIL_CASES: list[tuple[str, str | None]] = [
     ("https://realestate.hipoges.com/es", None),
     ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", None),
     ("https://realestate.hipoges.com/es/detail", None),
+    # Issue #701: Hipoges' own home page links six blog articles through the
+    # `:investment` slot as `es/blog/detail/<slug>` (production capture id
+    # 3577). The wildcard used to classify every one of them as an advert.
+    (
+        "https://realestate.hipoges.com/es/blog/detail/pisos-en-alcala-de-henares-oportunidades",
+        None,
+    ),
+    ("https://realestate.hipoges.com/pt/blog/detail/algum-artigo", None),
     # Unsupported host → None even on a detail-shaped path.
     ("https://www.fotocasa.es/inmueble/123/", None),
     ("https://example.com/inmueble/123/", None),

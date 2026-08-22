@@ -39,6 +39,7 @@ export interface DiagnosticDetectionBlock {
   harvest?: {
     anchorCount?: number;
     extractDetailUrlsCount?: number;
+    pendingPlaceholders?: number;
   };
   block?: {
     blocked?: boolean;
@@ -100,6 +101,11 @@ export interface DiagnosticSummary {
   // (issue #671), so it belongs on the list, not behind a SQL query.
   anchorCount: number | null;
   extractDetailUrlsCount: number | null;
+  // Loading placeholders still on the page (issue #701). On a portal that
+  // paints its results progressively this is what separates "there are no
+  // adverts here" from "the adverts have not arrived yet" — the distinction
+  // both Hipoges reports turned on.
+  pendingPlaceholders: number | null;
   blocked: boolean | null;
   blockSignature: string | null;
   autoCaptureWouldFire: boolean | null;
@@ -168,6 +174,7 @@ function rowToSummary(row: unknown[]): DiagnosticSummary {
     renderReadyBodyTextLength: detection?.renderReady?.bodyTextLength ?? null,
     anchorCount: detection?.harvest?.anchorCount ?? null,
     extractDetailUrlsCount: detection?.harvest?.extractDetailUrlsCount ?? null,
+    pendingPlaceholders: detection?.harvest?.pendingPlaceholders ?? null,
     blocked: detection?.block?.blocked ?? null,
     blockSignature: detection?.block?.signature ?? null,
     autoCaptureWouldFire: detection?.autoCaptureWouldFire ?? null,

@@ -213,9 +213,13 @@ describe("isRenderReady — not an empty SPA shell", () => {
     expect(isRenderReady(document, "idealista")).toBe(true);
     expect(isRenderReady(document, "aliseda")).toBe(true);
     expect(isRenderReady(document, "altamira")).toBe(true);
-    // Hipoges' readySelectors are the generic h1/main fallback — no real
-    // capture exists yet to ground a portal-specific selector (D-111).
-    expect(isRenderReady(document, "hipoges")).toBe(true);
+    // Hipoges is deliberately NOT in this list any more (issue #701). It used
+    // to share the generic h1/main fallback, and that is precisely what let an
+    // un-rendered Angular shell pass as a rendered advert — rows 3614-3617
+    // were captured that way, at 3 of 26 fields. Its detail readiness is now
+    // pinned to the advert's own component elements; see
+    // extension-hipoges-render.test.ts.
+    expect(isRenderReady(document, "hipoges")).toBe(false);
   });
 
   it("uses generic h1/main fallback for an unknown portal", () => {

@@ -189,8 +189,27 @@
       // id. `<investment>` is an unconfirmed category segment. DOM extraction
       // beyond this URL shape is an unvalidated draft (D-111) — no real
       // capture exists yet to verify readySelectors against.
+      //
+      // The `(?:[^/]+\/)?` :investment slot is a WILDCARD, and that is what
+      // made this wrong (issue #701). Hipoges' own home page links its blog
+      // as `es/blog/detail/<slug>` — e.g.
+      // `es/blog/detail/pisos-en-alcala-de-henares-oportunidades`, six of them
+      // on the page, VERIFIED in production `extension_capture` id 3577 (the
+      // owner's real capture of `/es`, pulled read-only). "blog" landed in the
+      // :investment slot, so every one of those articles classified as a
+      // listing-DETAIL page and was one "Capturar todas" away from being
+      // ingested as a property. Nothing had been ingested yet, but the path
+      // was open — the same defect #690/D-159 closed for Idealista's
+      // non-advert pages.
+      //
+      // Excluded by NAME, not by shape: the asset-category tokens the bundle
+      // hints at (auction/cdr/npl/occupied/rented/special) are unconfirmed, so
+      // an allow-list would repeat the D-115 mistake of making a real URL
+      // vanish because the vocabulary guess was wrong. A deny-list of the
+      // non-asset sections actually OBSERVED linking through `detail/` keeps
+      // the wildcard's tolerance and closes the one hole we can prove.
       isDetailPath: function (p) {
-        return /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i.test(p);
+        return /^\/[a-z]{2}\/(?:(?!blog\/)[^/]+\/)?detail\/[^/]+/i.test(p);
       },
       // Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
       // <town>[/<features>]` (5+ path segments after the domain) or the
@@ -237,11 +256,114 @@
       // capture-only portals; the enumeration walk PREFERS the rendered DOM's
       // next-page anchor over this guess, same as aliseda/altamira.
       pagination: { kind: "query", param: "pagina" },
-      // No real detail page has been captured, so no readySelectors are
-      // grounded — the generic h1/main fallback (DEFAULT_READY_SELECTORS)
-      // plus the body-text-volume floor in isRenderReady() is all this portal
-      // gets until the calibration issue linked from D-111 lands real ones.
-      readySelectors: ["main", "h1"],
+      // ── Render readiness (issue #701) ───────────────────────────────────
+      //
+      // This used to be `["main", "h1"]`, and that pair is why the owner was
+      // told "no hay anuncios que capturar" on a page showing 17. Both
+      // selectors match Hipoges' PAGE FURNITURE, which Angular server-renders
+      // before a single advert exists. Measured on production
+      // `extension_capture` id 3576 — the owner's own
+      // `/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla` capture, 262 KB,
+      // pulled read-only:
+      //
+      //   <main> present, <h1> = "17 Pisos y casas en venta en Dos Hermanas,
+      //   Sevilla", body text 2,036 chars (floor is 400).
+      //
+      // So isRenderReady() returned TRUE on the very first 500 ms poll, the
+      // harvest ran, and the results list at that instant was FOUR painted
+      // cards plus THIRTEEN <p-skeleton> placeholders — the 17 he could see.
+      // Readiness was reporting on the header, never on the adverts.
+      //
+      // Detail and listing pages are now judged SEPARATELY, because on this
+      // portal they fail differently and the evidence for each is different.
+      detailReadySelectors: [
+        // Grounded in the real RARE-04347 capture (issue #547, D-146) — the
+        // Angular component elements that only exist once the advert itself
+        // has painted. See etl/tests/fixtures/hipoges_detail_RARE-04347.html
+        // and hipoges.py, which parses these exact elements.
+        "init-asset-detail-main-info",
+        "init-asset-detail-features",
+        "init-asset-detail-details",
+        "init-asset-detail-description",
+        // Deliberately NO "main"/"h1" fallback. On every other portal the
+        // generic pair is a harmless safety net; here it is the bug. An empty
+        // Hipoges shell satisfies both, which is how rows 3614-3617 came to be
+        // captured with 3 of 26 fields.
+      ],
+      // A listing page's readiness is NOT a selector question on this portal —
+      // see harvestSettleFor/mediaDetailRef below and isRenderReadyListing().
+      // `init-front-list` is the results component and IS grounded (it is
+      // present in id 3576), but it is present while the list is still all
+      // skeletons, so on its own it proves nothing. It is kept only as the
+      // "we are on the right page" half; the settle loop supplies the rest.
+      listingReadySelectors: ["init-front-list"],
+      // Skeleton placeholders are PrimeNG's loading state and are a real,
+      // observed negative signal: id 3576 carried 13 of them, one per
+      // not-yet-painted result. Soft, never absolute — the DETAIL page carries
+      // 5 skeletons of its own, and below-the-fold results may be lazy, so
+      // this only DELAYS readiness within the budget and can never deadlock
+      // (see isRenderReadyListing: it is ignored once the harvest has settled).
+      loadingSelectors: ["p-skeleton"],
+      // Per-portal render budget (issue #701). Hipoges is the reason the
+      // single global MAX_WAIT_MS is the wrong shape: Idealista is ready in
+      // about a second, and a ceiling tuned for it truncates a portal that
+      // server-renders its chrome first and streams its adverts in afterwards.
+      // Raising the GLOBAL number would make every portal's give-up slower to
+      // pay for one portal's slowness. 45 s is this portal's budget alone.
+      //
+      // Chosen, not measured: the honest render time is still unknown (#700 —
+      // the 19.5 s figure quoted around #695 is seeded fixture data, and
+      // `render_wait_ms` only started populating with extension 0.18.0). It is
+      // set generously ON PURPOSE and paired with the `never_rendered` trace
+      // below, so the next revision is driven by real numbers instead of a
+      // second guess.
+      maxWaitMs: 45000,
+      // ── Detail URLs without anchors (issue #701) ────────────────────────
+      //
+      // THE root cause of "no hay anuncios que capturar". Hipoges result cards
+      // are not links. In id 3576 the four FULLY PAINTED property cards —
+      // real titles, m², prices — carry no <a href> at all; they navigate by
+      // Angular click handler. The page's 65 anchors are nav, footer, social
+      // and language links, and not one resolves to a detail URL. So
+      // extractDetailUrls(), which reads a[href], returns 0 on a rendered
+      // Hipoges search page no matter how long anyone waits. This is not a
+      // timing bug and no readiness fix alone would have touched it.
+      //
+      // What the cards DO carry is the advert's own photo, and the CDN path
+      // embeds the asset reference, lowercased, in its second-to-last segment:
+      //
+      //   https://hipoges.azureedge.net/imageshams/hams_es_frankel/rfra02005/
+      //                                                    ^^^^^^^^^^^
+      //     frre-20005/44680767_f0dde…png   ->   /<lang>/detail/FRRE-20005
+      //     ^^^^^^^^^^
+      //
+      // CONFIRMED TWICE, independently, without touching the site:
+      //   * `FRRE-20005` derived this way from id 3576 is already in
+      //     production as a SUCCESSFULLY captured detail page — rows 3623 and
+      //     3696, `https://realestate.hipoges.com/es/detail/FRRE-20005`.
+      //   * the RARE-04347 detail capture's own gallery images sit under
+      //     `.../rran01399/rare-04347/…`, matching its own URL id.
+      // Different servicer prefixes (rfra/rran/bgal/rgnt), same rule.
+      //
+      // Narrow on purpose: host-pinned, and the reference must look like a
+      // Hipoges asset code. A servicer prefix we have not seen simply yields
+      // nothing rather than a fabricated URL.
+      mediaDetailHostSuffix: "hipoges.azureedge.net",
+      mediaDetailRef: function (pathname) {
+        var m = /\/imageshams\/[^/]+\/[^/]+\/([a-z]{4}-\d{4,6})\//i.exec(pathname);
+        return m ? m[1].toUpperCase() : null;
+      },
+      // Build the detail URL in the language the operator is actually browsing
+      // in, rather than hard-coding `es` — the route is `:lang/detail/:id`.
+      mediaDetailPath: function (ref, pageLang) {
+        return "/" + (pageLang || "es") + "/detail/" + ref;
+      },
+      // How many consecutive polls the harvested count must hold steady before
+      // a listing page counts as settled. Hipoges paints its results
+      // progressively (4 of 17 at the moment of id 3576), so the FIRST
+      // non-zero harvest is not the final one; firing on it would capture a
+      // fraction of the search and silently drop the rest.
+      harvestSettlePolls: 3,
     },
   ];
 
@@ -252,6 +374,10 @@
   // floor is the primary anti-"empty shell" guard.
   var MIN_BODY_TEXT = 400;
   var DEFAULT_READY_SELECTORS = ["h1", "main"];
+  // Default render budget (ms). Portals override with `maxWaitMs`; see
+  // maxWaitMsFor(). content-script.js reads this through the helper rather
+  // than keeping its own copy, so there is ONE budget per portal, not two.
+  var DEFAULT_MAX_WAIT_MS = 20000;
 
   /**
    * Canonical correlation key for a URL — MUST match lib/worklist.ts
@@ -272,6 +398,12 @@
     if (!host) return "";
     var path = parsed.pathname.replace(/\/+$/, "");
     return host + path;
+  }
+
+  /** ES5-safe `haystack.endsWith(needle)` — the file targets classic content scripts. */
+  function endsWithSuffix(haystack, needle) {
+    return haystack.length >= needle.length &&
+      haystack.slice(haystack.length - needle.length) === needle;
   }
 
   /** Portal config whose host suffix matches `host` (exact or subdomain), or null. */
@@ -1098,11 +1230,202 @@
     return root;
   }
 
-  function readySelectorsFor(portal) {
+  function portalConfigByName(portal) {
     for (var i = 0; i < PORTALS.length; i++) {
-      if (PORTALS[i].portal === portal) return PORTALS[i].readySelectors;
+      if (PORTALS[i].portal === portal) return PORTALS[i];
     }
-    return DEFAULT_READY_SELECTORS;
+    return null;
+  }
+
+  /**
+   * The readiness selectors for `portal` in a given page ROLE ("detail" or
+   * "listing").
+   *
+   * Historically there was ONE list per portal, shared by both roles. That is
+   * fine where a portal server-renders both page types the same way, and wrong
+   * on Hipoges, where the detail page has grounded component elements and the
+   * listing page's readiness is not a selector question at all (issue #701).
+   * A portal may therefore declare `detailReadySelectors` /
+   * `listingReadySelectors`; `readySelectors` remains the shared fallback for
+   * every portal that has no reason to split, so nothing else changes shape.
+   */
+  function readySelectorsFor(portal, role) {
+    var cfg = portalConfigByName(portal);
+    if (!cfg) return DEFAULT_READY_SELECTORS;
+    if (role === "listing" && cfg.listingReadySelectors) return cfg.listingReadySelectors;
+    if (role === "detail" && cfg.detailReadySelectors) return cfg.detailReadySelectors;
+    return cfg.readySelectors || DEFAULT_READY_SELECTORS;
+  }
+
+  /**
+   * The render budget for `portal`, in ms — how long a caller should keep
+   * polling before giving up (issue #701).
+   *
+   * One global ceiling was the wrong shape. Idealista satisfies readiness in
+   * roughly a second; Hipoges server-renders its chrome immediately and then
+   * streams its adverts in well afterwards. A single number either truncates
+   * the slow portal or makes every fast portal's give-up needlessly late.
+   * Portals opt in with `maxWaitMs`; everything else keeps DEFAULT_MAX_WAIT_MS.
+   */
+  function maxWaitMsFor(portal) {
+    var cfg = portalConfigByName(portal);
+    return (cfg && cfg.maxWaitMs) || DEFAULT_MAX_WAIT_MS;
+  }
+
+  /** Consecutive equal harvests required before a listing page counts settled. */
+  function harvestSettlePollsFor(portal) {
+    var cfg = portalConfigByName(portal);
+    return (cfg && cfg.harvestSettlePolls) || 1;
+  }
+
+  /**
+   * Detail URLs recovered from MEDIA sources (image `src`, CSS
+   * `background-image`) rather than from anchors — issue #701.
+   *
+   * Only Hipoges needs this today, and it needs it absolutely: its result
+   * cards carry no `<a href>` whatsoever (verified on a fully painted card in
+   * production capture id 3576), so the anchor harvest returns zero on a
+   * perfectly rendered search page. The card's photo URL, however, embeds the
+   * advert's own asset reference, which is exactly the `:id` in the
+   * `:lang/detail/:id` route. See the portal config for the two independent
+   * confirmations of that mapping.
+   *
+   * Pure. `pageUrl` supplies the origin and the language segment so the built
+   * URL matches the page the operator is actually on. A portal that declares
+   * no `mediaDetailRef` gets an empty array, which is what every other portal
+   * wants.
+   */
+  function detailUrlsFromMedia(srcs, pageUrl, portal) {
+    var out = [];
+    var cfg = portalConfigByName(portal);
+    if (!cfg || typeof cfg.mediaDetailRef !== "function") return out;
+    if (!srcs || typeof srcs.length !== "number") return out;
+    var base;
+    try {
+      base = new URL(String(pageUrl));
+    } catch (e) {
+      return out;
+    }
+    // `:lang` of the page we're on, so a Portuguese or Greek operator doesn't
+    // get Spanish detail URLs built for them.
+    var langMatch = /^\/([a-z]{2})(?:\/|$)/i.exec(base.pathname);
+    var lang = langMatch ? langMatch[1].toLowerCase() : "es";
+    var seen = Object.create(null);
+    for (var i = 0; i < srcs.length; i++) {
+      var raw = srcs[i];
+      if (typeof raw !== "string" || !raw) continue;
+      var parsed;
+      try {
+        parsed = new URL(raw, base.href);
+      } catch (e) {
+        continue;
+      }
+      var mediaHost = parsed.hostname.toLowerCase().replace(/^www\./, "");
+      var wantHost = String(cfg.mediaDetailHostSuffix || "").toLowerCase();
+      if (!wantHost) continue;
+      if (mediaHost !== wantHost && !endsWithSuffix(mediaHost, "." + wantHost)) continue;
+      var ref = null;
+      try {
+        ref = cfg.mediaDetailRef(parsed.pathname);
+      } catch (e) {
+        ref = null;
+      }
+      if (!ref || seen[ref]) continue;
+      seen[ref] = true;
+      out.push(base.origin + cfg.mediaDetailPath(ref, lang));
+    }
+    return out;
+  }
+
+  /**
+   * Every media URL a document exposes: `<img src>`, `<img data-src>`,
+   * `<source srcset>` and inline `background-image:url(...)`. Kept here (pure,
+   * `doc` injected) rather than in content-script.js so it is unit-testable
+   * against a fixture, same discipline as isRenderReadyDetail.
+   */
+  function mediaSourcesFromDoc(doc) {
+    var out = [];
+    if (!doc || typeof doc.querySelectorAll !== "function") return out;
+    var nodes;
+    try {
+      nodes = doc.querySelectorAll("img[src], img[data-src], source[srcset], [style*='background-image']");
+    } catch (e) {
+      return out;
+    }
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var src = el.getAttribute && (el.getAttribute("src") || el.getAttribute("data-src"));
+      if (src) out.push(src);
+      var srcset = el.getAttribute && el.getAttribute("srcset");
+      if (srcset) {
+        var parts = srcset.split(",");
+        for (var j = 0; j < parts.length; j++) {
+          var u = parts[j].trim().split(/\s+/)[0];
+          if (u) out.push(u);
+        }
+      }
+      var style = el.getAttribute && el.getAttribute("style");
+      if (style && style.indexOf("background-image") !== -1) {
+        var re = /url\((['"]?)([^'")]+)\1\)/g;
+        var m;
+        while ((m = re.exec(style)) !== null) out.push(m[2]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The full detail-URL harvest for a rendered results page: anchors first
+   * (every portal), then media-derived URLs for the portals whose cards are
+   * not links (Hipoges — issue #701). Deduplicated on the same matchKey the
+   * anchor path uses, so a portal that exposes BOTH never double-counts.
+   */
+  function harvestDetailUrls(doc, portal, pageUrl) {
+    var hrefs = [];
+    if (doc && typeof doc.querySelectorAll === "function") {
+      try {
+        var anchors = doc.querySelectorAll("a[href]");
+        for (var i = 0; i < anchors.length; i++) hrefs.push(anchors[i].href);
+      } catch (e) {
+        /* fall through to media */
+      }
+    }
+    var out = extractDetailUrls(hrefs, portal);
+    var seen = Object.create(null);
+    for (var k = 0; k < out.length; k++) seen[matchKey(out[k])] = true;
+    var media = detailUrlsFromMedia(mediaSourcesFromDoc(doc), pageUrl, portal);
+    for (var m = 0; m < media.length; m++) {
+      var key = matchKey(media[m]);
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      out.push(media[m]);
+    }
+    return out;
+  }
+
+  /**
+   * Does `doc` still show LOADING placeholders for this portal (issue #701)?
+   *
+   * Grounded on Hipoges' PrimeNG `<p-skeleton>`: production capture id 3576
+   * carried 13 of them, one per result that had not painted yet, alongside 4
+   * real cards — the owner's 17. A soft signal only: callers use it to keep
+   * waiting, never as a hard veto, because the DETAIL page carries 5 skeletons
+   * of its own and below-the-fold results may be lazily rendered.
+   */
+  function pendingPlaceholderCount(doc, portal) {
+    var cfg = portalConfigByName(portal);
+    if (!cfg || !cfg.loadingSelectors || !doc || typeof doc.querySelectorAll !== "function") {
+      return 0;
+    }
+    var n = 0;
+    for (var i = 0; i < cfg.loadingSelectors.length; i++) {
+      try {
+        n += doc.querySelectorAll(cfg.loadingSelectors[i]).length;
+      } catch (e) {
+        /* a selector this browser can't parse simply contributes nothing */
+      }
+    }
+    return n;
   }
 
   /**
@@ -1135,7 +1458,7 @@
       return { ready: false, selector: null, reason: "not_interactive", bodyTextLength: 0 };
     }
 
-    var selectors = readySelectorsFor(portal);
+    var selectors = readySelectorsFor(portal, "detail");
     var matchedSelector = null;
     for (var i = 0; i < selectors.length; i++) {
       var el = null;
@@ -1174,6 +1497,106 @@
   /** Boolean-only view of isRenderReadyDetail() — every existing caller's shape. */
   function isRenderReady(doc, portal) {
     return isRenderReadyDetail(doc, portal).ready;
+  }
+
+  /**
+   * Is a SEARCH/RESULTS page ready to be harvested (issue #701)?
+   *
+   * Deliberately a different question from isRenderReadyDetail's. On a detail
+   * page "rendered" means "the advert's own content is on screen", and a
+   * selector can say so. On a results page the only thing that actually
+   * matters is whether there is anything to harvest — and Hipoges proved that
+   * a selector cannot answer that: `main` and `h1` were both satisfied, by the
+   * header, while every result was still a skeleton and the anchor harvest
+   * returned zero (production capture id 3576).
+   *
+   * So readiness here is the operation's OWN success condition, measured
+   * rather than inferred:
+   *
+   *   1. the document is at least interactive, and
+   *   2. the portal's listing selectors match (we are on the right page), and
+   *   3. the harvest has produced at least one detail URL, and
+   *   4. that count has held STEADY for `harvestSettlePolls` consecutive
+   *      polls, and no loading placeholders remain.
+   *
+   * (4) is what stops the extension firing on a partially painted list. Hipoges
+   * paints progressively — 4 of 17 at the moment of id 3576 — so the first
+   * non-zero harvest is not the final one, and capturing it would silently
+   * drop the rest of the search.
+   *
+   * `state` is the caller's running settle state ({count, stable}); it is
+   * threaded through rather than held here so this stays pure and testable.
+   * Returns the FULL verdict plus the state to pass to the next poll.
+   *
+   * IMPORTANT — this can never deadlock on placeholders. Once the harvest count
+   * has settled, a lingering skeleton (a lazy below-the-fold card, or the 5 the
+   * DETAIL template always carries) no longer holds readiness back: the
+   * `stable` counter is what gates, and a stuck skeleton with a steady count
+   * still reaches `ready`. The budget in maxWaitMsFor() is the outer bound.
+   */
+  function isRenderReadyListing(doc, portal, pageUrl, state) {
+    var prev = state && typeof state.count === "number" ? state : { count: -1, stable: 0 };
+    var fail = function (reason, urls, next) {
+      return {
+        ready: false,
+        reason: reason,
+        detailUrls: urls || [],
+        placeholders: 0,
+        state: next || { count: prev.count, stable: 0 },
+      };
+    };
+    if (!doc || typeof doc.querySelector !== "function") return fail("no_doc");
+    var rs = doc.readyState;
+    if (rs && rs !== "interactive" && rs !== "complete") return fail("not_interactive");
+
+    var selectors = readySelectorsFor(portal, "listing");
+    var matched = null;
+    for (var i = 0; i < selectors.length; i++) {
+      var el = null;
+      try {
+        el = doc.querySelector(selectors[i]);
+      } catch (e) {
+        el = null;
+      }
+      if (el) {
+        matched = selectors[i];
+        break;
+      }
+    }
+    if (!matched) return fail("no_key_node");
+
+    var urls = harvestDetailUrls(doc, portal, pageUrl);
+    var placeholders = pendingPlaceholderCount(doc, portal);
+    // Count steady since the last poll? (A first observation is never steady.)
+    var stable = urls.length === prev.count ? prev.stable + 1 : 1;
+    var next = { count: urls.length, stable: stable };
+
+    if (urls.length === 0) {
+      return {
+        ready: false,
+        reason: placeholders > 0 ? "still_loading" : "no_detail_urls",
+        detailUrls: [],
+        placeholders: placeholders,
+        state: next,
+      };
+    }
+    var needed = harvestSettlePollsFor(portal);
+    if (stable < needed) {
+      return {
+        ready: false,
+        reason: placeholders > 0 ? "still_loading" : "not_settled",
+        detailUrls: urls,
+        placeholders: placeholders,
+        state: next,
+      };
+    }
+    return {
+      ready: true,
+      reason: null,
+      detailUrls: urls,
+      placeholders: placeholders,
+      state: next,
+    };
   }
 
   /**
@@ -1484,7 +1907,38 @@
    * candidate match was on a page that genuinely rendered) — the safe
    * default for any page this list doesn't recognise. Never throws.
    */
-  function detectBlockSignals(doc, portal) {
+  /**
+   * Has this page rendered its REAL content — as opposed to being a block
+   * interstitial, an error page, or an empty shell? The veto below turns on
+   * this question, and issue #701 made it necessary to ask it per page ROLE.
+   *
+   * Detail readiness alone used to be a serviceable proxy because every
+   * portal's ready selectors ended in the generic `main`/`h1` pair, which a
+   * rendered SEARCH page satisfies too. Hipoges no longer has that fallback
+   * (it is what let an empty shell pass as an advert), so on a Hipoges results
+   * page detail readiness is now permanently false — and without this branch
+   * the veto would never apply there, letting any stray challenge phrase on a
+   * perfectly healthy search page pause the whole batch run.
+   *
+   * A results page that has real adverts on it IS rendered content. Note this
+   * deliberately does NOT require the settle window `isRenderReadyListing`
+   * imposes: "are there adverts here" is the question, not "has the list
+   * finished growing". Scoped to portals that declare listing selectors, so
+   * every other portal's behaviour is byte-for-byte unchanged.
+   */
+  function pageRenderedRealContent(doc, portal, pageUrl) {
+    if (isRenderReadyDetail(doc, portal).ready) return true;
+    var cfg = portalConfigByName(portal);
+    if (!cfg || !cfg.listingReadySelectors) return false;
+    try {
+      var url = pageUrl || (doc && (doc.baseURI || (doc.location && doc.location.href))) || "";
+      return harvestDetailUrls(doc, portal, url).length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function detectBlockSignals(doc, portal, pageUrl) {
     if (!doc || typeof doc.querySelector !== "function") {
       return { blocked: false, signature: null };
     }
@@ -1508,7 +1962,7 @@
         // regardless of which marker matched (review B1) — a Turnstile
         // widget, an Incapsula anti-bot tag, or a mere mention of a phrase
         // can all coexist with a genuine listing/search page.
-        if (isRenderReady(doc, portal)) continue;
+        if (pageRenderedRealContent(doc, portal, pageUrl)) continue;
       } catch (e) {
         /* corroboration itself failed — treat as "can't confirm healthy",
            fall through to the conservative "blocked" verdict below */
@@ -1579,7 +2033,17 @@
     toListingUrl: toListingUrl,
     isRenderReady: isRenderReady,
     isRenderReadyDetail: isRenderReadyDetail,
+    isRenderReadyListing: isRenderReadyListing,
+    harvestDetailUrls: harvestDetailUrls,
+    detailUrlsFromMedia: detailUrlsFromMedia,
+    mediaSourcesFromDoc: mediaSourcesFromDoc,
+    pendingPlaceholderCount: pendingPlaceholderCount,
+    readySelectorsFor: readySelectorsFor,
+    maxWaitMsFor: maxWaitMsFor,
+    harvestSettlePollsFor: harvestSettlePollsFor,
+    DEFAULT_MAX_WAIT_MS: DEFAULT_MAX_WAIT_MS,
     detectBlockSignals: detectBlockSignals,
+    pageRenderedRealContent: pageRenderedRealContent,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,
     DISCOVER_SIGNAL: DISCOVER_SIGNAL,

@@ -77,7 +77,17 @@ _PORTALS: list[dict[str, object]] = [
         # `/contact-received` or `/unavailable` on the SAME id — see
         # hipoges.py's module docstring. DOM extraction beyond this URL shape
         # is an unvalidated draft (D-111).
-        "detail": re.compile(r"^/[a-z]{2}/(?:[^/]+/)?detail/[^/]+", re.IGNORECASE),
+        # The `:investment` slot excludes `blog` (issue #701). Hipoges' own
+        # home page links six blog articles as `es/blog/detail/<slug>`
+        # (VERIFIED in production `extension_capture` id 3577), and the
+        # wildcard was classifying every one of them as a listing-detail page.
+        # Deny-list rather than allow-list for the same reason the shape-based
+        # listing regex below exists: an allow-list of asset categories we have
+        # never confirmed would make a real URL silently vanish (D-115).
+        # MUST stay in lockstep with detect.js's isDetailPath (D-069).
+        "detail": re.compile(
+            r"^/[a-z]{2}/(?:(?!blog/)[^/]+/)?detail/[^/]+", re.IGNORECASE
+        ),
         # Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
         # <town>[/<features>]` (5+ path segments after the domain) or the
         # `/<lang>/(area|countries|map|point)/…` variants.

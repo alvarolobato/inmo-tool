@@ -92,7 +92,7 @@
 
     var blockVerdict = { blocked: false, signature: null };
     try {
-      blockVerdict = D.detectBlockSignals(doc, effectivePortal);
+      blockVerdict = D.detectBlockSignals(doc, effectivePortal, url);
     } catch (e) {
       /* best-effort */
     }
@@ -100,7 +100,45 @@
     var anchorCount = hrefs.length;
     var extractDetailUrlsCount = 0;
     try {
-      extractDetailUrlsCount = D.extractDetailUrls(hrefs, effectivePortal || undefined).length;
+      // Anchors, as always, from the hrefs the CALLER collected — that stays
+      // the contract, so this function is still testable from a plain array.
+      var anchorUrls = D.extractDetailUrls(hrefs, effectivePortal || undefined);
+      extractDetailUrlsCount = anchorUrls.length;
+      // …plus the media-derived ones (issue #701). Without this the diagnostic
+      // would report 0 on a Hipoges results page whose cards ARE harvestable —
+      // they carry no <a href>, so the reference comes off the photo CDN path
+      // — and would go on corroborating a bug that had already been fixed.
+      // Deduplicated on matchKey against the anchor set, exactly as the real
+      // harvest does, so a portal exposing both never double-counts.
+      if (D.detailUrlsFromMedia && D.mediaSourcesFromDoc && D.matchKey) {
+        var seenKeys = Object.create(null);
+        for (var ai = 0; ai < anchorUrls.length; ai++) {
+          seenKeys[D.matchKey(anchorUrls[ai])] = true;
+        }
+        var mediaUrls = D.detailUrlsFromMedia(
+          D.mediaSourcesFromDoc(doc),
+          url,
+          effectivePortal || undefined
+        );
+        for (var mi = 0; mi < mediaUrls.length; mi++) {
+          var mk = D.matchKey(mediaUrls[mi]);
+          if (!mk || seenKeys[mk]) continue;
+          seenKeys[mk] = true;
+          extractDetailUrlsCount += 1;
+        }
+      }
+    } catch (e) {
+      /* best-effort */
+    }
+    // Loading placeholders still on the page (issue #701) — on a portal that
+    // paints its results progressively this is the difference between "there
+    // are no adverts here" and "the adverts have not arrived yet", which is
+    // exactly the distinction the Hipoges reports turned on.
+    var pendingPlaceholders = 0;
+    try {
+      pendingPlaceholders = D.pendingPlaceholderCount
+        ? D.pendingPlaceholderCount(doc, effectivePortal || undefined)
+        : 0;
     } catch (e) {
       /* best-effort */
     }
@@ -160,6 +198,7 @@
       harvest: {
         anchorCount: anchorCount,
         extractDetailUrlsCount: extractDetailUrlsCount,
+        pendingPlaceholders: pendingPlaceholders,
       },
       block: {
         blocked: blockVerdict.blocked,

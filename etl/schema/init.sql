@@ -1915,7 +1915,11 @@ CREATE TABLE IF NOT EXISTS extension_capture (
     -- notice, positively identified and corroborated against the stored
     -- listing. Neither 'failed' (nothing failed) nor 'done' (nothing was
     -- ingested) — see the ALTER pair below for the full reasoning.
-    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn')),
+    -- 'never_rendered' (issue #701): the extension opened the page, waited out
+    -- the portal's whole render budget, and the page never rendered enough to
+    -- capture. Written directly by the API route, never by the ETL poll —
+    -- see the ALTER pair below.
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn','never_rendered')),
     error_msg        TEXT,
     property_id      BIGINT       REFERENCES property(id),
     listing_id       BIGINT       REFERENCES listing(id),
@@ -1971,9 +1975,33 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 --               capture-only portal can give), would inflate failed_7d on the
 --               data-health page, and via _correlate_worklist would mark the
 --               worklist row 'failed' instead of 'stale'.
+--   'never_rendered' (issue #701): the extension opened the page, waited out
+--               that portal's entire render budget, and the page never
+--               rendered enough to capture — so no HTML worth parsing was ever
+--               produced and nothing was ingested. Its own status for the same
+--               reason 'withdrawn' got one: none of the others is true.
+--               'pending' would be a lie that costs real work — etl/capture.py
+--               would pick the row up and attempt to parse a page we already
+--               know has no advert on it. 'failed' would put "the page never
+--               arrived" in the same bucket as "the parser broke", inflating
+--               failed_7d with an outcome the parser was never given a chance
+--               at, and that conflation is exactly what #700 found had made
+--               "hipoges tarda mucho y falla" unanswerable for two reports
+--               running. 'blocked' is the closest neighbour but asserts
+--               something specific and unproven — that a WAF or challenge
+--               intervened — when the honest claim is only that we ran out of
+--               patience.
+--
+--               Written ONLY by POST /api/extension/capture with
+--               `outcome: 'never_rendered'`; the row is terminal on insert
+--               (processed_at set), so the pending poll never sees it and no
+--               capture.py path produces or consumes it. Deliberately does NOT
+--               correlate the capture_worklist row: like 'blocked', the URL
+--               was never really served, so its queue slot stays pending for a
+--               later retry rather than being consumed.
 ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status_check;
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
-    CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn'));
+    CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn','never_rendered'));
 
 -- ── Per-listing timing (issue #700) ─────────────────────────────────────────
 -- Why these two columns exist at all: before them the ONLY per-listing timing
