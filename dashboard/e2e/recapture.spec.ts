@@ -137,6 +137,18 @@ test.describe("cohort re-capture", () => {
     await expect(estimate).toBeVisible();
     await expect(page.getByTestId("recapture-count")).toContainText("2");
     await expect(estimate).toContainText("navegación continua");
+    // The rendered DURATION, not just the static label around it. A regression
+    // that made formatDuration emit "NaN"/"0 min" — the exact number the owner
+    // plans an evening around — passed the label-only assertion.
+    await expect(estimate).toContainText(/\b\d+\s*(min|h)\b|unos segundos/);
+    await expect(estimate).not.toContainText("NaN");
+    // …and the per-listing mean, which is the other half of the cost claim.
+    await expect(estimate).toContainText(/\d+([.,]\d+)?\s*s por anuncio/);
+    // Value ordering only survives the manual batch path, so the panel has to
+    // say Auto mode must be off before he starts.
+    await expect(page.getByTestId("recapture-auto-warning")).toContainText(
+      "Auto",
+    );
 
     // Calcular is read-only: the rows are still 'captured'.
     const before = await pool.query(

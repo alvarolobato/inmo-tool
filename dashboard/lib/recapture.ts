@@ -19,9 +19,7 @@
  * predicate here — NOT a SQL console reachable from a browser.
  */
 export type RecapturePredicate =
-  | "few_photos"
-  | "stale_capture"
-  | "never_requeued";
+  "few_photos" | "stale_capture" | "never_requeued";
 
 export const RECAPTURE_PREDICATES: readonly RecapturePredicate[] = [
   "few_photos",
@@ -75,6 +73,13 @@ export interface RecaptureCohortRequest {
 /** What the preview tells the operator before anything is written. */
 export interface RecaptureCohortPreview {
   request: RecaptureCohortRequest;
+  /**
+   * `connector_config.capture_enabled` for the portal — whether the ETL would
+   * actually PROCESS what a re-capture pass produces. Attached by the API
+   * route, not by `previewRecaptureCohort`, hence optional: false means the
+   * browsing would happen and every capture would sit `pending` forever.
+   */
+  captureProcessingEnabled?: boolean;
   /** Worklist rows that would flip to 'pending'. */
   rowCount: number;
   /** Listings the predicate matched, before intersecting with the worklist. */
@@ -102,20 +107,30 @@ export interface RecaptureEstimate {
 }
 
 // ── Pacing model ────────────────────────────────────────────────────────────
-// Mirrors browser-extension/batch.js `jitterDelay` / `paceBaseMs`. Kept in
-// sync by dashboard/lib/__tests__/recapture.test.ts, which re-derives the
-// steady-state figure from these constants — if batch.js's constants move and
-// these don't, the estimate silently lies to the operator about an
-// overnight-scale commitment, so the numbers are asserted, not just computed.
+// Mirrors browser-extension/batch.js `jitterDelay` / `paceBaseMs`. These are a
+// COPY of the extension's dials, and this module cannot import batch.js (it is
+// a CommonJS extension module, and this file is bundled into the client), so
+// the copy is pinned instead: `dashboard/__tests__/extension-batch.test.ts`
+// imports the REAL batch.js and asserts each of the five values below against
+// it — the two exported defaults directly, the three step constants re-derived
+// from the shipped `paceBaseMs()`. If batch.js's pacing moves and these don't,
+// that test goes red rather than the estimate silently lying to the operator
+// about an overnight-scale commitment.
+//
+// Exported solely so that test can reach them; nothing else should read them.
+//
+// Note these are the extension's DEFAULTS. An operator who has changed
+// `batchPaceBaseMs`/`batchPaceSpreadMs` in the extension's own settings gets a
+// run that is faster or slower than this estimate, and the panel says so.
 //
 // Throughput is governed by the launch stagger, NOT by the per-page dwell:
 // concurrency (default 3) overlaps the settle time of pages already open, but
 // the loop still only launches one new tab per jittered delay.
-const PACE_BASE_MS = 2000; // batch.js DEFAULT_PACE_BASE_MS
-const PACE_SPREAD_MS = 5000; // batch.js DEFAULT_PACE_SPREAD_MS
-const PACE_STEP_EVERY = 25; // batch.js PACE_STEP_EVERY
-const PACE_STEP_MS = 2000; // batch.js PACE_STEP_MS
-const PACE_MAX_EXTRA_MS = 12000; // batch.js PACE_MAX_EXTRA_MS
+export const PACE_BASE_MS = 2000; // batch.js DEFAULT_PACE_BASE_MS
+export const PACE_SPREAD_MS = 5000; // batch.js DEFAULT_PACE_SPREAD_MS
+export const PACE_STEP_EVERY = 25; // batch.js PACE_STEP_EVERY
+export const PACE_STEP_MS = 2000; // batch.js PACE_STEP_MS
+export const PACE_MAX_EXTRA_MS = 12000; // batch.js PACE_MAX_EXTRA_MS
 
 /**
  * Seconds of continuous browser time to drain `pages` listings at the
@@ -159,14 +174,23 @@ export function formatDuration(seconds: number): string {
   return rem === 0 ? `${hours} h` : `${hours} h ${rem} min`;
 }
 
-/** "1,4 GB" / "355 MB" / "0 B" — Spanish decimal comma, for the estimate panel. */
+/**
+ * "1,4 GB" / "355 MB" / "0 B" — Spanish decimal comma, for the estimate panel.
+ *
+ * Decimal (1000), not binary (1024), because the units rendered are the SI
+ * prefixes kB/MB/GB. Dividing by 1024 while labelling the result "MB" made the
+ * panel read 337 MB for the same measurement the issue and the PR prose quote as
+ * ~355 MB — a 5% disagreement on the one number the owner is deciding a
+ * database-growth question with. Either convention is defensible; disagreeing
+ * with itself is not.
+ */
 export function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 B";
   const units = ["B", "kB", "MB", "GB", "TB"];
   let v = bytes;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
     i++;
   }
   const rounded = v >= 100 || i === 0 ? Math.round(v) : Math.round(v * 10) / 10;

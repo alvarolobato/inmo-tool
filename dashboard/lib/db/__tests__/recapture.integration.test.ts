@@ -15,9 +15,36 @@
  *      real `worklistMatchKey` correlation (there is no FK between `listing`
  *      and `capture_worklist`).
  */
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
+
+/**
+ * A passthrough wrapper around the real `sql()`, with one hook: a test can
+ * install a callback that fires right after a chosen query resolves, so the
+ * database can be mutated BETWEEN two statements of a single call.
+ *
+ * That interleaving is the only way to reach the UPDATE's `AND w.status = $4`
+ * guard. The cohort resolver already excludes non-'captured' rows, so in
+ * normal operation the guard never fires — it exists for the window between
+ * "resolve the cohort" and "flip it", when another surface (or another tab)
+ * can move a row underneath the write. Default is a plain passthrough, so
+ * every other test in this file talks to the real module unchanged.
+ */
+const sqlHook: { after: ((sqlText: string) => Promise<void>) | null } =
+  vi.hoisted(() => ({ after: null }));
+
+vi.mock("@/lib/db-write", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/lib/db-write")>();
+  return {
+    ...mod,
+    sql: async (text: string, params?: unknown[]) => {
+      const out = await mod.sql(text, params as never);
+      if (sqlHook.after) await sqlHook.after(text);
+      return out;
+    },
+  };
+});
 import {
   previewRecaptureCohort,
   requeueRecaptureCohort,
@@ -52,6 +79,9 @@ async function cleanup(): Promise<void> {
   await pool.query(`DELETE FROM capture_worklist WHERE url LIKE $1`, [
     `%${MARK}%`,
   ]);
+  await pool.query(`DELETE FROM extension_capture WHERE url LIKE $1`, [
+    `%${MARK}%`,
+  ]);
   await pool.query(
     `DELETE FROM profile_listing_state WHERE property_id IN
        (SELECT property_id FROM listing WHERE external_id LIKE $1)`,
@@ -72,6 +102,12 @@ async function cleanup(): Promise<void> {
   await pool.query(`DELETE FROM search_profile WHERE name = $1`, [
     "e2e-677-profile",
   ]);
+  await pool.query(`DELETE FROM connector_config WHERE connector_name = $1`, [
+    "idealista",
+  ]);
+  await pool.query(`DELETE FROM connector_registry WHERE connector_name = $1`, [
+    "idealista",
+  ]);
 }
 
 interface Fixture {
@@ -84,6 +120,13 @@ interface Fixture {
   stage?: string;
   worklistStatus?: string;
   requeuedAt?: string | null;
+  /**
+   * Pre-set `requeue_rank`. Settable independently of `worklistStatus` on
+   * purpose: the ORDER BY only honours a rank on a 'pending' row, and the only
+   * way to test that gate is to seed a rank onto a row that is NOT pending —
+   * exactly what a cohort looks like once part of it has been re-captured.
+   */
+  requeueRank?: number | null;
 }
 
 /**
@@ -116,13 +159,14 @@ async function seed(f: Fixture, profileId: number | null): Promise<void> {
     );
   }
   await pool.query(
-    `INSERT INTO capture_worklist (url, match_key, source_portal, status, added_via, requeued_at)
-     VALUES ($1, $2, 'idealista', $3, 'derived', $4)`,
+    `INSERT INTO capture_worklist (url, match_key, source_portal, status, added_via, requeued_at, requeue_rank)
+     VALUES ($1, $2, 'idealista', $3, 'derived', $4, $5)`,
     [
       url,
       `idealista.com/inmueble/${externalId}`,
       f.worklistStatus ?? "captured",
       f.requeuedAt ?? null,
+      f.requeueRank ?? null,
     ],
   );
 }
@@ -154,6 +198,7 @@ async function worklistRow(n: number) {
 }
 
 beforeEach(async () => {
+  sqlHook.after = null;
   if (dbAvailable) await cleanup();
 });
 
@@ -235,12 +280,128 @@ describe.skipIf(!dbAvailable)("previewRecaptureCohort", () => {
     expect(preview.rowCount).toBe(1);
   });
 
+  it("excludes a portal the owner has switched off (D-055)", async () => {
+    // "Live candidate" has to mean the same thing here as in the list feed
+    // (candidates.ts) and the map feed (map-candidates.ts), all three of which
+    // hide listings whose connector is off. Idealista is capture-only
+    // (`supports_discovery = false`), so its off-switch is `capture_enabled`.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    expect((await previewRecaptureCohort(req())).rowCount).toBe(1);
+
+    await pool!.query(
+      `INSERT INTO connector_registry (connector_name, supports_discovery)
+       VALUES ('idealista', false)
+       ON CONFLICT (connector_name)
+         DO UPDATE SET supports_discovery = EXCLUDED.supports_discovery`,
+    );
+    await pool!.query(
+      `INSERT INTO connector_config (connector_name, capture_enabled)
+       VALUES ('idealista', false)
+       ON CONFLICT (connector_name)
+         DO UPDATE SET capture_enabled = EXCLUDED.capture_enabled`,
+    );
+
+    expect((await previewRecaptureCohort(req())).rowCount).toBe(0);
+    // And the write agrees with the preview — no requeueing a dead portal.
+    expect((await requeueRecaptureCohort(req(), "motivo", 0)).requeued).toBe(0);
+    expect((await worklistRow(1)).status).toBe("captured");
+
+    // Switching it back on restores the cohort, so this is the toggle doing
+    // the work and not some unrelated side effect of writing those rows.
+    await pool!.query(
+      `UPDATE connector_config SET capture_enabled = true WHERE connector_name = 'idealista'`,
+    );
+    expect((await previewRecaptureCohort(req())).rowCount).toBe(1);
+  });
+
   it("writes nothing — the preview is what the operator runs before deciding", async () => {
     const p = await seedProfile();
     await seed({ n: 1, photos: 3, score: 0.9 }, p);
     await previewRecaptureCohort(req());
     expect((await worklistRow(1)).status).toBe("captured");
     expect((await worklistRow(1)).requeued_at).toBeNull();
+  });
+});
+
+describe.skipIf(!dbAvailable)("the storage estimate", () => {
+  /** A 'done' extension_capture for the portal, optionally still holding HTML. */
+  async function seedCapture(n: number, html: string | null): Promise<void> {
+    await pool!.query(
+      `INSERT INTO extension_capture (url, html, connector_name, status)
+       VALUES ($1, $2, 'idealista', 'done')`,
+      [`${HOST}/inmueble/${MARK}${n}/`, html],
+    );
+  }
+
+  it("reports retention OFF, and zero cost, when no recent capture kept its HTML", async () => {
+    // The dashboard cannot read ETL_RETAIN_CAPTURE_HTML_FOR (D-150) — it
+    // infers retention from what the ETL actually left behind. Every 'done'
+    // capture here was nulled out, so a re-capture pass stores nothing and the
+    // panel must not cry wolf about database growth.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await seedCapture(1, null);
+    await seedCapture(2, null);
+
+    const preview = await previewRecaptureCohort(req());
+    expect(preview.rowCount).toBe(1);
+    expect(preview.estimate.htmlRetentionOn).toBe(false);
+    expect(preview.estimate.storedHtmlBytes).toBe(0);
+    expect(preview.estimate.rawHtmlBytes).toBe(0);
+  });
+
+  it("reports retention ON and scales the measured page size by the cohort", async () => {
+    // The warning that stops the owner tripling the database. The figure has
+    // to be MEASURED from this portal's own captures, and it has to scale with
+    // the cohort — a per-page number is not a decision the operator can make.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await seed({ n: 2, photos: 3, score: 0.8 }, p);
+    const body = "x".repeat(50_000);
+    await seedCapture(1, body);
+    await seedCapture(2, body);
+
+    const preview = await previewRecaptureCohort(req());
+    expect(preview.rowCount).toBe(2);
+    expect(preview.estimate.htmlRetentionOn).toBe(true);
+    // Raw bytes are octet_length: exactly the page size, times the cohort.
+    expect(preview.estimate.rawHtmlBytes).toBe(2 * body.length);
+    // Stored bytes are pg_column_size: TOAST-compressed, so smaller than raw
+    // for this highly compressible body, but real and non-zero.
+    expect(preview.estimate.storedHtmlBytes).toBeGreaterThan(0);
+    expect(preview.estimate.storedHtmlBytes).toBeLessThan(
+      preview.estimate.rawHtmlBytes,
+    );
+  });
+
+  it("ignores captures belonging to another portal", async () => {
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await pool!.query(
+      `INSERT INTO extension_capture (url, html, connector_name, status)
+       VALUES ($1, $2, 'aliseda', 'done')`,
+      [`${HOST}/inmueble/${MARK}77/`, "y".repeat(50_000)],
+    );
+
+    const preview = await previewRecaptureCohort(req());
+    expect(preview.estimate.htmlRetentionOn).toBe(false);
+  });
+
+  it("ignores captures that never reached 'done'", async () => {
+    // A 'failed' row keeps its html for debugging (see the schema comment), so
+    // counting it would report retention ON for a portal that discards HTML on
+    // every successful parse.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await pool!.query(
+      `INSERT INTO extension_capture (url, html, connector_name, status)
+       VALUES ($1, $2, 'idealista', 'failed')`,
+      [`${HOST}/inmueble/${MARK}78/`, "z".repeat(50_000)],
+    );
+
+    const preview = await previewRecaptureCohort(req());
+    expect(preview.estimate.htmlRetentionOn).toBe(false);
   });
 });
 
@@ -307,20 +468,172 @@ describe.skipIf(!dbAvailable)("requeueRecaptureCohort", () => {
   it("drains requeued rows in rank order, after every never-requeued row", async () => {
     // listWorklist is what the extension's manual batch driver consumes
     // verbatim, so this ordering IS the capture order.
+    //
+    // Seeded so that rank order CONTRADICTS the pre-existing
+    // `created_at DESC, id DESC` ordering rather than agreeing with it —
+    // otherwise this test passes with the whole
+    // `CASE WHEN status='pending' THEN requeue_rank END` clause deleted and
+    // proves nothing about the feature it is named after.
+    //
+    //   seeded (oldest → newest):   9(virgin pending), 1, 2, 3
+    //   score:                          —             .9  .5  .1
+    //   requeue_rank after the flip:    NULL           1   2   3
+    //
+    //   expected  (rank ordering):  9, 1, 2, 3
+    //   would be  (created_at only): 3, 2, 1, 9   ← the exact reverse
     const p = await seedProfile();
-    await seed({ n: 1, photos: 3, score: 0.4 }, p);
-    await seed({ n: 2, photos: 3, score: 0.9 }, p);
-    await seed({ n: 3, photos: 3, score: 0.1, worklistStatus: "pending" }, p);
+    await seed({ n: 9, photos: 3, score: 0.7, worklistStatus: "pending" }, p);
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await seed({ n: 2, photos: 3, score: 0.5 }, p);
+    await seed({ n: 3, photos: 3, score: 0.1 }, p);
 
-    await requeueRecaptureCohort(req(), "motivo", 2);
+    await requeueRecaptureCohort(req(), "motivo", 3);
 
     const { rows } = await listWorklist("idealista");
     const mine = rows.filter((r) => r.url.includes(MARK));
     expect(mine.map((r) => r.url.match(/677000(\d)/)![1])).toEqual([
-      "3", // never requeued — keeps its existing position, at the front
-      "2", // requeue_rank 1 (best score)
-      "1", // requeue_rank 2
+      "9", // never requeued — keeps its existing position, at the front
+      "1", // requeue_rank 1 (best score) — but the OLDEST of the three
+      "2", // requeue_rank 2
+      "3", // requeue_rank 3 — but the NEWEST of the three
     ]);
+  });
+
+  it("honours a rank only while the row is still pending", async () => {
+    // The `status = 'pending'` gate inside the CASE. A row that has since been
+    // re-captured still carries its `requeue_rank`; it must fall back to the
+    // normal newest-first position instead of holding a slot in a queue it has
+    // already left. Without the gate the four rows below come back ordered by
+    // bare rank (1, 2, 5, 9) instead.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.4, requeueRank: 1 }, p); // captured
+    await seed(
+      {
+        n: 2,
+        photos: 3,
+        score: 0.4,
+        worklistStatus: "pending",
+        requeueRank: 5,
+      },
+      p,
+    );
+    await seed(
+      {
+        n: 3,
+        photos: 3,
+        score: 0.4,
+        worklistStatus: "pending",
+        requeueRank: 2,
+      },
+      p,
+    );
+    await seed({ n: 4, photos: 3, score: 0.4, requeueRank: 9 }, p); // captured
+
+    const { rows } = await listWorklist("idealista");
+    const mine = rows.filter((r) => r.url.includes(MARK));
+    expect(mine.map((r) => r.url.match(/677000(\d)/)![1])).toEqual([
+      "4", // not pending → rank ignored, newest first
+      "1", // not pending → rank ignored
+      "3", // pending, rank 2
+      "2", // pending, rank 5
+    ]);
+  });
+
+  it("leaves skipped, stale and failed rows untouched by the write itself", async () => {
+    // The preview already excludes them, but the protection that actually
+    // matters is `AND w.status = $4` on the UPDATE: it is what stops a stale
+    // tab, or a cohort that moved between preview and confirm, from
+    // overturning a per-row decision the owner made. Assert the rows, not the
+    // count.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p); // the only eligible row
+    const untouchable = ["skipped", "stale", "failed"] as const;
+    for (const [i, status] of untouchable.entries()) {
+      await seed(
+        { n: 10 + i, photos: 3, score: 0.9, worklistStatus: status },
+        p,
+      );
+    }
+
+    const result = await requeueRecaptureCohort(req(), "motivo", 1);
+    expect(result.requeued).toBe(1);
+
+    for (const [i, status] of untouchable.entries()) {
+      const row = await worklistRow(10 + i);
+      expect(row.status).toBe(status);
+      expect(row.requeued_at).toBeNull();
+      expect(row.requeue_reason).toBeNull();
+      expect(row.requeue_rank).toBeNull();
+    }
+  });
+
+  it("stale_capture selects by capture age, and counts a never-refetched listing as stale", async () => {
+    // The only predicate that uses `make_interval`, and the only one whose
+    // NULL handling is a deliberate inclusion rather than an omission:
+    // `last_fetched_at IS NULL` means "never re-fetched", which is the
+    // stalest a listing can be, not a row to skip.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 20, score: 0.9 }, p); // last_fetched_at NULL
+    await seed({ n: 2, photos: 20, score: 0.8 }, p);
+    await seed({ n: 3, photos: 20, score: 0.7 }, p);
+    await pool!.query(
+      `UPDATE listing SET last_fetched_at = NOW() - INTERVAL '90 days'
+        WHERE external_id = $1`,
+      [`${MARK}2`],
+    );
+    await pool!.query(
+      `UPDATE listing SET last_fetched_at = NOW() - INTERVAL '2 days'
+        WHERE external_id = $1`,
+      [`${MARK}3`],
+    );
+
+    const stale = req({ predicate: "stale_capture", threshold: 30 });
+    const preview = await previewRecaptureCohort(stale);
+    // n=1 (never re-fetched) and n=2 (90 days) match; n=3 (2 days) does not.
+    // Photo count is 20 for all three, so `few_photos` would have matched none
+    // of them — this is the staleness predicate doing the work.
+    expect(preview.rowCount).toBe(2);
+
+    await requeueRecaptureCohort(stale, "motivo", 2);
+    expect((await worklistRow(1)).status).toBe("pending");
+    expect((await worklistRow(2)).status).toBe("pending");
+    expect((await worklistRow(3)).status).toBe("captured");
+  });
+
+  it("refuses a row that stopped being 'captured' after the cohort was resolved", async () => {
+    // The UPDATE's `AND w.status = $4`, isolated. The cohort resolver runs
+    // first and returns two eligible ids; the hook then marks one 'skipped'
+    // before the UPDATE executes — the same window a second tab, or the
+    // per-row "Omitir" button, opens in real use. The guard must drop that
+    // row rather than overturn the decision that was just made about it.
+    const p = await seedProfile();
+    await seed({ n: 1, photos: 3, score: 0.9 }, p);
+    await seed({ n: 2, photos: 3, score: 0.8 }, p);
+
+    let fired = false;
+    sqlHook.after = async (text) => {
+      // Fire once, right after the worklist rows are resolved and before the
+      // UPDATE is issued.
+      if (fired || !text.includes("FROM capture_worklist")) return;
+      fired = true;
+      await pool!.query(
+        `UPDATE capture_worklist SET status = 'skipped' WHERE url LIKE $1`,
+        [`%${MARK}2%`],
+      );
+    };
+
+    const result = await requeueRecaptureCohort(req(), "motivo", 2);
+    expect(fired).toBe(true);
+    // Both ids were resolved (so the count guard is satisfied), but only one
+    // was still eligible when the write landed.
+    expect(result.expected).toBe(2);
+    expect(result.requeued).toBe(1);
+
+    expect((await worklistRow(1)).status).toBe("pending");
+    const spared = await worklistRow(2);
+    expect(spared.status).toBe("skipped");
+    expect(spared.requeued_at).toBeNull();
+    expect(spared.requeue_rank).toBeNull();
   });
 
   it("is idempotent: a second identical requeue finds nothing left to flip", async () => {

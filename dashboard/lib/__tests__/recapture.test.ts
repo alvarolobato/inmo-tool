@@ -5,11 +5,15 @@
  * The estimate tests are not decoration. The number this module produces is
  * the only thing standing between the owner and accidentally committing to an
  * overnight-scale browsing session: the panel shows it, and the confirm button
- * is armed underneath it. If browser-extension/batch.js's pacing constants
- * move and this module's mirror of them does not, the estimate silently
- * understates the cost of a bulk requeue. So the steady-state figure is
- * asserted against values re-derived by hand from batch.js, not just against
- * whatever this implementation happens to return.
+ * is armed underneath it.
+ *
+ * This file asserts the SHAPE of the model — the backoff, the cap, the
+ * scales the panel renders. It cannot assert that the model still matches
+ * `browser-extension/batch.js`, because it never imports batch.js. That guard
+ * lives in `dashboard/__tests__/extension-batch.test.ts`, which imports the
+ * real extension module and pins all five pacing constants against it; if
+ * batch.js drifts and lib/recapture.ts's copy does not, that file goes red,
+ * not this one.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -118,9 +122,21 @@ describe("formatBytes", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(-1)).toBe("0 B");
     expect(formatBytes(512)).toBe("512 B");
-    expect(formatBytes(436 * 1024)).toBe("436 kB");
+    expect(formatBytes(436_000)).toBe("436 kB");
     // ~355 MB stored / ~1.4 GB raw is the measured cost of the idealista pass.
-    expect(formatBytes(355 * 1024 * 1024)).toBe("355 MB");
-    expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1,4 GB");
+    expect(formatBytes(355_000_000)).toBe("355 MB");
+    expect(formatBytes(1_400_000_000)).toBe("1,4 GB");
+  });
+
+  it("uses decimal units, so the figure matches the SI prefix it is labelled with", () => {
+    // Regression guard: dividing by 1024 while printing "MB" understated the
+    // idealista pass by ~5% (337 MB vs the ~355 MB quoted everywhere else),
+    // and this is the number the owner weighs a database-growth decision on.
+    expect(formatBytes(1_000)).toBe("1 kB");
+    expect(formatBytes(1_000_000)).toBe("1 MB");
+    expect(formatBytes(1_000_000_000)).toBe("1 GB");
+    // The discriminator: 100 MiB. Decimal renders 105 MB; the old
+    // divide-by-1024 rendered exactly "100 MB".
+    expect(formatBytes(100 * 1024 * 1024)).toBe("105 MB");
   });
 });

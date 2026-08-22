@@ -13,6 +13,7 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/db/recapture", () => ({
   previewRecaptureCohort: vi.fn(),
   requeueRecaptureCohort: vi.fn(),
+  isCaptureProcessingEnabled: vi.fn(),
 }));
 
 import { GET, POST } from "../route";
@@ -20,6 +21,7 @@ import * as db from "@/lib/db/recapture";
 
 const mockPreview = vi.mocked(db.previewRecaptureCohort);
 const mockRequeue = vi.mocked(db.requeueRecaptureCohort);
+const mockCaptureEnabled = vi.mocked(db.isCaptureProcessingEnabled);
 
 const BASE = "http://localhost:4000/api/etl/worklist/recapture";
 
@@ -58,7 +60,26 @@ function previewOf(rowCount: number) {
   };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Default: the ETL would process what a re-capture pass produces. The tests
+  // that care flip it explicitly.
+  mockCaptureEnabled.mockResolvedValue(true);
+});
+
+/** The same preview, but for a portal that is retaining capture HTML. */
+function previewWithRetention(rowCount: number) {
+  return {
+    ...previewOf(rowCount),
+    estimate: {
+      seconds: 45_000,
+      secondsPerListing: 16.1,
+      storedHtmlBytes: 355_000_000,
+      rawHtmlBytes: 1_400_000_000,
+      htmlRetentionOn: true,
+    },
+  };
+}
 
 describe("GET (preview)", () => {
   it("returns the cohort preview for a valid request", async () => {
@@ -95,7 +116,9 @@ describe("GET (preview)", () => {
   });
 
   it("rejects a portal the extension cannot capture", async () => {
-    const res = await GET(get("portal=fotocasa&predicate=few_photos&threshold=4"));
+    const res = await GET(
+      get("portal=fotocasa&predicate=few_photos&threshold=4"),
+    );
     expect(res.status).toBe(400);
     expect(mockPreview).not.toHaveBeenCalled();
   });
@@ -201,12 +224,18 @@ describe("POST (requeue)", () => {
     });
     expect((await POST(bad)).status).toBe(400);
     expect(
-      (await POST(post({ ...VALID, portal: "fotocasa", reason: "x", expectedCount: 1 })))
-        .status,
+      (
+        await POST(
+          post({ ...VALID, portal: "fotocasa", reason: "x", expectedCount: 1 }),
+        )
+      ).status,
     ).toBe(400);
     expect(
-      (await POST(post({ ...VALID, predicate: "nope", reason: "x", expectedCount: 1 })))
-        .status,
+      (
+        await POST(
+          post({ ...VALID, predicate: "nope", reason: "x", expectedCount: 1 }),
+        )
+      ).status,
     ).toBe(400);
     expect(mockRequeue).not.toHaveBeenCalled();
   });
@@ -215,5 +244,68 @@ describe("POST (requeue)", () => {
     mockRequeue.mockRejectedValue(new Error("boom"));
     const res = await POST(post({ ...VALID, reason: "x", expectedCount: 1 }));
     expect(res.status).toBe(500);
+  });
+});
+
+describe("the storage-cost passthrough", () => {
+  it("hands the retention-on estimate to the client untouched", async () => {
+    // The route must not round, clamp or reinterpret this — it is the number
+    // the panel turns into the red "considera apagar la retención" warning,
+    // and it is what stops a bulk pass tripling the database.
+    mockPreview.mockResolvedValue(previewWithRetention(2800));
+    const res = await GET(
+      get("portal=idealista&predicate=few_photos&threshold=4"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.estimate.htmlRetentionOn).toBe(true);
+    expect(body.estimate.storedHtmlBytes).toBe(355_000_000);
+    expect(body.estimate.rawHtmlBytes).toBe(1_400_000_000);
+  });
+});
+
+describe("the capture_enabled guard (issue #263 / etl/capture.py)", () => {
+  // `isCapturePortal` only says the EXTENSION can capture this portal. If
+  // `connector_config.capture_enabled = false`, the ETL refuses to PROCESS
+  // what comes back, so a 12-hour browsing session would produce rows that sit
+  // pending forever.
+
+  it("warns on the preview rather than refusing it (GET never writes)", async () => {
+    mockPreview.mockResolvedValue(previewOf(2800));
+    mockCaptureEnabled.mockResolvedValue(false);
+    const res = await GET(
+      get("portal=idealista&predicate=few_photos&threshold=4"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.rowCount).toBe(2800);
+    expect(body.captureProcessingEnabled).toBe(false);
+  });
+
+  it("reports the healthy case too, so the panel can stay quiet", async () => {
+    mockPreview.mockResolvedValue(previewOf(10));
+    const res = await GET(
+      get("portal=idealista&predicate=few_photos&threshold=4"),
+    );
+    expect((await res.json()).captureProcessingEnabled).toBe(true);
+  });
+
+  it("refuses the write outright, and does not touch the database", async () => {
+    mockCaptureEnabled.mockResolvedValue(false);
+    const res = await POST(
+      post({ ...VALID, reason: "galería truncada", expectedCount: 2800 }),
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/capture_enabled/);
+    expect(mockRequeue).not.toHaveBeenCalled();
+  });
+
+  it("allows the write when capture processing is on", async () => {
+    mockRequeue.mockResolvedValue({ requeued: 2800, expected: 2800 });
+    const res = await POST(
+      post({ ...VALID, reason: "galería truncada", expectedCount: 2800 }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockRequeue).toHaveBeenCalledTimes(1);
   });
 });

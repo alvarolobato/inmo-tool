@@ -50,7 +50,8 @@ export function RecapturePanel({
   onRequeued: () => void | Promise<void>;
 }) {
   const [portal, setPortal] = useState<string>(
-    initialPortal && (CAPTURE_PORTAL_NAMES as readonly string[]).includes(initialPortal)
+    initialPortal &&
+      (CAPTURE_PORTAL_NAMES as readonly string[]).includes(initialPortal)
       ? initialPortal
       : CAPTURE_PORTAL_NAMES[0],
   );
@@ -138,7 +139,7 @@ export function RecapturePanel({
         return;
       }
       setResult(
-        `${body.requeued} fila(s) marcadas para recaptura. La captura por lotes de la extensión las drenará por orden de valor.`,
+        `${body.requeued} fila(s) marcadas para recaptura. Para empezar: abre una página de búsqueda del portal, pulsa el icono de la extensión y dale a "Capturar todas" — drenará la cola por orden de valor.`,
       );
       setPreview(null);
       setArming(false);
@@ -199,8 +200,8 @@ export function RecapturePanel({
         }}
       >
         Cuando un fallo del parser deja anuncios con datos malos, esto devuelve
-        sus filas a <strong>pendiente</strong> para que la extensión los vuelva a
-        capturar. No crea una cola nueva: reutiliza la que ya drena la captura
+        sus filas a <strong>pendiente</strong> para que la extensión los vuelva
+        a capturar. No crea una cola nueva: reutiliza la que ya drena la captura
         por lotes de la extensión. Las filas recapturadas quedan marcadas como
         tales, así que siguen distinguiéndose de las que nunca se capturaron.
       </p>
@@ -279,8 +280,8 @@ export function RecapturePanel({
         />
         <span>
           Solo candidatos vivos — anuncios cuya vivienda encaja en algún perfil
-          activo y no está descartada. Recapturar un anuncio que nadie va a mirar
-          es navegación desperdiciada.
+          activo y no está descartada. Recapturar un anuncio que nadie va a
+          mirar es navegación desperdiciada.
         </span>
       </label>
 
@@ -309,7 +310,12 @@ export function RecapturePanel({
       {result && (
         <p
           data-testid="recapture-result"
-          style={{ fontSize: 13, color: "#16a34a", marginTop: 12, marginBottom: 0 }}
+          style={{
+            fontSize: 13,
+            color: "#16a34a",
+            marginTop: 12,
+            marginBottom: 0,
+          }}
         >
           {result}
         </p>
@@ -355,7 +361,8 @@ export function RecapturePanel({
                 <li>
                   <strong>{formatDuration(preview.estimate.seconds)}</strong> de
                   navegación continua con el navegador abierto, al ritmo con
-                  jitter de la extensión (~
+                  jitter que la extensión trae por defecto (si has cambiado el
+                  ritmo en sus ajustes, esta cifra no lo ve) (~
                   {preview.estimate.secondsPerListing} s por anuncio de media —
                   el ritmo se va frenando solo a partir de las 150 páginas).
                 </li>
@@ -364,10 +371,11 @@ export function RecapturePanel({
                     <strong style={{ color: "#dc2626" }}>
                       {formatBytes(preview.estimate.storedHtmlBytes)}
                     </strong>{" "}
-                    en la base de datos ({formatBytes(preview.estimate.rawHtmlBytes)}{" "}
-                    de HTML sin comprimir): este portal está reteniendo el HTML
-                    de cada captura. Considera apagar la retención antes de una
-                    pasada masiva.
+                    en la base de datos (
+                    {formatBytes(preview.estimate.rawHtmlBytes)} de HTML sin
+                    comprimir): este portal está reteniendo el HTML de cada
+                    captura. Considera apagar la retención antes de una pasada
+                    masiva.
                   </li>
                 ) : (
                   <li>
@@ -380,6 +388,29 @@ export function RecapturePanel({
                   puntuación de perfil, y a igualdad de puntuación los que menos
                   fotos tienen).
                 </li>
+                {/* The value ordering only survives the MANUAL batch path.
+                    Auto mode drains through selectNextPendingUrls, which ranks
+                    by portal due-rank then createdAt and ignores requeue_rank
+                    entirely (lib/db/worklist.ts) — so with Auto on, the whole
+                    ordering this panel just promised is moot. Say so here
+                    rather than changing auto-capture's ordering. */}
+                <li data-testid="recapture-auto-warning">
+                  <strong>
+                    Apaga el modo Auto de la extensión antes de empezar.
+                  </strong>{" "}
+                  El modo Auto drena la cola por antigüedad, no por valor: si
+                  está encendido, este orden no se respeta.
+                </li>
+                {preview.captureProcessingEnabled === false && (
+                  <li data-testid="recapture-capture-disabled">
+                    <strong style={{ color: "#dc2626" }}>
+                      La captura de {portal} está desactivada.
+                    </strong>{" "}
+                    El ETL no procesaría nada de lo que captures: las filas se
+                    quedarían pendientes para siempre. Actívala en Fuentes antes
+                    de recapturar.
+                  </li>
+                )}
               </ul>
 
               <label className="recapture-field" style={{ marginTop: 12 }}>

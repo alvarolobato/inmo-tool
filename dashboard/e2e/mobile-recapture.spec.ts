@@ -40,7 +40,8 @@ function buildPool(): Pool {
 // CI only installs that one browser, so leaving the field in switches the
 // worker to a webkit binary that does not exist on the runner (issue #681;
 // same block as every other mobile spec here, e.g. mobile-dedup.spec.ts).
-const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
+const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } =
+  devices["iPhone 13"];
 test.use({ ...iPhone13 });
 
 const MARK = "E2E-MRECAP";
@@ -143,6 +144,10 @@ test("fits 390px with ≥44px targets", async ({ page, baseURL }) => {
     "recapture-predicate",
     "recapture-threshold",
     "recapture-calculate",
+    // The checkbox is a real control the operator taps, so D-124 applies to
+    // the INPUT, not to the <label> that happens to wrap it. Left out of this
+    // list it measured 20x20 and nothing complained.
+    "recapture-only-candidates",
   ]);
 
   // The estimate panel and the destructive confirm are the half of this

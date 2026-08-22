@@ -92,7 +92,7 @@ consumer keeps working unchanged.
 
 The cost model is part of the decision, not a footnote. At the extension's
 pacing (`batch.js`: base 2000 ms + jitter [0,5000), base stepping +2000 ms per
-25 settled pages to a +12000 ms cap → ~16.2 s/listing steady state) the full
+25 settled pages to a +12000 ms cap → 16.5 s/listing steady state) the full
 Idealista cohort is **~14.6 h** of continuous foreground browsing; the
 value-ordered subset of live profile candidates is 2,800 rows and **~12.5 h**.
 With `ETL_RETAIN_CAPTURE_HTML_FOR=idealista` set in production (D-150) each
@@ -102,6 +102,27 @@ cluster. A bulk requeue must therefore state its time and storage cost before
 the confirm arms — which is why the preview endpoint is read-only, measures
 retention empirically from the portal's own recent captures rather than
 assuming it, and the confirm button carries the count.
+
+Two gates keep a pass from being wasted browsing, and neither is optional.
+A portal switched off in Fuentes contributes nothing to a cohort — re-capture
+uses D-055's shared `activeSourceClause`/`DISABLED_SOURCES_CTE`, the same
+fragment the list feed and the map feed filter by, rather than a third
+private notion of "live listing". And a portal with
+`connector_config.capture_enabled = false` is refused on the write path
+outright: `etl/capture.py::_connector_capture_enabled` would leave every
+resulting capture `pending` forever, so a 12-hour session would produce
+nothing at all. The preview reports that flag instead of refusing, since GET
+never writes.
+
+The value ordering it promises only holds on the MANUAL batch path. Auto mode
+drains through `selectNextPendingUrls`, which ranks by portal due-ness and
+`created_at` and ignores `requeue_rank` by design (it must stay in step with
+`browser-extension/batch.js selectNextPending`). Rather than change
+auto-capture's ordering for this feature, the panel tells the operator to
+turn Auto off before starting.
+
+Storage figures here are decimal (1 MB = 10^6 B), matching the SI prefixes the
+panel renders; `formatBytes` divides by 1000 for the same reason.
 
 **See**: issue #677, issues #625/#654 (the bug and the parse fix this makes
 useful), D-043 (batch pacing), D-150 (HTML retention), D-133/D-135 (the

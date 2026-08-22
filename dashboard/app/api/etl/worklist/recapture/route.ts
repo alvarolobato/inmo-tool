@@ -17,6 +17,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
+  isCaptureProcessingEnabled,
   previewRecaptureCohort,
   requeueRecaptureCohort,
 } from "@/lib/db/recapture";
@@ -110,7 +111,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    return NextResponse.json(await previewRecaptureCohort(parsed.request));
+    // `isCapturePortal` only says the EXTENSION can capture this portal. It
+    // says nothing about whether the ETL will process what comes back:
+    // `connector_config.capture_enabled = false` makes
+    // `etl/capture.py::_connector_capture_enabled` refuse every row, so the
+    // browsing happens and the captures pile up `pending` forever. Surfaced on
+    // the preview so the operator learns it BEFORE committing an evening,
+    // not after.
+    const [preview, captureEnabled] = await Promise.all([
+      previewRecaptureCohort(parsed.request),
+      isCaptureProcessingEnabled(parsed.request.portal),
+    ]);
+    return NextResponse.json({
+      ...preview,
+      captureProcessingEnabled: captureEnabled,
+    });
   } catch (err) {
     console.error(`[${requestId}] recapture preview failed`, err);
     return NextResponse.json(
@@ -168,7 +183,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const reason =
-    typeof body.reason === "string" ? body.reason.trim().slice(0, MAX_REASON_LENGTH) : "";
+    typeof body.reason === "string"
+      ? body.reason.trim().slice(0, MAX_REASON_LENGTH)
+      : "";
   if (!reason) {
     return NextResponse.json(
       formatApiError(
@@ -182,6 +199,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
+    // Refuse rather than warn on the write path: queueing thousands of rows
+    // whose captures the ETL is configured to ignore turns a 12-hour browsing
+    // session into nothing at all.
+    if (!(await isCaptureProcessingEnabled(parsed.request.portal))) {
+      return NextResponse.json(
+        formatApiError(
+          `La captura de ${parsed.request.portal} está desactivada (capture_enabled = false), así que el ETL no procesaría nada de lo que se capture. Actívala en Fuentes antes de recapturar.`,
+          "VALIDATION",
+          undefined,
+          requestId,
+        ),
+        { status: 409 },
+      );
+    }
+
     const result = await requeueRecaptureCohort(
       parsed.request,
       reason,

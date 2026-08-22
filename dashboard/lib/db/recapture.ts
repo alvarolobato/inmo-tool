@@ -20,6 +20,10 @@
  */
 
 import { sql } from "@/lib/db-write";
+import {
+  activeSourceClause,
+  DISABLED_SOURCES_CTE,
+} from "@/lib/db/source-active";
 import { worklistMatchKey } from "@/lib/worklist";
 import {
   estimateBatchSeconds,
@@ -52,9 +56,16 @@ const REQUEUEABLE_STATUS = "captured";
  *
  * Both notions of rejected are excluded, because they are set by different
  * surfaces and either one means the owner is done with the property:
- * `pipeline_stage = 'rejected'` (the pipeline UI) and a latest
- * `feedback_event` of 'reject' (the feed's thumbs-down, undone by 'clear').
- * `closed` is terminal too, per the schema's stage-ordering comment.
+ * `pipeline_stage = 'rejected'` (set on the property detail page's triage bar
+ * and the dedup review surfaces) and a latest `feedback_event` of 'reject'
+ * (the feed's thumbs-down, undone by 'clear'). `closed` is terminal too, per
+ * the schema's stage-ordering comment.
+ *
+ * Note this is only the PROFILE-side half of "live". The SOURCE-side half —
+ * D-055's disabled-connector gate — is applied separately and
+ * unconditionally in `selectCohortListings`, because a listing from a portal
+ * the owner has switched off is hidden from every other surface and must not
+ * be re-captured either, whether or not "solo candidatos vivos" is ticked.
  */
 const LIVE_CANDIDATE_PREDICATE = `
   EXISTS (
@@ -132,12 +143,26 @@ async function selectCohortListings(
     ? `AND ${LIVE_CANDIDATE_PREDICATE}`
     : "";
 
+  // D-055: a listing whose connector is switched off is hidden from the list
+  // feed (candidates.ts) and the map feed (map-candidates.ts) alike, via this
+  // exact shared fragment. Re-capture uses it too rather than defining a third
+  // notion of "live listing" — re-capturing a portal the owner turned off is
+  // browsing time spent on data no surface will ever show.
   return sql<CohortListingRow>(
-    `SELECT l.url,
+    `WITH ${DISABLED_SOURCES_CTE}
+     SELECT l.url,
             COALESCE(cardinality(array_remove(l.photo_urls, NULL)), 0) AS photo_count,
             ${BEST_SCORE_EXPR} AS best_score
        FROM listing l
       WHERE l.source = $1
+        AND ${activeSourceClause("l")}
+        -- 'active' only, so 'reserved' listings are excluded. Inherited
+        -- deliberately rather than by accident: every candidate-facing query
+        -- in the codebase (candidates.ts, map-candidates.ts) draws the live
+        -- line at status = 'active' too, so a reserved listing is already
+        -- invisible in the feed. Re-capturing one would spend browsing time
+        -- refreshing a card nobody can see. If that line ever moves, it moves
+        -- in all three places at once.
         AND l.status = 'active'
         AND l.operation = 'sale'
         AND l.url IS NOT NULL
@@ -197,6 +222,31 @@ async function selectCohortRows(
     ids: rows.map((r) => r.id),
     alreadyRequeued: rows.filter((r) => r.requeued_at !== null).length,
   };
+}
+
+/**
+ * Whether the ETL will actually PROCESS captures for this portal —
+ * `connector_config.capture_enabled`, the exact flag
+ * `etl/capture.py::_connector_capture_enabled` reads before touching a
+ * pending `extension_capture` row (issue #263). A missing row means enabled,
+ * matching that function's own default.
+ *
+ * Checked separately from D-055's `activeSourceClause` even though the two
+ * read the same column for a capture-only portal, because the failure they
+ * describe is different and the operator needs to be told which one they hit.
+ * D-055 says "this portal's listings are hidden everywhere"; this says "the
+ * browsing would happen, and every capture it produced would sit unprocessed
+ * forever". Silently returning a cohort of zero for either is what a whole
+ * evening of browsing gets spent on.
+ */
+export async function isCaptureProcessingEnabled(
+  portal: string,
+): Promise<boolean> {
+  const rows = await sql<{ capture_enabled: boolean }>(
+    `SELECT capture_enabled FROM connector_config WHERE connector_name = $1`,
+    [portal],
+  );
+  return rows.length === 0 ? true : rows[0].capture_enabled !== false;
 }
 
 /**
@@ -289,6 +339,15 @@ export interface RequeueResult {
  * cohort has moved underneath them the write is refused rather than silently
  * doing something other than what the confirm said — the operator re-runs
  * "Calcular" and sees the new number.
+ *
+ * Note this is a COUNT guard, not a set-identity guard: an exactly
+ * compensating swap between preview and confirm (one row drops out, another
+ * drops in) passes it, and a row the operator never saw in a preview gets
+ * requeued. Deliberately left as a count — the swapped-in row satisfies the
+ * same predicate the operator chose, so the cohort is still the cohort they
+ * asked for, and hashing the id set would trade that for spurious 409s on a
+ * queue that legitimately churns. The per-row protection that does matter is
+ * `AND w.status = $4` on the UPDATE below.
  */
 export async function requeueRecaptureCohort(
   req: RecaptureCohortRequest,
