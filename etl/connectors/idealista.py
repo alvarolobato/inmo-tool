@@ -57,6 +57,7 @@ from etl.connectors.base import (
     Connector,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     Throttle,
 )
@@ -70,6 +71,86 @@ from etl.connectors.idealista_mapping import (
 )
 
 logger = logging.getLogger("etl.connectors.idealista")
+
+# --- Retired-advert notice detection (issue #690, D-159) -------------------
+#
+# Idealista answers a request for a REMOVED listing with an HTTP 200 carrying
+# its own notice page — the one the owner reads as "lo sentimos, este anuncio
+# ya no está publicado". That page keeps the site's generic chrome (its
+# <title> is Idealista's site-wide "Viviendas venta. Viviendas alquiler.
+# Pisos. Chalets — idealista", NOT the listing's own title) and carries no
+# listing markup whatsoever.
+#
+# This is the ONE positive signal in this module. It matches the notice
+# SENTENCE the portal itself renders — never the absence of listing fields,
+# which is also what a soft block (D-047), a CAPTCHA wall, a rate-throttle
+# and a half-rendered page look like. Conflating those with "gone" would let
+# a throttle wall withdraw live inventory, which is the exact failure D-157
+# and milanuncios.py's "no signature, deliberately" comment exist to prevent.
+#
+# Matched against the page's VISIBLE TEXT with <script>/<style> stripped and
+# accents folded, so neither an inline JS string nor an "está"/"esta"
+# spelling difference decides the outcome.
+_RETIRED_NOTICE_RE = re.compile(
+    r"\b(?:este\s+|el\s+)?(?:anuncio|inmueble)\b[^.!?]{0,40}?"
+    r"\bya\s+no\s+esta\b\s+(?:publicad[oa]|disponible|activ[oa])\b"
+)
+
+# Folding table for the five Spanish accented vowels plus ñ — enough to make
+# the notice match spelling-insensitive without pulling in `unicodedata`
+# normalization of the whole page (these pages are ~400 KB).
+_ACCENT_FOLD = str.maketrans(
+    "áàäâéèëêíìïîóòöôúùüûñÁÀÄÂÉÈËÊÍÌÏÎÓÒÖÔÚÙÜÛÑ",
+    "aaaaeeeeiiiioooouuuunAAAAEEEEIIIIOOOOUUUUN",
+)
+
+
+def _strip_to_visible_text(soup: BeautifulSoup) -> str:
+    """The page's visible text, accent-folded, lowercased and
+    whitespace-collapsed — the surface `_RETIRED_NOTICE_RE` is matched on.
+
+    **Mutates `soup`**, removing every <script>/<style>/<noscript>, so a JS
+    string literal or a CSS content rule can never supply the notice
+    sentence: only text the human in front of the browser could actually
+    have read counts as the portal saying something.
+
+    Mutating rather than working on a copy is deliberate. These captures are
+    ~400 KB and re-parsing one costs more than everything else this
+    connector does; the single caller
+    (`IdealistaConnector.retired_page_signature`) owns a private soup, and
+    the tags removed here are disjoint from `_LISTING_DETAIL_SELECTORS`, so
+    the markup check that follows is unaffected by the removal.
+    """
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", text.translate(_ACCENT_FOLD).lower())
+
+
+# The blocks a real Idealista advert page always renders — its own title, its
+# price box, its seller-written description, and its features table. Used in
+# TWO places, for two DIFFERENT jobs, and the distinction matters:
+#
+#  * `retired_page_signature` — as a GUARD on a positive notice match, to rule
+#    out a live advert that merely quotes the phrase.
+#  * `normalize` — as a REFUSAL-TO-PARSE check, so a page carrying none of
+#    this is never persisted as a listing.
+#
+# Neither use ever treats absence as evidence of WITHDRAWAL. Absence here
+# only ever means "this is not a listing page" — which resolves to no write
+# at all, not to a status change.
+_LISTING_DETAIL_SELECTORS = (
+    ".main-info__title-main",
+    ".info-data-price",
+    ".adCommentsLanguage",
+    ".details-property_features",
+)
+
+
+def _has_listing_detail_markup(soup: BeautifulSoup) -> bool:
+    """Does this page render ANY of a real advert's own detail blocks?"""
+    return any(soup.select_one(sel) is not None for sel in _LISTING_DETAIL_SELECTORS)
+
 
 _REFERENCE_INPUT_RE = re.compile(
     r'<input[^>]+name=["\']adId["\'][^>]+value=["\'](\d+)["\']', re.IGNORECASE
@@ -192,8 +273,13 @@ class IdealistaConnector(Connector):
     # (etl.orchestrator._reconcile_missed_discoveries) never applies to a
     # capture-only source; a captured listing's status only ever changes
     # if the owner captures the same URL again later and it shows
-    # different content (e.g. a "no longer available" page — out of scope
-    # for this task, no such detection exists yet).
+    # different content. That second path now EXISTS (issue #690, D-159):
+    # re-capturing a URL that Idealista answers with its "anuncio retirado"
+    # notice raises ListingUnavailableError from normalize(), and
+    # etl/capture.py marks the listing `withdrawn` with the notice cited as
+    # evidence. It is the only evidence channel a capture-only, WAF-walled
+    # portal has (D-081), and it costs zero automated requests: the owner
+    # was already looking at the page.
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
         return None
@@ -224,9 +310,78 @@ class IdealistaConnector(Connector):
         match = re.search(r"/inmueble/(\d+)/", url)
         return match.group(1) if match else None
 
+    def retired_page_signature(
+        self, html: str, final_url: str | None = None
+    ) -> str | None:
+        """Idealista's own "this advert is gone" notice, positively
+        identified — or None (issue #690, D-159).
+
+        Returns a short Spanish citation of the sentence the portal rendered,
+        which becomes `listing_status_event.evidence`. The base class
+        contract is deliberately strict about what may return non-None here
+        (see `Connector.retired_page_signature`): only a marker the SITE
+        ITSELF put on the page. This override honours that by matching the
+        notice sentence and nothing else.
+
+        Two independent conditions must BOTH hold, and they are not
+        redundant:
+
+        1. The notice sentence is present in the page's visible text. This
+           is the positive evidence — the only thing that can ever make this
+           method return non-None.
+        2. The page carries none of the listing's own detail markup. This is
+           NOT evidence and is never sufficient on its own; it is a guard
+           against the one false-positive route condition 1 leaves open — a
+           LIVE advert whose seller-written description happens to quote the
+           phrase (an agency writing "si ve que el anuncio ya no está
+           publicado, llámenos", say). A live advert always renders its own
+           price/title/description block, so requiring its absence closes
+           that route without ever letting absence alone withdraw anything.
+
+        `final_url` is accepted for contract compatibility and unused:
+        Idealista serves the notice at the listing's own URL with a 200 and
+        does not redirect, so there is no URL-shaped signal to read (unlike
+        fotocasa's `?propertyNotFound`).
+        """
+        if not html:
+            return None
+        # One parse, and the cheap positive gate first: on the overwhelming
+        # majority of captures (real adverts) the regex misses and this
+        # returns immediately without the markup check.
+        soup = BeautifulSoup(html, "html.parser")
+        match = _RETIRED_NOTICE_RE.search(_strip_to_visible_text(soup))
+        if match is None:
+            return None
+        if _has_listing_detail_markup(soup):
+            # Condition 2 failed: the page IS a real advert that merely
+            # mentions the phrase. Not retired — say nothing.
+            logger.info(
+                "idealista: retired-notice phrase %r found on a page that "
+                "still renders real listing markup — treating as a LIVE "
+                "advert quoting the phrase, not a retired page (D-159)",
+                match.group(0),
+            )
+            return None
+        return (
+            "Página de anuncio retirado de Idealista: la propia web muestra "
+            f"«{match.group(0)}» y la ficha no existe (sin precio, sin "
+            "descripción, sin galería)"
+        )
+
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
         html = raw.raw.get("html", "")
         soup = BeautifulSoup(html, "html.parser")
+
+        # Issue #690 / D-159. Before parsing anything: is this the portal's
+        # own "anuncio retirado" notice rather than a listing? Checked FIRST,
+        # because every field below degrades to None on such a page and the
+        # result would otherwise be a plausible-looking-but-empty listing —
+        # which is precisely what production was persisting (26 rows, see
+        # D-159). `ListingUnavailableError` is the codebase's established
+        # "the source says this listing is gone" signal (D-049).
+        signature = self.retired_page_signature(html, raw.raw.get("url"))
+        if signature is not None:
+            raise ListingUnavailableError(signature)
 
         title_el = soup.select_one(".main-info__title-main")
         title = (
@@ -333,6 +488,64 @@ class IdealistaConnector(Connector):
         coordinates = _coordinates_from_staticmap(html)
         lat, lon = coordinates if coordinates is not None else (None, None)
 
+        # Issue #690 / D-159 — the refusal-to-parse check.
+        #
+        # `retired_page_signature` above catches the notice page we can NAME.
+        # This catches every OTHER non-advert page served at a listing URL
+        # with a 200: a CAPTCHA/bot wall (which Idealista is known to serve —
+        # see this module's docstring), a login interstitial, a redesigned
+        # notice whose wording this connector has not learned yet, a
+        # half-rendered capture.
+        #
+        # Until this landed, every one of those parsed "successfully" into a
+        # listing whose every real field was None, and etl/capture.py
+        # persisted it. Measured in production before the fix: 26 idealista
+        # rows, of which 18 were listings CREATED from such a page (no price,
+        # no description, no photos, property_type 'piso' fabricated from the
+        # site-wide <title> "Viviendas venta. Viviendas alquiler. Pisos.
+        # Chalets — idealista") and 8 were real adverts whose stored photo
+        # gallery was ERASED — `_update_existing_listing` COALESCEs scalars
+        # but assigns `photo_urls` unconditionally, so an empty parse wipes
+        # it. All 26 also had `last_seen_at` pushed to now, making a gone
+        # listing look freshly confirmed alive.
+        #
+        # Raising `ConnectorError` (NOT `ListingUnavailableError`) is the
+        # whole point: this is "I cannot tell what this page is", which under
+        # D-157 is no evidence at all. The capture is recorded as `failed`
+        # for the operator to see, and nothing about the listing changes.
+        #
+        # The threshold is "not one substantive field", chosen against the
+        # measured production distribution: real adverts extract 9-15 fields,
+        # non-adverts extract exactly 3 — and all 3 are structural (`url` is
+        # handed in, `operation` is hardcoded, `property_type` is derived
+        # from that site-wide title), so ZERO substantive fields separates the
+        # two populations with the whole 9-field gap to spare.
+        substantive = {
+            "current_price": current_price,
+            "description": description,
+            "address": address,
+            "reference_code": reference_code,
+            "m2_built": m2_built,
+            "rooms": rooms,
+            "bathrooms": bathrooms,
+            "coordinates": coordinates,
+            "photos": photo_urls or None,
+            "features_block": basic_features_text,
+            "listing_title": title_el,
+        }
+        if not any(v is not None for v in substantive.values()):
+            raise ConnectorError(
+                f"idealista {raw.external_id}: the captured page carries no "
+                "listing data at all — not a price, title, description, "
+                "address, reference, area, room count, coordinates, photo or "
+                "features block, and it is not the recognised 'anuncio "
+                "retirado' notice either. This is a bot wall, a login "
+                "interstitial, a half-rendered capture or a page shape this "
+                "connector has not learned; refusing to persist it as a "
+                "listing (issue #690, D-159). Nothing about any existing "
+                "listing has been changed."
+            )
+
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=raw.source,
@@ -343,9 +556,11 @@ class IdealistaConnector(Connector):
             # rather than guessed.
             status="active",  # A captured listing is, by construction,
             # a page the owner was just looking at right now — "active" is
-            # the only status this connector can honestly assert; it never
-            # revisits a listing to detect a status change (see
-            # discovers_full_inventory's comment above).
+            # the only status this connector can honestly assert. Reaching
+            # this line already proves the page is a real advert: the
+            # retired-notice check and the refusal-to-parse guard above both
+            # ran first (issue #690, D-159), so "active" is now an assertion
+            # about a page with real listing content on it, not a default.
             current_price=current_price,
             description=description,
             photo_urls=photo_urls,

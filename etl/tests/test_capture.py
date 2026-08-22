@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 
 import psycopg2
@@ -61,6 +62,31 @@ def _insert_pending(conn, url: str, html: str) -> int:
         capture_id = cur.fetchone()[0]
     conn.commit()
     return capture_id
+
+
+def _cleanup_url(conn, url: str, external_id: str) -> None:
+    """Scoped teardown for issue #690's tests. The module-level `_cleanup`
+    only deletes `extension_capture` rows for the shared `_FIXTURE_URL`, so
+    it hits `extension_capture_listing_id_fkey` for any test using its own
+    URL — the withdrawal path deliberately links the capture row to the
+    listing it withdrew. Delete captures (and the worklist row) first, then
+    the listing, then its property."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+        cur.execute("DELETE FROM capture_worklist WHERE url = %s", (url,))
+        cur.execute(
+            "SELECT property_id FROM listing "
+            "WHERE source = 'idealista' AND external_id = %s",
+            (external_id,),
+        )
+        row = cur.fetchone()
+        cur.execute(
+            "DELETE FROM listing WHERE source = 'idealista' AND external_id = %s",
+            (external_id,),
+        )
+        if row is not None:
+            cur.execute("DELETE FROM property WHERE id = %s", (row[0],))
+    conn.commit()
 
 
 class TestCaptureConnectorRegistration:
@@ -1485,3 +1511,347 @@ class TestNulByteRejectedByPostgres:
         assert "\x00" not in stored
         # Offsets unchanged — this is precisely why U+FFFD beats deletion.
         assert len(stored) == len(raw)
+
+
+_RETIRED_HTML = (
+    Path(__file__).parent / "fixtures" / "idealista_retired_notice.html"
+).read_text(encoding="utf-8")
+
+
+class TestRetiredAdvertCapture:
+    """Issue #690 / D-159 — the capture-only evidence channel.
+
+    Idealista is capture-only behind a WAF (D-081/D-026/D-027), so absence
+    can never be inferred and no automated request may be made to check.
+    The one evidence channel available is the owner's own browsing: when he
+    opens a listing that is gone, the portal itself renders "lo sentimos,
+    este anuncio ya no está publicado". These tests pin that this page
+    withdraws the listing WITH evidence, that nothing else does, and that
+    the pre-fix corruption is gone.
+    """
+
+    def _seed_live_listing(self, conn, external_id: str, url: str) -> int:
+        """A healthy already-captured listing, shaped like the production
+        rows D-159 measured: real price, real description, a real gallery."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property (address, city, property_type, m2_built) "
+                "VALUES ('Calle Sintetica 1', 'Madrid', 'piso', 80) RETURNING id"
+            )
+            property_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO listing
+                    (property_id, source, external_id, url, status, first_seen_at,
+                     last_seen_at, last_fetched_at, current_price, description,
+                     photo_urls, operation)
+                VALUES (%s, 'idealista', %s, %s, 'active',
+                        NOW() - INTERVAL '30 days', NOW() - INTERVAL '9 days',
+                        NOW() - INTERVAL '9 days', 165000,
+                        %s, %s, 'sale')
+                RETURNING id
+                """,
+                (
+                    property_id,
+                    external_id,
+                    url,
+                    "Descripcion sintetica de prueba, suficientemente larga.",
+                    ["https://img.example/1.jpg", "https://img.example/2.jpg"],
+                ),
+            )
+            listing_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO listing_price_history (listing_id, observed_at, price) "
+                "VALUES (%s, NOW() - INTERVAL '30 days', 175000)",
+                (listing_id,),
+            )
+        conn.commit()
+        return listing_id
+
+    def test_retired_page_withdraws_the_listing_with_evidence(self, pg_conn):
+        """EC: capturing the notice page transitions the listing to
+        `withdrawn` and appends a status event that CITES the notice — the
+        whole point of D-157's "only evidence changes state"."""
+        external_id = "690001"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            listing_id = self._seed_live_listing(pg_conn, external_id, url)
+            capture_id = _insert_pending(pg_conn, url, _RETIRED_HTML)
+
+            # 1 row PROCESSED (the return value counts handled rows), but
+            # _process_one returns False for it, so it does not count as
+            # INGESTED — a withdrawal is not an ingestion and must not
+            # trigger the dashboard re-materialize that a real new listing
+            # does.
+            assert capture.process_pending_captures(pg_conn) == 1
+            assert (
+                capture._process_one(
+                    pg_conn,
+                    _insert_pending(pg_conn, url, _RETIRED_HTML),
+                    url,
+                    _RETIRED_HTML,
+                )
+                is False
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT status FROM listing WHERE id = %s", (listing_id,))
+                assert cur.fetchone()[0] == "withdrawn"
+
+                cur.execute(
+                    "SELECT status, evidence FROM listing_status_event "
+                    "WHERE listing_id = %s ORDER BY id DESC LIMIT 1",
+                    (listing_id,),
+                )
+                status, evidence = cur.fetchone()
+                assert status == "withdrawn"
+                assert evidence is not None
+                assert "ya no esta publicado" in evidence.lower()
+
+                cur.execute(
+                    "SELECT status, connector_name, listing_id, error_msg, html "
+                    "FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                cap_status, connector_name, cap_listing, err, html = cur.fetchone()
+                # Not 'failed': nothing failed. Not 'done': nothing was
+                # ingested. See the init.sql migration note for why this
+                # needs its own status.
+                assert cap_status == "withdrawn"
+                assert connector_name == "idealista"
+                assert cap_listing == listing_id
+                assert "retirado" in err.lower()
+                assert html is None
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_withdrawal_marks_and_never_deletes(self, pg_conn):
+        """D-157 ("mark, don't delete"): the listing row, its price history and its property all
+        survive — a withdrawn advert keeps its history so the property stays
+        analysable and a resurrection stays representable."""
+        external_id = "690002"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            listing_id = self._seed_live_listing(pg_conn, external_id, url)
+            _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT current_price, description, "
+                    "array_length(photo_urls, 1), property_id "
+                    "FROM listing WHERE id = %s",
+                    (listing_id,),
+                )
+                price, description, photos, property_id = cur.fetchone()
+                assert price is not None
+                assert description is not None
+                # The photo gallery specifically: the pre-fix path erased it
+                # (photo_urls is assigned, not COALESCEd). It must survive.
+                assert photos == 2
+
+                cur.execute(
+                    "SELECT count(*) FROM listing_price_history WHERE listing_id = %s",
+                    (listing_id,),
+                )
+                assert cur.fetchone()[0] == 1
+                cur.execute(
+                    "SELECT count(*) FROM property WHERE id = %s", (property_id,)
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_withdrawal_does_not_bump_last_seen_at(self, pg_conn):
+        """`last_seen_at` means "last confirmed PRESENT". The pre-fix path
+        pushed it to NOW() on exactly the capture that proved the listing was
+        GONE, making a dead listing look freshly confirmed alive and
+        defeating every staleness nomination downstream (D-157)."""
+        external_id = "690003"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            listing_id = self._seed_live_listing(pg_conn, external_id, url)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_seen_at FROM listing WHERE id = %s", (listing_id,)
+                )
+                before = cur.fetchone()[0]
+
+            _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_seen_at FROM listing WHERE id = %s", (listing_id,)
+                )
+                assert cur.fetchone()[0] == before
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_retired_page_for_an_unknown_listing_creates_nothing(self, pg_conn):
+        """The phantom-listing path, closed. 18 of the 26 corrupted
+        production rows were listings CREATED by a non-advert capture. A
+        notice page for a URL we have never successfully captured tells us
+        about a listing we hold no data for — inventing a row for it would
+        recreate exactly those phantoms."""
+        external_id = "690004"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            capture_id = _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM listing WHERE source = 'idealista' "
+                    "AND external_id = %s",
+                    (external_id,),
+                )
+                assert cur.fetchone()[0] == 0
+                # The evidence is still recorded, just with no listing to
+                # attach it to.
+                cur.execute(
+                    "SELECT status, listing_id FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                assert cur.fetchone() == ("withdrawn", None)
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_recapturing_the_notice_is_idempotent(self, pg_conn):
+        """Draining a worklist can re-open the same dead URL. A second
+        capture must append no second status event."""
+        external_id = "690005"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            listing_id = self._seed_live_listing(pg_conn, external_id, url)
+            for _ in range(2):
+                _insert_pending(pg_conn, url, _RETIRED_HTML)
+                capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM listing_status_event "
+                    "WHERE listing_id = %s AND status = 'withdrawn'",
+                    (listing_id,),
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_an_unidentifiable_page_changes_nothing_about_the_listing(self, pg_conn):
+        """THE safety test. A bot wall / soft block / half-rendered page
+        carries no listing data either — and must leave the listing exactly
+        as it was: still `active`, gallery intact, no status event. Absence
+        of evidence is never evidence of absence (D-157, D-047)."""
+        external_id = "690006"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        wall_html = (
+            "<html><head><title>idealista</title></head><body>"
+            "<h1>Vaya, parece que eres un robot</h1></body></html>"
+        )
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            listing_id = self._seed_live_listing(pg_conn, external_id, url)
+            capture_id = _insert_pending(pg_conn, url, wall_html)
+            capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, array_length(photo_urls, 1), current_price "
+                    "FROM listing WHERE id = %s",
+                    (listing_id,),
+                )
+                assert cur.fetchone() == ("active", 2, Decimal("165000.00"))
+                cur.execute(
+                    "SELECT count(*) FROM listing_status_event WHERE listing_id = %s",
+                    (listing_id,),
+                )
+                assert cur.fetchone()[0] == 0
+                # Recorded as a genuine failure so the operator can see it —
+                # a page we cannot classify IS something to look at.
+                cur.execute(
+                    "SELECT status FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                assert cur.fetchone()[0] == "failed"
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+
+class TestRetiredAdvertWorklistRetirement:
+    """Issue #690: what a confirmed withdrawal does to the guided worklist."""
+
+    def _seed_worklist(self, conn, url: str, status: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO capture_worklist "
+                "(url, match_key, source_portal, status) VALUES (%s, %s, %s, %s)",
+                (url, capture.worklist_match_key(url), "idealista", status),
+            )
+        conn.commit()
+
+    def _worklist_status(self, conn, url: str) -> str:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM capture_worklist WHERE match_key = %s",
+                (capture.worklist_match_key(url),),
+            )
+            return cur.fetchone()[0]
+
+    def test_a_pending_row_is_retired_as_stale(self, pg_conn):
+        """'stale' is this table's own word for "vanished from the portal"
+        (issue #273) and is excluded from the "Abrir siguiente pendiente"
+        pool — so the owner is never handed a URL we have just proven is
+        dead. His attention is the scarcest resource in a capture-only
+        pipeline; re-serving a dead URL spends it for nothing."""
+        external_id = "690010"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            self._seed_worklist(pg_conn, url, "pending")
+            _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+            assert self._worklist_status(pg_conn, url) == "stale"
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_a_skipped_row_is_never_resurrected(self, pg_conn):
+        """'skipped' is the OWNER'S decision about his own queue. No
+        automated inference gets to overrule it — not even a correct one."""
+        external_id = "690011"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            self._seed_worklist(pg_conn, url, "skipped")
+            _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+            assert self._worklist_status(pg_conn, url) == "skipped"
+        finally:
+            _cleanup_url(pg_conn, url, external_id)
+
+    def test_a_captured_row_is_never_downgraded(self, pg_conn):
+        """A 'captured' row records a real successful capture and its
+        matched_capture_id; retiring it would lose that."""
+        external_id = "690012"
+        url = f"https://www.idealista.com/inmueble/{external_id}/"
+        _apply_schema(pg_conn)
+        _cleanup_url(pg_conn, url, external_id)
+        try:
+            self._seed_worklist(pg_conn, url, "captured")
+            _insert_pending(pg_conn, url, _RETIRED_HTML)
+            capture.process_pending_captures(pg_conn)
+            assert self._worklist_status(pg_conn, url) == "captured"
+        finally:
+            _cleanup_url(pg_conn, url, external_id)

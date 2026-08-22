@@ -87,10 +87,40 @@ against ids taken from production's oldest-`last_seen_at` actives:
 | fotocasa | HTTP **404**, redirecting to the search page with `?propertyNotFound` | not observed | `retired_page_signature` on the `propertyNotFound` URL marker — a second line of defence in case that landing page is ever served with a 200, since its own `__initial_props__` would otherwise normalize as if it were the listing |
 | milanuncios | HTTP **404** (tiny redirect-to-home body) | not observed | **none, deliberately** — see the Milanuncios section below |
 | pisos | HTTP **404** (`<title>404</title>`) | not observed | no retired signature; instead a positive ALIVE marker (`features__feature`, 7 on a served listing, 0 on the 404 page), because pisos verification never reaches `normalize()` |
+| idealista | n/a — capture-only, never fetched (D-081) | **yes**, the notice the owner reads as "lo sentimos, este anuncio ya no está publicado" | `retired_page_signature` on the notice SENTENCE in the page's visible text, guarded by the absence of the advert's own markup (D-159) — the only capture-path signature so far |
 
 The same spike is the best available argument for why a soft block must change
 nothing: of two stale milanuncios ads checked, one served the real page and the
 other served the "Pardon Our Interruption" GeeTest wall with HTTP 200.
+
+### The capture path can carry a signature too (issue #690, D-159)
+
+`retired_page_signature` was built for the stale-verification pass, which
+fetches. Idealista never fetches — but the owner's browser does, and
+`etl/capture.py` runs `normalize()` on whatever it captured. So the same hook
+works on the capture path, with no request and no WAF exposure: `normalize()`
+checks the signature first and raises `ListingUnavailableError`, which
+`_process_one` catches (**before** the generic `ConnectorError` branch — it is
+a subclass, so the ordering is load-bearing) and turns into `withdrawn` +
+`listing_status_event.evidence`.
+
+Two lessons from that work worth carrying to the next capture-only portal:
+
+1. **A capture-only connector's `normalize()` must be able to refuse.** Before
+   #690, Idealista's could not: every field is optional, so a bot wall or a
+   retired notice parsed "successfully" into an all-`None` listing that the
+   capture pipeline dutifully persisted — creating 18 phantom listings, erasing
+   8 real photo galleries (`_update_existing_listing` COALESCEs scalars but
+   assigns `photo_urls` unconditionally), and pushing `last_seen_at` forward on
+   listings that were provably gone. If your connector's `normalize()` cannot
+   return "this is not an advert", it will eventually persist something that
+   isn't one. Add a zero-substantive-fields guard that raises a plain
+   `ConnectorError`.
+2. **Keep the two outcomes strictly separate.** The recognised notice →
+   `ListingUnavailableError` → status change. Anything else unreadable →
+   `ConnectorError` → no write at all. Never let the second collapse into the
+   first: "I can't parse this" is not "it's gone" (D-157), and a portal behind
+   a WAF serves plenty of pages you can't parse.
 
 Two things to get right when opting a connector in:
 

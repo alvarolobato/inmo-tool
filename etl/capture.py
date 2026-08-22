@@ -23,7 +23,12 @@ from urllib.parse import urljoin, urlparse
 from etl.config import retain_capture_html_for
 from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.altamira import AltamiraConnector
-from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
+from etl.connectors.base import (
+    CanonicalListingVersion,
+    ConnectorError,
+    ListingUnavailableError,
+    RawListing,
+)
 from etl.connectors.hipoges import HipogesConnector
 from etl.connectors.idealista import IdealistaConnector
 from etl.listing_detect import detail_portal_for_url, listing_portal_for_url
@@ -654,6 +659,171 @@ def _mark_listing(
     )
 
 
+def _mark_withdrawn(
+    conn,
+    capture_id: int,
+    url: str,
+    connector_name: str,
+    external_id: str,
+    evidence: str,
+) -> None:
+    """Record a capture that positively identified the portal's own
+    "anuncio retirado" notice (issue #690, D-159).
+
+    Three writes, in one transaction, in this order:
+
+    1. `listing.status = 'withdrawn'` for the listing this URL names — if we
+       know it. MARK, NEVER DELETE (D-157): the row, its
+       `listing_price_history`, its feedback and its dedup identity all
+       survive, so a property whose adverts all vanish keeps its history and
+       a resurrection stays representable.
+    2. An append-only `listing_status_event` citing the notice in
+       `evidence`. This is what makes the transition auditable a year later
+       under D-157's "only evidence changes state" rule — the row can answer
+       "evidence of what?" on its own.
+    3. The capture row itself as `status = 'withdrawn'`.
+
+    Deliberately does NOT touch `last_seen_at` / `last_fetched_at`. Those
+    mean "last confirmed PRESENT", and this observation is the exact
+    opposite; bumping them would make a listing we just proved gone look
+    freshly confirmed alive — the very corruption this issue fixes (the
+    pre-fix path bumped both).
+
+    Deliberately does NOT create a listing when none exists. A withdrawn
+    notice for a URL we never successfully captured tells us about a
+    listing we have no data for; inventing a row for it would recreate the
+    18 empty phantom listings D-159 documents. The capture is still recorded
+    (with `listing_id` NULL) so the evidence is not lost.
+
+    Idempotent: re-capturing the same retired page appends no second event
+    and changes nothing, because the status guard already sees 'withdrawn'.
+    """
+    listing_id: int | None = None
+    property_id: int | None = None
+    already_withdrawn = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, property_id, status FROM listing "
+                "WHERE source = %s AND external_id = %s",
+                (connector_name, external_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                listing_id, property_id, prev_status = row
+                already_withdrawn = prev_status == "withdrawn"
+                if not already_withdrawn:
+                    cur.execute(
+                        "UPDATE listing SET status = 'withdrawn' WHERE id = %s",
+                        (listing_id,),
+                    )
+                    cur.execute(
+                        "INSERT INTO listing_status_event "
+                        "(listing_id, observed_at, status, evidence) "
+                        "VALUES (%s, NOW(), 'withdrawn', %s)",
+                        (listing_id, evidence),
+                    )
+            cur.execute(
+                """
+                UPDATE extension_capture
+                   SET status = 'withdrawn', connector_name = %s,
+                       listing_id = %s, property_id = %s,
+                       title = %s, error_msg = %s, fields_extracted = 0,
+                       processed_at = NOW(), html = NULL
+                 WHERE id = %s
+                """,
+                (
+                    connector_name,
+                    listing_id,
+                    property_id,
+                    "Anuncio retirado del portal",
+                    evidence,
+                    capture_id,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "extension_capture id=%s: could not record the retired-advert "
+            "outcome for %s — falling back to 'failed' so the capture is not "
+            "left pending forever",
+            capture_id,
+            url,
+        )
+        _mark_failed(conn, capture_id, url, evidence, connector_name=connector_name)
+        return
+
+    # Retire the guided-worklist row too (issue #690). 'stale' is the status
+    # this table already defines as "vanished from the portal" (issue #273)
+    # and it is excluded from the "Abrir siguiente pendiente" pool — so the
+    # owner is never handed a URL we have just proven is gone. Best-effort
+    # and after the commit above, same posture as _correlate_worklist.
+    _retire_worklist_row(conn, url)
+
+    logger.info(
+        "extension_capture id=%s: %s %s is RETIRED at the portal — %s "
+        "(listing_id=%s) | %s",
+        capture_id,
+        connector_name,
+        external_id,
+        "listing marked withdrawn"
+        if listing_id is not None and not already_withdrawn
+        else (
+            "listing was already withdrawn"
+            if already_withdrawn
+            else "no stored listing for this URL, nothing to withdraw"
+        ),
+        listing_id,
+        evidence,
+    )
+
+
+def _retire_worklist_row(conn, url: str) -> None:
+    """Flip this URL's `capture_worklist` row to 'stale' — "vanished from the
+    portal" (issue #273's own definition of that status) — after a capture
+    positively proved the advert is retired (issue #690).
+
+    Only ever touches a row that is still 'pending'. That single-status
+    guard is doing three separate jobs:
+
+    * it never resurrects or overwrites a 'skipped' row — that status is the
+      OWNER'S choice about his own queue, and no automated inference gets to
+      overrule it;
+    * it never downgrades a 'captured' row, which already records a real
+      successful capture and its `matched_capture_id`;
+    * it never touches an already-'stale' row, keeping this idempotent.
+
+    Leaving the row 'pending' instead was the alternative, and it is wrong
+    on this evidence: 'pending' means "still to visit", and re-serving a URL
+    the portal has told us is gone spends the owner's attention — the single
+    scarcest resource in a capture-only pipeline — on a page that can never
+    produce data. 'failed' would be wrong too: nothing failed. The capture
+    worked perfectly and returned an answer.
+
+    Never raises: worklist bookkeeping must not fail the withdrawal it
+    annotates.
+    """
+    key = worklist_match_key(url)
+    if not key:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE capture_worklist SET status = 'stale', updated_at = NOW() "
+                "WHERE match_key = %s AND status = 'pending'",
+                (key,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "capture_worklist retirement failed for url=%s — the withdrawal "
+            "itself is already committed and unaffected",
+            url,
+        )
+
+
 def _process_one(
     conn, capture_id: int, url: str, html: str, created_at: datetime | None = None
 ) -> bool:
@@ -714,6 +884,16 @@ def _process_one(
 
     try:
         canonical = connector.normalize(raw)
+    except ListingUnavailableError as exc:
+        # Issue #690 / D-159. The connector POSITIVELY identified the
+        # portal's own "this advert is retired" notice. Caught BEFORE the
+        # generic ConnectorError branch below (it is a subclass, so order is
+        # load-bearing): this is not a failed capture, it is the single most
+        # valuable capture a WAF-walled, capture-only portal can produce —
+        # first-hand evidence of absence, obtained with zero automated
+        # requests because the owner was already on the page.
+        _mark_withdrawn(conn, capture_id, url, connector.name, external_id, str(exc))
+        return False
     except ConnectorError as exc:
         _mark_failed(conn, capture_id, url, str(exc), connector_name=connector.name)
         return False

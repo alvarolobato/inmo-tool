@@ -439,6 +439,18 @@ async function pollForResult(captureId) {
       return;
     }
 
+    // Issue #690 / D-159: the portal itself said this advert is retired
+    // ("lo sentimos, este anuncio ya no está publicado"). Also a clean
+    // outcome, not a failure — the capture worked and the listing has just
+    // been marked `withdrawn` in the database with this page cited as the
+    // evidence. Showing the ⚠️ error state here would train the owner to
+    // treat the single most valuable capture a WAF-walled portal can give
+    // as something that went wrong.
+    if (status.status === 'withdrawn') {
+      showWithdrawnResult();
+      return;
+    }
+
     // Still 'pending' — wait and check again.
     await sleep(POLL_INTERVAL_MS);
   }
@@ -460,6 +472,23 @@ function showListingResult(detailLinks) {
     detailLinks > 0
       ? `${detailLinks} anuncio(s) añadidos a la lista de captura por lotes.`
       : 'No se encontraron enlaces de detalle en esta página.';
+  $('#batch-progress').classList.add('hidden');
+  const actions = document.querySelector('.batch-actions');
+  if (actions) actions.classList.add('hidden');
+  const hint = document.querySelector('.batch-hint');
+  if (hint) hint.classList.add('hidden');
+}
+
+// Issue #690 / D-159: render a captured "anuncio retirado" page as a clean,
+// neutral, *useful* outcome. Same neutral panel as showListingResult, with
+// no progress bar and no actions — there is nothing left to do with this
+// URL, which is exactly the point.
+function showWithdrawnResult() {
+  showState('batch');
+  $('#batch-title').textContent = 'Anuncio retirado';
+  $('#batch-sub').textContent =
+    'El portal indica que este anuncio ya no está publicado. Marcado como '
+    + 'retirado en Inmo-Tool y quitado de la lista de captura.';
   $('#batch-progress').classList.add('hidden');
   const actions = document.querySelector('.batch-actions');
   if (actions) actions.classList.add('hidden');

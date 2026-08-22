@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
+from etl.connectors.base import (
+    ConnectorError,
+    ConnectorScope,
+    ListingUnavailableError,
+    RawListing,
+)
 from etl.connectors.idealista import IdealistaConnector
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "idealista_sample_detail.html"
@@ -182,26 +187,39 @@ class TestNormalize:
         canonical = IdealistaConnector().normalize(raw)
         assert canonical.current_price == Decimal(3600000)
 
-    def test_normalize_handles_completely_empty_page_without_crashing(self):
-        """An almost-empty page (e.g. a soft-block/error page that still
-        got captured) should produce a listing with everything None/empty
-        rather than raising — normalize() must never crash on missing
-        data; ConnectorError is reserved for discover()/fetch_detail(),
-        which this connector never actually calls."""
+    def test_normalize_refuses_a_completely_empty_page(self):
+        """REVERSED by issue #690 / D-159 — this test previously asserted the
+        opposite, and the behaviour it pinned turned out to be a live
+        data-corruption path.
+
+        It used to read: "an almost-empty page (e.g. a soft-block/error page
+        that still got captured) should produce a listing with everything
+        None/empty rather than raising". That reasoning is right about
+        robustness and wrong about persistence: normalize() indeed must not
+        CRASH, but returning a listing-shaped object full of Nones told
+        etl/capture.py the capture SUCCEEDED, and it duly persisted it.
+        Production measurement (D-159) found what that cost — 18 empty
+        phantom listings created from non-advert pages, and 8 real adverts
+        whose stored photo gallery was erased, because
+        `_update_existing_listing` COALESCEs scalars but assigns
+        `photo_urls` unconditionally.
+
+        Raising ConnectorError is the honest outcome and the safe one: it
+        means "I cannot tell what this page is", which under D-157 is no
+        evidence, so the capture is recorded `failed` for the operator and
+        NOTHING about any listing changes. Note it is deliberately NOT
+        ListingUnavailableError — an empty page is the soft-block signature
+        (D-047), never proof of absence."""
         html = "<html><head></head><body>Nothing here</body></html>"
         raw = RawListing(
             external_id="1",
             source="idealista",
             raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
         )
-        canonical = IdealistaConnector().normalize(raw)
-        assert canonical.current_price is None
-        assert canonical.rooms is None
-        assert canonical.reference_code is None
-        assert canonical.contact_raw is None
-        assert canonical.photo_urls == ()
-        assert canonical.lat is None
-        assert canonical.lon is None
+        with pytest.raises(ConnectorError) as excinfo:
+            IdealistaConnector().normalize(raw)
+        assert "no listing data at all" in str(excinfo.value)
+        assert not isinstance(excinfo.value, ListingUnavailableError)
 
     def test_normalize_does_not_pick_up_the_about_advertiser_widget(self):
         """A real Idealista page also carries a SECOND, differently-classed
@@ -679,3 +697,172 @@ class TestGalleryTruncationFlag:
             "photo_gallery_truncated" in record.getMessage()
             for record in caplog.records
         )
+
+
+# ─── Retired-advert notice detection (issue #690, D-159) ────────────────────
+
+_RETIRED_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "idealista_retired_notice.html"
+)
+
+
+def _read_retired_fixture() -> str:
+    return _RETIRED_FIXTURE_PATH.read_text(encoding="utf-8")
+
+
+def _raw(html: str, external_id: str = "112270916") -> RawListing:
+    return RawListing(
+        external_id=external_id,
+        source="idealista",
+        raw={"url": f"https://www.idealista.com/inmueble/{external_id}/", "html": html},
+    )
+
+
+class TestRetiredPageSignature:
+    """`retired_page_signature` must fire on the portal's own notice and on
+    NOTHING else. Every negative case here is a page that today's production
+    data shows can reach normalize() — the whole risk of this feature is a
+    false positive marking a live advert withdrawn."""
+
+    def test_the_notice_page_is_positively_identified(self):
+        signature = IdealistaConnector().retired_page_signature(_read_retired_fixture())
+        assert signature is not None
+        # The evidence must QUOTE what the portal said, not just assert a
+        # conclusion — this string is persisted to
+        # listing_status_event.evidence and has to answer "evidence of what?"
+        # on its own, years later (issue #643's rationale for the column).
+        assert "ya no esta publicado" in signature.lower()
+        assert "idealista" in signature.lower()
+
+    def test_a_real_listing_page_is_not_a_retired_page(self):
+        assert IdealistaConnector().retired_page_signature(_read_fixture()) is None
+
+    def test_an_empty_page_is_not_a_retired_page(self):
+        """The single most important negative. An empty/unparseable 200 is
+        the SOFT-BLOCK signature (D-047), not absence — conflating them would
+        let a rate-throttle wall withdraw a portal's whole inventory. This is
+        the trap that made milanuncios.py carry no signature at all."""
+        connector = IdealistaConnector()
+        assert connector.retired_page_signature("") is None
+        assert connector.retired_page_signature("<html><body></body></html>") is None
+
+    def test_a_bot_wall_page_is_not_a_retired_page(self):
+        """Idealista is known to serve a CAPTCHA/bot challenge (see the
+        connector's module docstring). It carries no listing data either —
+        and must still never be read as 'the listing is gone'."""
+        wall = (
+            "<html><head><title>idealista</title></head><body>"
+            "<h1>Vaya, parece que eres un robot</h1>"
+            "<p>Resuelve el captcha para continuar.</p>"
+            "</body></html>"
+        )
+        assert IdealistaConnector().retired_page_signature(wall) is None
+
+    def test_a_live_advert_quoting_the_phrase_is_not_retired(self):
+        """The one false-positive route the notice sentence leaves open: a
+        LIVE advert whose seller-written description quotes the phrase. The
+        real listing fixture with the notice sentence spliced into its
+        description must still be read as alive, because the page renders
+        its own price/title/description markup."""
+        live_with_phrase = _read_fixture().replace(
+            "</body>",
+            '<div class="adCommentsLanguage">Si ve que este anuncio ya no '
+            "está publicado, llámenos igualmente.</div></body>",
+        )
+        assert IdealistaConnector().retired_page_signature(live_with_phrase) is None
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "Lo sentimos, este anuncio ya no está publicado",
+            "lo sentimos, este anuncio ya no esta publicado",  # accents dropped
+            "Este inmueble ya no está disponible",
+            "El anuncio que buscas ya no está activo",
+        ],
+    )
+    def test_wording_and_accent_variants_all_match(self, phrase):
+        """The owner reads the accented Spanish; the DOM may or may not carry
+        the accents, and Idealista may reword. Matching is accent-folded and
+        covers the publicado/disponible/activo family — each of which is a
+        complete notice SENTENCE, never a fragment that could appear in prose
+        about something else."""
+        page = (
+            "<html><head><title>Viviendas venta. Viviendas alquiler. Pisos. "
+            f"Chalets — idealista</title></head><body><h1>{phrase}</h1>"
+            "</body></html>"
+        )
+        assert IdealistaConnector().retired_page_signature(page) is not None
+
+    def test_the_phrase_inside_a_script_tag_does_not_count(self):
+        """Only text a human in front of the browser could have READ counts
+        as the portal saying something. A JS string literal is not the portal
+        telling the owner anything."""
+        page = (
+            "<html><body><script>"
+            'var msg = "este anuncio ya no está publicado";'
+            "</script><p>Piso en venta</p></body></html>"
+        )
+        assert IdealistaConnector().retired_page_signature(page) is None
+
+
+class TestNormalizeRefusesNonAdvertPages:
+    def test_the_notice_page_raises_listing_unavailable(self):
+        """The retired notice must surface as ListingUnavailableError — the
+        codebase's established 'the source says this listing is gone' signal
+        (D-049) — so etl/capture.py can act on it, rather than as a generic
+        failure or (as before this fix) a successful empty listing."""
+        with pytest.raises(ListingUnavailableError) as excinfo:
+            IdealistaConnector().normalize(_raw(_read_retired_fixture()))
+        assert "retirado" in str(excinfo.value).lower()
+
+    def test_a_bot_wall_raises_plain_connector_error_not_unavailable(self):
+        """The distinction this whole design rests on. A page we cannot
+        identify is NO EVIDENCE (D-157): ConnectorError, which leaves the
+        listing untouched. It must NOT be a ListingUnavailableError, which
+        would withdraw it."""
+        wall = (
+            "<html><head><title>idealista</title></head><body>"
+            "<h1>Vaya, parece que eres un robot</h1></body></html>"
+        )
+        with pytest.raises(ConnectorError) as excinfo:
+            IdealistaConnector().normalize(_raw(wall))
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "no listing data at all" in str(excinfo.value)
+
+    def test_the_pre_fix_corruption_shape_is_now_refused(self):
+        """Regression pin for the bug D-159 documents.
+
+        Before this fix, a page with the site-wide <title> and no listing
+        markup normalized SUCCESSFULLY into a listing with every real field
+        None and `property_type='piso'` fabricated from the word "Pisos" in
+        that title — which is exactly what 26 production rows recorded. It
+        must now raise instead of returning anything at all."""
+        page = (
+            "<html><head><title>Viviendas venta. Viviendas alquiler. Pisos. "
+            "Chalets — idealista</title></head><body>"
+            "<p>Busca tu nueva casa en idealista.</p></body></html>"
+        )
+        with pytest.raises(ConnectorError):
+            IdealistaConnector().normalize(_raw(page))
+
+    def test_a_real_listing_still_normalizes(self):
+        """The guards must not cost a single real capture. The full fixture
+        goes through untouched."""
+        canonical = IdealistaConnector().normalize(_raw(_read_fixture(), "106387165"))
+        assert canonical.status == "active"
+        assert canonical.current_price is not None
+
+    def test_a_page_with_only_one_substantive_field_still_normalizes(self):
+        """The refusal threshold is ZERO substantive fields, not 'few'. A
+        thin-but-real advert (production has captures extracting 9 of 26
+        fields) must still be ingested — the measured gap between real pages
+        and non-pages is 9-vs-3, so the guard has the whole gap to spare and
+        must never encroach on it."""
+        thin = (
+            "<html><head><title>Viviendas venta. Viviendas alquiler. Pisos. "
+            "Chalets — idealista</title></head><body>"
+            '<div class="info-data-price"><span class="txt-bold">125.000</span>'
+            "</div></body></html>"
+        )
+        canonical = IdealistaConnector().normalize(_raw(thin))
+        assert canonical.current_price == Decimal(125000)

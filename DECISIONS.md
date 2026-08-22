@@ -122,6 +122,7 @@
 | [D-155](docs/decisions/D-155-idealista-fullscreen-gallery-source.md) | Idealista photos come from `fullScreenGalleryPics` (array order, skip `isPlan`), not the 3-item `multimediaCarrousel` preview. Flag `photo_gallery_truncated` under declared total. |
 | [D-156](docs/decisions/D-156-recapture-requeues-worklist-rows.md) | Re-capturing a cohort flips its `capture_worklist` rows from `captured` back to `pending` and stamps `requeued_at`/`requeue_reason`/`requeue_rank` — never a sixth `status` value, never a parallel queue. Only `captured` rows are eligible; `skipped`/`stale`/`failed`/`pending` are left alone. The cohort is a closed predicate enum resolved server-side and re-resolved on write against the confirmed count. |
 | [D-157](docs/decisions/D-157-evidence-not-time-for-withdrawal.md) | Time only nominates; only source evidence (HTTP 404/410 or identified retired page) may change a listing status. Soft block or unparseable 200 changes nothing. Mark, don't delete. |
+| [D-159](docs/decisions/D-159-idealista-retired-notice-evidence.md) | Idealista normalize() raises ListingUnavailableError on the positively-identified retired notice (→ withdrawn + evidence), and ConnectorError when a page has zero substantive fields. Never persist a listing from a non-advert page. |
 
 ## Product / candidate feed
 
