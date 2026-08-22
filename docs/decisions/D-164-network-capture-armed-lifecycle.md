@@ -3,7 +3,7 @@ id: D-164
 title: Network capture is armed durably and torn down unconditionally; response bodies are not redacted
 date: 2026-08-22
 group: Data / connectors
-rule: "Recorder teardown reads storage.session + getRegisteredContentScripts(), never a Map; persistAcrossSessions:false, respawn sweep, onRemoved, 5-min expiry. Bodies are not sanitised."
+rule: "Teardown unregisters AND messages the tab to uninstall the injected wrapper; durable state, not a Map; persistAcrossSessions:false, sweep, onRemoved, 5-min expiry. Bodies unsanitised."
 ---
 
 # D-164: Network capture is armed durably and torn down unconditionally; response bodies are not redacted
@@ -64,6 +64,40 @@ to `true`) and no sweep ever looked for a surviving `inmo-diag-*`.
    explicit "Detener grabación", reading the same durable state — an armed
    recorder is never invisible.
 
+   **Unregistering is only half of teardown, and the first cut of this PR
+   shipped only that half.** `unregisterContentScripts` governs FUTURE
+   injections; Chrome does not retract a script from a document that already
+   ran it. So every path above tore down the *registration* while the
+   already-injected MAIN-world wrapper stayed on `window.fetch` and the three
+   `XMLHttpRequest.prototype` methods for the life of the document, still
+   `postMessage`-ing summarised entries — URL, headers, up-to-20 KB response
+   bodies — onto the **page's own message bus, where any page script could read
+   them**. Nothing reached the database (`recordNetworkEntry` drops an entry
+   with no armed session), so it was not a storage leak; it was still "a
+   MAIN-world script wrapping `window.fetch`, indefinitely", reduced from
+   *every tab of the origin, forever, across restarts* to *one tab, until it
+   navigates* — and it made the `confirm()` untrue, which promises the owner in
+   as many words that recording stops at 5 minutes, on tab close, or on
+   "Detener grabación".
+   Therefore: **every teardown path also sends `NETWORK_RECORDER_DISARM` into
+   the tab** (`stopInjectedNetworkRecorder`, called unconditionally from
+   `disarmNetworkRecording` immediately after the unregister and before any
+   state is consulted, and once per tab from the sweep). The relay turns it
+   into the same `INMO_DIAG_NOT_ARMED` verdict the not-the-armed-tab path
+   already used, so the MAIN world runs its existing, idempotent `settleOff()`:
+   `fetch` and the XHR prototype restored, buffer dropped, install guard
+   released. The relay latches, so STOP → expiry → sweep is a no-op after the
+   first. Both halves are pinned by tests that fail without the fix —
+   the page half in `extension-network-recorder-wiring.test.ts` (the real relay
+   and the real MAIN recorder wired to each other, four teardown paths ×
+   `fetch`/`open`/`send`/`setRequestHeader` restored, nothing emitted
+   afterwards), the background half in
+   `extension-diagnostic-background.test.ts`.
+   Failure to deliver is not an error: a closed or navigated tab has no
+   document and therefore no wrapper, which is the desired end state, so a
+   rejected `tabs.sendMessage` is swallowed and never aborts the rest of
+   teardown.
+
 3. **Interception is confined to the armed tab by a handshake, because
    `registerContentScripts` has no per-tab filter.** The ISOLATED-world relay
    asks the worker `NETWORK_RECORDER_HELLO` at `document_start`; the worker
@@ -101,6 +135,21 @@ to `true`) and no sweep ever looked for a surviving `inmo-diag-*`.
      preceding segment is credential-shaped (`/api/v1/session/<jwt>/…`). Narrow
      on purpose — a listing id or a slug is the diagnostic.
 
+   **This is best-effort, and "URL credentials are stripped" is NOT a claim
+   this decision makes.** The residuals are known and deliberate, recorded here
+   so nobody later mistakes the list above for completeness:
+   - The five exact-match exceptions are load-bearing and the collisions are
+     real — `residencial` contains `sid`, `estate`/`real_estate` contains
+     `state`, `design` contains `sig`, `keyword` contains `key`,
+     `provincia_code` contains `code`. Keeping them exact is what stops a
+     Spanish portal's own filters being shredded, and it is also what lets
+     `private_key`, `signing_key`, `access_code`, `csrf`, `hmac` and `otp`
+     through in a query string. That trade is accepted, not overlooked.
+   - In a **body**, `JSON_PAIR_RE` matches string values only. `"password":
+     12345`, `"token": null` and `"auth": {"t": "…"}` are untouched.
+   The bound on all of it is the same one point 5 names: the 30-day purge —
+   with the caveat recorded there that nothing calls it yet.
+
 5. **Response bodies are NOT sanitised, and D-153's "credentials stripped
    before anything is sent" must not be read as covering them.** A body is
    truncated at 20 KB (always visibly) and scrubbed of the three credential
@@ -113,6 +162,23 @@ to `true`) and no sweep ever looked for a surviving `inmo-diag-*`.
    D-153 point 6), which covers `network` because it is a column on
    `extension_diagnostic` and the purge DELETEs the row — pinned by a real-DB
    test rather than left as an inference.
+
+   **That bound is not yet real, and this decision must not be read as saying
+   it is.** `purge_extension_diagnostics()` has **no caller anywhere** —
+   pre-existing since D-153, where the function was written but never
+   scheduled. The real-DB test proves the function does what it claims when
+   invoked; nothing invokes it. Until that changes, verbatim response bodies
+   containing personal data are retained **indefinitely**, and every place that
+   names the 30-day purge as the bound — this point, `network-recorder.js`'s
+   module header, the `extension_diagnostic` schema comment,
+   `dashboard/lib/db/extension-diagnostics.ts` — is describing an intended
+   bound, not an enforced one. This PR makes that reliance load-bearing (it is
+   the only bound on the new `network` column), so it is called out here rather
+   than left implicit.
+   **PR #707 (D-167) wires the caller**, once per `run_scheduler_loop`
+   iteration, outside the run lock. Deliberately not duplicated here: a second
+   caller would be redundant, and the two would have to be kept in step. When
+   #707 lands, this caveat can be deleted and the bound reads as stated.
    **Request bodies are never captured at all** (neither wrapper reads
    `init.body` nor `send()`'s argument). Good for privacy; it also means a
    POST's payload is invisible, so "what did the app *send* to that endpoint"
@@ -144,13 +210,23 @@ to `true`) and no sweep ever looked for a surviving `inmo-diag-*`.
    sites this repo keeps getting 403'd by (D-026 Sareb/Incapsula, D-027
    Altamira/Akamai). The install guard is a non-enumerable `Symbol.for` property
    whose key names neither the extension nor the vendor.
+   **What IS overridden, stated precisely**: `Function.prototype.name` and
+   `.length`, to `"fetch"`/`"open"`/`"send"`/`"setRequestHeader"` and the native
+   arities. Left alone the inferred names would be
+   `"wrappedFetch"`/`"wrappedOpen"`/`"wrappedSend"` — marker strings naming the
+   technique, no better than the `__inmoDiag*` expandos. (An earlier draft of
+   this point and of the in-code comment justified this by claiming the
+   alternative was a name of `""`; that was simply wrong — `var wrappedFetch =
+   function (…)` is assigned to a *variable*, so JS infers the name
+   `"wrappedFetch"`. The behaviour was right, the reason given for it was not.)
    **What is deliberately NOT done**: `Function.prototype.toString` is not
    overridden to report `[native code]`, so a page that stringifies
-   `window.fetch` can still see it is wrapped. Removing gratuitous markers is
-   hygiene; lying about the browser's own state to defeat detection is evasion,
-   and that is the line issue #1 §15 / D-026 / D-027 / D-033 draw. The wrapper
-   remains a pure passthrough — `originalFetch.apply(this, arguments)`, issued
-   once, nothing spoofed, nothing retried or replayed.
+   `window.fetch` sees the wrapper source and can tell. That is exactly where
+   the line sits: normalising `name` **removes an identifying string**, faking
+   `toString()` would **assert nativeness** — lying about the browser's own
+   state to defeat detection, which issue #1 §15 / D-026 / D-027 / D-033 rule
+   out. The wrapper remains a pure passthrough — `originalFetch.apply(this,
+   arguments)`, issued once, nothing spoofed, nothing retried or replayed.
 
 8. **A host grant the recording created is handed back on disarm; one it did
    not create is left alone.** `chrome.permissions.remove` appeared nowhere
@@ -206,11 +282,14 @@ and ignores ids that are not ours; `onRemoved` disarms; expiry disarms past
 worker respawn is still readable after it; the `NETWORK_RECORDER_HELLO` reply
 for the armed tab vs. any other; a forged/nonce-less/cross-origin `postMessage`
 is rejected by the relay; no `__inmoDiag*` own-property on `window` or on an
-`XMLHttpRequest`; the wrapper is anonymous; the MAIN recorder emits nothing
-before the verdict, flushes on ARMED and restores `fetch`/XHR on NOT_ARMED; the
-redaction cases for `#access_token=…`, a JWT path segment and
-`password`/`jwt`/`code`. All of that runs against a hand-written `chrome` stub
-in Node, or in jsdom.
+`XMLHttpRequest`, `name`/`length` normalised and `toString()` not faked; the
+MAIN recorder emits nothing before the verdict, flushes on ARMED and restores
+`fetch`/XHR on NOT_ARMED; **every teardown path sends
+`NETWORK_RECORDER_DISARM`, and the real relay driving the real MAIN recorder
+uninstalls the wrapper on each of them**; a half-registered pair is unregistered
+when arm fails; the redaction cases for `#access_token=…`, a JWT path segment
+and `password`/`jwt`/`code`. All of that runs against a hand-written `chrome`
+stub in Node, or in jsdom.
 
 What no test here can reach: a real MV3 service worker being evicted, a real
 browser restart, real `document_start` ordering against a page's own scripts, a
@@ -233,6 +312,15 @@ page):
    `await chrome.scripting.getRegisteredContentScripts()`
    The result must contain **no** id starting with `inmo-diag-`. That is the
    other half of B1.
+4b. **Then, in the RECORDED TAB'S OWN console — without reloading it** — check
+   `String(window.fetch)` and `String(XMLHttpRequest.prototype.open)`. Both must
+   read `function fetch() { [native code] }` / `function open() { [native code]
+   }` again. This is the H1 check and it is the one step 4 cannot substitute
+   for: unregistering governs future injections only, so the registry can be
+   clean while the wrapper this document already installed is still live,
+   posting entries onto the page's message bus. Repeat it after **each** of
+   step 5's teardowns too (tab close is the exception — there is no tab left to
+   inspect).
 5. Repeat steps 1–2, then **close the tab** instead of sending, and re-run the
    step-4 check. Then repeat again and simply **wait 6 minutes**, and re-run it.
    Both must come back clean.
@@ -255,5 +343,12 @@ block: `armNetworkRecording`, `disarmNetworkRecording`, `recordNetworkEntry`,
 `dashboard/__tests__/extension-network-recorder.test.ts`,
 `dashboard/__tests__/extension-network-recorder-wiring.test.ts`,
 `dashboard/app/api/extension/__tests__/diagnostic-persistence.integration.test.ts`,
+`browser-extension/background.js` `stopInjectedNetworkRecorder`,
 D-153, D-161 (the manifest bump that makes 0.19.0 reachable), D-026, D-027,
 D-033, issues #671, #684, PR #675.
+Also #708 — this PR and #704 both bumped the manifest to 0.19.0, which git
+auto-merges without conflict because it is the same edit to the same line, so
+one version ends up covering two independent changesets and the second one
+never reaches the owner (no CTA). Caught by hand here; #708 is the durable
+guard. And PR #707 (D-167), which wires the `purge_extension_diagnostics()`
+caller that point 5 depends on.

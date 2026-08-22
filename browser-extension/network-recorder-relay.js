@@ -25,6 +25,20 @@
  *     this file over `chrome.runtime` (out of band from the page); the
  *     background re-checks it too.
  *
+ *  3. **Teardown of the ALREADY-INJECTED wrapper** (#684 H1). Unregistering
+ *     the content scripts governs FUTURE injections only — it does nothing to
+ *     a document that already has the MAIN-world wrapper installed. Without
+ *     this, `window.fetch` and the three `XMLHttpRequest.prototype` methods
+ *     stayed wrapped for the life of the document after STOP / send / expiry
+ *     / a sweep, still `postMessage`-ing summarised entries (URLs, headers,
+ *     up-to-20 KB bodies) onto the page's own message bus where any page
+ *     script could read them — reduced from #684's "every tab, forever" but
+ *     the same shape, and flatly contrary to what the popup's confirm() tells
+ *     the owner. The background now sends `NETWORK_RECORDER_DISARM` to the
+ *     tab on every teardown path; this file turns that into the same
+ *     `INMO_DIAG_NOT_ARMED` verdict the not-the-armed-tab path already used,
+ *     which makes the MAIN world restore `fetch`/XHR and drop its buffer.
+ *
  *     HONEST LIMIT: this file passes the nonce on to the MAIN world by
  *     `window.postMessage`, because MAIN↔ISOLATED has NO page-invisible
  *     channel — isolated worlds share the DOM but not expandos, and a
@@ -55,8 +69,25 @@
     }
   }
 
+  // Set once the recording is over, by any route: the worker said this tab was
+  // never the armed one, the handshake failed closed, or the background sent
+  // NETWORK_RECORDER_DISARM. Latched, because teardown must be idempotent —
+  // STOP followed by the expiry alarm followed by a sweep is a normal sequence.
+  var disarmed = false;
+
+  /** Tell the MAIN world to uninstall its wrapper and drop its buffer. */
+  function goOff() {
+    if (disarmed) return;
+    disarmed = true;
+    tellMainWorld({ source: RELAY_SOURCE, type: "INMO_DIAG_NOT_ARMED" });
+  }
+
   function install(nonce) {
     window.addEventListener("message", function (event) {
+      // Stop forwarding the instant the recording ends. The MAIN world stops
+      // emitting too, but that is its decision to make — this side must not
+      // depend on it to keep entries out of a torn-down session.
+      if (disarmed) return;
       // Same-origin, same-window messages only — never relay anything from an
       // embedded cross-origin iframe.
       if (event.source !== window) return;
@@ -84,19 +115,35 @@
     tellMainWorld({ source: RELAY_SOURCE, type: "INMO_DIAG_ARMED", nonce: nonce });
   }
 
+  // Registered BEFORE the HELLO goes out, so a disarm that lands while the
+  // handshake is still in flight is not missed. `goOff` latches, so the
+  // `install()` below is skipped if that happens.
+  try {
+    chrome.runtime.onMessage.addListener(function (msg) {
+      if (msg && msg.type === "NETWORK_RECORDER_DISARM") goOff();
+      // No `return true`: the background does not wait for a reply, it only
+      // swallows `lastError` when the tab has no relay listening.
+    });
+  } catch (e) {
+    /* extension context already gone — the timeout in the MAIN world is the
+       remaining net */
+  }
+
   try {
     chrome.runtime.sendMessage({ type: "NETWORK_RECORDER_HELLO" }, function (response) {
       // A missing worker / missing response is treated exactly like "not armed":
       // fail CLOSED, so the recorder uninstalls rather than sitting installed
       // with nowhere to send.
       void chrome.runtime.lastError;
+      // A disarm beat the handshake — never arm after that.
+      if (disarmed) return;
       if (response && response.armed === true && response.nonce) {
         install(response.nonce);
       } else {
-        tellMainWorld({ source: RELAY_SOURCE, type: "INMO_DIAG_NOT_ARMED" });
+        goOff();
       }
     });
   } catch (e) {
-    tellMainWorld({ source: RELAY_SOURCE, type: "INMO_DIAG_NOT_ARMED" });
+    goOff();
   }
 })();

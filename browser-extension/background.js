@@ -3070,6 +3070,31 @@ async function unregisterNetworkScripts(tabId) {
 }
 
 /**
+ * Tell the recorder ALREADY INJECTED into `tabId` to uninstall itself.
+ *
+ * `unregisterNetworkScripts` governs FUTURE injections only — Chrome does not
+ * retract a content script from a document that already ran it. Without this
+ * message the MAIN-world wrapper stayed on `window.fetch` and the three
+ * `XMLHttpRequest.prototype` methods for the life of the document after every
+ * teardown path, still posting summarised entries (URLs, headers, up-to-20 KB
+ * response bodies) onto the page's own message bus, readable by any page
+ * script — the exact shape #684 exists to close, and a direct contradiction of
+ * what the popup's confirm() promises the owner.
+ *
+ * Best-effort by nature: the tab may be closed or navigated (the document, and
+ * with it the wrapper, is gone anyway), or never have had a relay. All of those
+ * are the desired end state, so every failure is swallowed.
+ */
+async function stopInjectedNetworkRecorder(tabId) {
+  if (tabId == null) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'NETWORK_RECORDER_DISARM' });
+  } catch {
+    /* no receiver / tab gone — the wrapper is gone with it */
+  }
+}
+
+/**
  * Register the MAIN-world fetch/XHR recorder + its ISOLATED-world relay for
  * `origin`, scoped to exactly that origin — never `<all_urls>`. The host
  * permission for `origin` must ALREADY be granted: `chrome.permissions.request`
@@ -3150,6 +3175,12 @@ async function armNetworkRecording(tabId, origin, grantedNow) {
     const rollback = await getArmedRecordings();
     delete rollback[tabId];
     await setArmedRecordings(rollback);
+    // …and don't leave HALF a pair behind either. `registerContentScripts` is
+    // not atomic across the two entries, and `unregisterNetworkScripts`'s own
+    // docstring anticipates exactly this state. The relay's fail-closed HELLO
+    // bounds it in practice, but leaving it registered contradicts this
+    // block's own unconditional-teardown principle (#684 M2).
+    await unregisterNetworkScripts(tabId);
     return { success: false, error: { message: err.message } };
   }
 
@@ -3201,6 +3232,9 @@ async function disarmNetworkRecording(tabId) {
   if (tabId == null) return null;
 
   await unregisterNetworkScripts(tabId);
+  // Unregistering stops the NEXT injection; this stops the one already running
+  // in the page. Both unconditional, both before any state is consulted.
+  await stopInjectedNetworkRecorder(tabId);
 
   let session = null;
   try {
@@ -3297,10 +3331,18 @@ async function sweepStrandedNetworkRecorders() {
       }
     }
   }
-  // Drop any buffer left behind by a session whose registration we just swept.
+  // Drop any buffer left behind by a session whose registration we just swept,
+  // and tell any STILL-LIVE document from that session to uninstall its
+  // wrapper — a stranded registration whose tab the owner never closed would
+  // otherwise keep `fetch` wrapped until it navigates. Usually a no-op (after a
+  // restart the document is long gone), but it is the same defect as #684 H1.
+  const sweptTabIds = new Set();
   for (const id of stranded) {
     const tabId = tabIdFromNetworkScriptId(id);
-    if (tabId != null) await chrome.storage.session.remove(bufferKey(tabId)).catch(() => {});
+    if (tabId == null || sweptTabIds.has(tabId)) continue;
+    sweptTabIds.add(tabId);
+    await chrome.storage.session.remove(bufferKey(tabId)).catch(() => {});
+    await stopInjectedNetworkRecorder(tabId);
   }
   return { swept: stranded };
 }

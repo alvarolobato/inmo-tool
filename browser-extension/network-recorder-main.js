@@ -42,11 +42,21 @@
  * WAF-protected sites this repo keeps getting 403'd by (D-026 Sareb/Incapsula,
  * D-027 Altamira/Akamai). The install guard is now a non-enumerable
  * Symbol-keyed property, T0 stays in the closure, per-XHR state lives in a
- * WeakMap instead of `__inmoDiag*` expandos, and the wrapper is anonymous.
+ * WeakMap instead of `__inmoDiag*` expandos, and no wrapper carries a name
+ * that identifies this extension.
+ *
+ * Stated precisely, because an earlier draft of this header overstated it:
+ * `Function.prototype.name` and `.length` ARE overridden, to "fetch"/"open"/
+ * "send" and the native arities. Left alone the inferred names would be
+ * "wrappedFetch"/"wrappedOpen"/"wrappedSend" — marker strings that name the
+ * technique. Blanking a marker is hygiene, the same as dropping the
+ * `__inmoDiag*` expandos.
  *
  * What is deliberately NOT done: `Function.prototype.toString` is not
  * overridden to report `[native code]`. A page that stringifies `window.fetch`
- * can still see it is wrapped. Faking that would be spoofing the browser's own
+ * can still see the wrapper source and tell it is wrapped. That is the
+ * difference that matters — normalising `name` removes an identifying string;
+ * faking `toString()` would ASSERT nativeness, spoofing the browser's own
  * state to defeat detection, which is the line issue #1 §15 / D-026 / D-027 /
  * D-033 draw and this feature does not cross. Removing gratuitous markers is
  * hygiene; lying about them is evasion.
@@ -327,9 +337,20 @@
         },
       );
     };
-    // An unnamed function expression assigned to a MEMBER expression gets
-    // name "" — more conspicuous than the real thing, not less. Match the
-    // shape of what it replaces; do not fake toString() (see the header).
+    // Normalise `name` and `length` to the native values. This IS faking two
+    // properties — an earlier version of this comment claimed the alternative
+    // was a name of "", which is simply wrong: `var wrappedFetch = function
+    // (…)` gets the INFERRED name "wrappedFetch", because it is assigned to a
+    // variable, not to a member expression. So the honest statement is: left
+    // alone, `window.fetch.name` would read "wrappedFetch" and hand any page
+    // script a marker string. Blanking that marker is the same hygiene as
+    // dropping the `__inmoDiag*` expandos.
+    //
+    // Where the line is: this removes an identifying string, it does not
+    // assert nativeness. `Function.prototype.toString` is still untouched, so
+    // `String(window.fetch)` shows the wrapper source and a page that looks
+    // can tell — see the header for why that stays true (issue #1 §15,
+    // D-026/D-027/D-033).
     try {
       Object.defineProperty(wrappedFetch, "name", { value: "fetch", configurable: true });
       Object.defineProperty(wrappedFetch, "length", { value: originalFetch.length, configurable: true });

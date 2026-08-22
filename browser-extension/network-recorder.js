@@ -48,7 +48,10 @@
  *     to show — an SPA's listing JSON that never reaches the DOM — so
  *     whatever personal data the portal returned about an owner reaches
  *     `extension_diagnostic.network` intact. The bound on that is
- *     `purge_extension_diagnostics()` (30 days), not this module.
+ *     `purge_extension_diagnostics()` (30 days), not this module — and that
+ *     function has NO CALLER yet (pre-existing since D-153; PR #707 wires one
+ *     into the scheduler loop). Until it lands the retention bound is intended,
+ *     not enforced. See D-164 point 5.
  *   - REQUEST bodies are never captured at all — neither wrapper reads
  *     `init.body` nor `send()`'s argument. Good for privacy; it also means a
  *     POST's payload is invisible in a diagnostic, so "what did the app SEND

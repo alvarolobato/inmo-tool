@@ -60,7 +60,8 @@ export interface DiagnosticDetectionBlock {
  * unambiguous credential shapes (a JSON value under a credential-shaped key, a
  * `Bearer …` literal, a bare JWT) — and otherwise verbatim, personal data
  * included. Nothing downstream re-redacts it; `purge_extension_diagnostics()`
- * is the bound. Request bodies are never captured.
+ * is the bound — though nothing calls it yet (PR #707 wires the caller; see
+ * D-164 point 5). Request bodies are never captured.
  */
 export interface NetworkEntry {
   url: string;

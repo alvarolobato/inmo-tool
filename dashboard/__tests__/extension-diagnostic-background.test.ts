@@ -340,6 +340,32 @@ describe("armNetworkRecording", () => {
     }
   });
 
+  // #684 M2: registerContentScripts is not atomic across the two entries, and
+  // unregisterNetworkScripts' own docstring anticipates the half-registered
+  // pair. Rolling back only the armed-registry entry left the sweep unable to
+  // see the survivor as stranded on THIS worker generation (the registry entry
+  // is gone, so it does sweep it — but only on the next respawn). Bounded in
+  // practice by the relay's fail-closed HELLO; still contrary to this PR's own
+  // unconditional-teardown principle.
+  it("unregisters a HALF-registered pair when registration fails, not just the registry entry", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    // The MAIN script lands, the relay throws — exactly the half-registered
+    // pair the docstring anticipates.
+    chrome.scripting.registerContentScripts.mockImplementationOnce(
+      async (scripts: Array<{ id: string }>) => {
+        chrome.__registered.push({ ...scripts[0] });
+        throw new Error("Duplicate script ID 'inmo-diag-9-relay'");
+      },
+    );
+
+    const res = await bg.armNetworkRecording(9, "https://realestate.hipoges.com");
+
+    expect(res.success).toBe(false);
+    expect(chrome.__registered).toHaveLength(0); // the survivor is gone too
+    expect(await bg.getNetworkRecordingState(9)).toMatchObject({ armed: false });
+  });
+
   it("leaves no phantom armed session behind when registration fails", async () => {
     const chrome = makeChromeMock({ hasPermission: true });
     const bg = loadBackground(chrome, makeFetchMock());
@@ -520,6 +546,118 @@ describe("disarmNetworkRecording", () => {
     await bg.armNetworkRecording(32, "https://realestate.hipoges.com", false);
     await bg.disarmNetworkRecording(32);
     expect(chrome.permissions.remove).not.toHaveBeenCalled();
+  });
+});
+
+// ── #684 H1 ───────────────────────────────────────────────────────────────
+// Unregistering the content scripts governs FUTURE injections only: Chrome
+// does not retract a script from a document that already ran it. The first cut
+// of this PR sent nothing into the armed tab and the relay registered no
+// runtime.onMessage listener at all, so after SEND_DIAGNOSTIC / STOP / expiry /
+// a sweep the MAIN-world wrapper stayed on window.fetch and the three
+// XMLHttpRequest.prototype methods for the life of the document, still posting
+// summarised entries (URL, headers, up-to-20 KB response bodies) onto the
+// page's own message bus where any page script could read them. Nothing reached
+// the DB — recordNetworkEntry drops it — but "a MAIN-world script wrapping
+// window.fetch indefinitely" is the exact shape #684 exists to close, and the
+// confirm() promises the owner the recording stops on all three of these.
+//
+// The page half — that the relay turns this message into an actual uninstall —
+// is pinned in extension-network-recorder-wiring.test.ts.
+describe("NETWORK_RECORDER_DISARM — every teardown path stops the ALREADY-INJECTED wrapper", () => {
+  function disarmsSentTo(chrome: ReturnType<typeof makeChromeMock>, tabId: number) {
+    const calls = chrome.tabs.sendMessage.mock.calls as unknown as Array<
+      [number, { type?: string } | undefined]
+    >;
+    return calls.filter(
+      ([id, msg]) => id === tabId && msg?.type === "NETWORK_RECORDER_DISARM",
+    );
+  }
+
+  it("SEND_DIAGNOSTIC — the recorder in the page stops even though the send is what the owner asked for", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(21, "https://realestate.hipoges.com");
+    chrome.tabs.sendMessage.mockClear();
+
+    await sendMessage(chrome, {
+      type: "SEND_DIAGNOSTIC",
+      tabId: 21,
+      url: "https://realestate.hipoges.com/x",
+      html: "<html></html>",
+      title: "t",
+      diagnostic: {},
+    });
+    await flush();
+
+    expect(disarmsSentTo(chrome, 21)).toHaveLength(1);
+  });
+
+  it("STOP_NETWORK_RECORDING — the button the confirm() names by name", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(22, "https://realestate.hipoges.com");
+    chrome.tabs.sendMessage.mockClear();
+
+    await sendMessage(chrome, { type: "STOP_NETWORK_RECORDING", tabId: 22 });
+    await flush();
+
+    expect(disarmsSentTo(chrome, 22)).toHaveLength(1);
+  });
+
+  it("expiry — an owner who arms and walks away", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(23, "https://realestate.hipoges.com");
+    chrome.tabs.sendMessage.mockClear();
+
+    await bg.expireStaleNetworkRecordings(Date.now() + 60 * 60 * 1000);
+
+    expect(disarmsSentTo(chrome, 23)).toHaveLength(1);
+  });
+
+  it("tab close — the document is usually gone, so this must not throw when there is no receiver", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await bg.armNetworkRecording(24, "https://realestate.hipoges.com");
+    chrome.tabs.sendMessage.mockImplementation(async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+
+    for (const listener of chrome.__tabRemovedListeners) listener(24);
+    await flush();
+
+    // Teardown completed regardless — a rejected sendMessage must never abort
+    // the unregister or strand the armed-registry entry.
+    expect(chrome.__registered).toHaveLength(0);
+    expect(await bg.getNetworkRecordingState(24)).toMatchObject({ armed: false });
+  });
+
+  // A stranded registration whose tab the owner never closed still has a live
+  // document with a live wrapper. Usually a no-op after a restart, but it is
+  // the same defect.
+  it("sweep — a stranded registration on a still-live document is told to uninstall", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+    await chrome.scripting.registerContentScripts([
+      { id: "inmo-diag-25-main" },
+      { id: "inmo-diag-25-relay" },
+    ]);
+    chrome.tabs.sendMessage.mockClear();
+
+    await bg.sweepStrandedNetworkRecorders();
+
+    // Once per TAB, not once per script id.
+    expect(disarmsSentTo(chrome, 25)).toHaveLength(1);
+  });
+
+  it("is sent unconditionally — even for a tab with no armed session and nothing registered", async () => {
+    const chrome = makeChromeMock({ hasPermission: true });
+    const bg = loadBackground(chrome, makeFetchMock());
+
+    await bg.disarmNetworkRecording(26);
+
+    expect(disarmsSentTo(chrome, 26)).toHaveLength(1);
   });
 });
 
