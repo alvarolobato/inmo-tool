@@ -46,6 +46,52 @@ If a site gives you a coded bucket (Fotocasa's `antiquity` field is "more than N
 
 Only set `discovers_full_inventory = True` (or rely on the default) when your connector's `discover()` actually covers everything active in its scope — full pagination through a complete result set, an API that returns the whole inventory, etc. If you can't honestly claim that, leave it `False`; your listings just won't auto-transition to `withdrawn` from absence alone until a future mechanism confirms removal some other way. See [docs/architecture/connectors.md](../architecture/connectors.md) for the framework-level detail.
 
+## The other withdrawal path: verifying a stale listing by asking the site (issue #643, D-157)
+
+A partial-coverage connector can never prove absence by sweeping — but it can
+ask about one listing at a time. That is what the orchestrator's
+**stale-verification pass** (`verify_stale_listings`) does, and it is why
+fotocasa (4.346 activos, 0 retirados nunca) has a withdrawal path at all.
+
+The rule that governs it, and everything else in the withdrawal family, is
+[D-157](../decisions/D-157-evidence-not-time-for-withdrawal.md): **elapsed time
+may only nominate a candidate; only evidence from the source may change a
+status.** Elapsed time on a partial, operator-paced ingest measures *our*
+scheduling, not the portal's inventory.
+
+To opt a connector in:
+
+1. Set `supports_stale_verification = True` — and only if
+   `fetch_detail(external_id)` makes a REAL request for that id. A connector
+   whose `fetch_detail()` re-reads a stash `discover()` filled this run
+   (`fotocasa_rental`, `pisos`) raises `ListingUnavailableError` for "not in
+   the last discover() payload", which during verification means "we never
+   looked", not "it is gone". Such a connector either overrides
+   `verify_listing()` with a real stored-URL fetch (pisos does) or stays
+   opted out (fotocasa_rental does, explicitly, against its parent's `True`).
+2. Implement `verify_listing()` — usually one line delegating to
+   `verify_via_fetch_detail()`, which reuses your own detail path, so
+   verification can never disagree with the fetch loop about what a page means
+   and an alive listing comes back fully refreshed.
+3. Optionally implement `retired_page_signature()` — **only** if the portal
+   publishes a marker on its own retired-listing page that you have seen live.
+   Never invent one: a false positive marks a live listing withdrawn. An
+   unparseable/empty 200 is the *soft-block* signature, never a retired page.
+   404/410 alone already works, so an absent signature costs nothing.
+
+What each of the three sale portals actually does, spiked live 2026-08-22
+against ids taken from production's oldest-`last_seen_at` actives:
+
+| portal | missing detail page | 200-served retired page? | signature |
+|--------|--------------------|--------------------------|-----------|
+| fotocasa | HTTP **404**, redirecting to the search page with `?propertyNotFound` | not observed | `retired_page_signature` on the `propertyNotFound` URL marker — a second line of defence in case that landing page is ever served with a 200, since its own `__initial_props__` would otherwise normalize as if it were the listing |
+| milanuncios | HTTP **404** (tiny redirect-to-home body) | not observed | **none, deliberately** — see the Milanuncios section below |
+| pisos | HTTP **404** (`<title>404</title>`) | not observed | no retired signature; instead a positive ALIVE marker (`features__feature`, 7 on a served listing, 0 on the 404 page), because pisos verification never reaches `normalize()` |
+
+The same spike is the best available argument for why a soft block must change
+nothing: of two stale milanuncios ads checked, one served the real page and the
+other served the "Pardon Our Interruption" GeeTest wall with HTTP 200.
+
 ## Skip-if-seen: the fetch-budget policy (issue #143)
 
 `etl/orchestrator.py`'s fetch loop used to call `fetch_detail()` for every id `discover()` returned, every run, unconditionally. That's invisible at ~30 ids and a blocker at ~1,500 (Fotocasa's zone-partitioned sweep, issue #65) — 1,500 ids at 3 req/min is ~8h against an hourly schedule. `_should_skip_fetch` (called once per discovered id, inside `run_connector`) decides whether a listing already known from a prior run is worth re-fetching this run.
@@ -118,7 +164,7 @@ Task 2.1 (#15) added Milanuncios specifically because it's a general classifieds
 - **`valueFormatted` vs. raw `value` in an attributes array is a real, repeatable trap.** Milanuncios' `ad.attributes` entries carry both a raw `value` (e.g. `"353"`) and a human-formatted `valueFormatted` (e.g. `"353 m²"`) for the same attribute. Using the formatted string for a numeric field silently produces `None` from a `Decimal()`/`int()` parse failure caught too broadly — this happened during implementation (`m2_built` came back empty on a real listing) before the fix (`milanuncios_mapping.py` has two lookup functions, `attribute_value` for display-oriented fields like floor, `attribute_numeric_value` for anything going into a numeric column). Check which shape you're reading before assuming a field parses cleanly.
 - **Cross-site syndication is a real, already-existing dedup case, not a hypothetical.** Some Milanuncios listings carry `origin.provider = "fotocasa_pro"` — Milanuncios and Fotocasa are both Adevinta-group properties and syndicate some professional listings between them. Task 2.2's dedup engine will see genuine cross-site duplicates on day one of running both connectors together, independent of any private-seller cross-posting behavior.
 
-**Issue #179 (2026-08-03) partially resolved this, issue #66's core case remains open.** A real soft-block page was captured live during #179's rate measurement — a GeeTest CAPTCHA challenge with a stable, checkable signature (`"Pardon Our Interruption"`, `noindex, nofollow`, `#captcha-box`; trimmed into `milanuncios_sample_soft_block_page.html`). `MilanunciosSoftBlockError` (a `ConnectorError` subclass — the circuit breaker still counts it identically) now fires specifically when that signature is present. What's still unresolved: a removed/expired ad page. Nobody has yet captured a real one to compare against — it may or may not share the soft-block signature above, and until a live sample exists, anything missing `__INITIAL_PROPS__` *without* the confirmed soft-block markers still raises the generic `ConnectorError`, folded into circuit-breaker error accounting the same conservative-but-imprecise way as before. Resolve once a connector has accumulated a real removed-ad hit to know what that page actually looks like, and consider mapping a confirmed removal to `listing_status_event` status `withdrawn` directly rather than counting it as a connector error at all.
+**Issue #179 (2026-08-03) partially resolved this, issue #66's core case remains open.** A real soft-block page was captured live during #179's rate measurement — a GeeTest CAPTCHA challenge with a stable, checkable signature (`"Pardon Our Interruption"`, `noindex, nofollow`, `#captcha-box`; trimmed into `milanuncios_sample_soft_block_page.html`). `MilanunciosSoftBlockError` (a `ConnectorError` subclass — the circuit breaker still counts it identically) now fires specifically when that signature is present. What's still unresolved: a removed/expired ad page. Nobody has yet captured a real one to compare against — it may or may not share the soft-block signature above, and until a live sample exists, anything missing `__INITIAL_PROPS__` *without* the confirmed soft-block markers still raises the generic `ConnectorError`, folded into circuit-breaker error accounting the same conservative-but-imprecise way as before. Resolve once a connector has accumulated a real removed-ad hit to know what that page actually looks like, and consider mapping a confirmed removal to `listing_status_event` status `withdrawn` directly rather than counting it as a connector error at all. **Still open as of issue #643 (2026-08-22)**: a fresh live spike found only that a *nonexistent* `/x/x-<id>.htm` answers a clean HTTP 404 — which D-049 already handles — and that one of two genuinely stale ads served the CAPTCHA wall. No 200-served "anuncio caducado" page has been captured yet, so milanuncios deliberately ships **no** `retired_page_signature` (D-157): a signature built on "the props are missing" would map a rate-throttle straight to `withdrawn`.
 
 **Issue #179 rate finding, worth knowing before touching this connector's pacing again**: `rate_limit_per_minute` was 20 by analogy to a Fotocasa default that no longer exists; production was tripping the circuit breaker every run. Measured live rather than guessed: 20/min AND 6/min both fail identically (~5 `fetch_detail` successes, then a soft-block lasting 60+ minutes) — a 3.3x slower pace made zero measurable difference, ruling out the entire 6-20/min range but not pinning the exact safe floor. Shipped at `rate_limit_per_minute = 2`, deliberately below Fotocasa's independently-measured 3, not equal to it. Full write-up: `docs/architecture/connectors.md`'s "Milanuncios: a worked example of measure, don't copy" section and [D-017](../decisions/D-017-milanuncios-rate-measurement.md).
 

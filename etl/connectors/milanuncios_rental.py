@@ -208,6 +208,16 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # parent class keeping its own value unchanged.
     discovers_full_inventory = False
 
+    # Issue #643: stale-verification ON, declared explicitly for the same
+    # "never inherit a per-connector risk property silently" reason as the
+    # two attributes around it. It happens to match the parent's value, and
+    # that is fine here: this class does not override `fetch_detail()`, so
+    # the parent's self-sufficient id-addressable detail path (the actual
+    # precondition) applies verbatim. Verification runs through this class's
+    # own `rate_limit_per_minute = 1` and its own circuit breaker, so the
+    # rental source can never spend the sale source's budget.
+    supports_stale_verification = True
+
     # Skip-if-seen stays OFF here (0 = the base `Connector` default: always
     # re-fetch), stated explicitly rather than inherited — Opus review,
     # PR #225. Exactly the same reasoning as `discovers_full_inventory`

@@ -130,6 +130,7 @@ from etl.connectors.base import (
     SearchUrlGrammar,
     SoftBlockError,
     Throttle,
+    VerificationOutcome,
 )
 from etl.connectors.extraction import first_present, text_to_int
 from etl.connectors.geography import (
@@ -484,6 +485,17 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
+    # Issue #643: opted in. `fetch_detail()` resolves the ad from the trailing
+    # numeric id alone (no discover() stash), and a 200 without
+    # `__INITIAL_PROPS__` raises MilanunciosSoftBlockError /ConnectorError
+    # from `_extract_initial_props` — so a CAPTCHA wall can never be
+    # normalized as a live ad, and can never be read as "gone" either.
+    # Verified live on 2026-08-22 against two of production's oldest-
+    # `last_seen_at` actives: one served the real ad (200, canonical slug),
+    # the other served exactly that "Pardon Our Interruption" wall — the
+    # single best argument for why a soft block must change nothing.
+    supports_stale_verification = True
+
     # Issue #478: an owner-pinned milanuncios search URL is this connector's
     # recall source for a profile. Since Phase 5 (D-101) discover() consumes it
     # (`scope.override_url`) as its entry page. NOTE: this is the SALE connector
@@ -740,6 +752,26 @@ class MilanunciosConnector(Connector):
             source=self.name,
             raw={"url": response.url, "props": props},
         )
+
+    # Issue #643: NO retired-page signature, deliberately. Spiked live on
+    # 2026-08-22: a nonexistent /x/x-<id>.htm answers HTTP 404 (a tiny
+    # redirect-to-home body), which D-049 already turns into
+    # `ListingUnavailableError` — so 404/410 carries the whole signal and no
+    # extra marker is needed. What milanuncios does NOT have is a confirmed
+    # 200-served "anuncio caducado" page: docs/skills/connectors.md has
+    # tracked that gap since issue #66/#179, nobody has captured one, and the
+    # only 200-without-`__INITIAL_PROPS__` page ever captured here is the
+    # GeeTest bot wall. Inventing a signature out of "the props are missing"
+    # would therefore map a rate-throttle straight to `withdrawn`. Left at
+    # the base `None` until a real retired page is captured.
+
+    def verify_listing(
+        self, external_id: str, url: str | None, throttle: Throttle
+    ) -> VerificationOutcome:
+        # `url` unused: the ad resolves from the numeric id alone, so this is
+        # the ordinary detail fetch and an alive ad is fully refreshed.
+        # Inherited as-is by MilanunciosRentalConnector.
+        return self.verify_via_fetch_detail(external_id, throttle)
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
         props = raw.raw["props"]

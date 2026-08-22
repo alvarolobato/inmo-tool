@@ -670,6 +670,47 @@ class ListingUnavailableError(ConnectorError):
     """
 
 
+@dataclass(frozen=True)
+class VerificationOutcome:
+    """The result of re-reading ONE already-known listing to obtain evidence
+    about whether it still exists at the source (issue #643).
+
+    The whole point of the stale-verification pass is that elapsed time is
+    evidence of NON-OBSERVATION, not of absence: it may nominate a listing
+    for a second look, but only the source's own answer may change the
+    listing's status. So this type deliberately has exactly two states —
+    both of them *positive* findings — and there is no third "probably
+    gone" value:
+
+    * ``gone``  — the source positively said the listing is not there:
+      an HTTP status in `LISTING_GONE_HTTP_STATUSES` (surfaced as
+      `ListingUnavailableError`, D-049), or a per-connector
+      `retired_page_signature` match on a 200 that is unambiguously the
+      site's own "este anuncio ya no está disponible" page.
+    * ``alive`` — the source served the listing's real detail page and the
+      connector parsed it.
+
+    Everything else — a soft block (D-047), a timeout, a 5xx, an
+    unparseable or empty 200 — is NOT a `VerificationOutcome` at all: the
+    connector raises (`SoftBlockError` / `ConnectorError`), the orchestrator
+    records the attempt, and **nothing about the listing changes**. Absence
+    of evidence never becomes evidence of absence.
+
+    `evidence` is the human-readable citation persisted to
+    `listing_status_event.evidence` when a withdrawal is recorded, so an
+    operator (and a future reviewer) can always answer "what did we actually
+    observe?" without re-deriving it. `canonical`, when present, is the
+    freshly-normalized listing the verification fetch already produced —
+    the orchestrator upserts it, so an alive verification self-heals the
+    listing's data (price, photos, timestamps) rather than merely bumping a
+    clock.
+    """
+
+    state: Literal["gone", "alive"]
+    evidence: str
+    canonical: CanonicalListingVersion | None = None
+
+
 class Connector(ABC):
     """Base class every site connector subclasses.
 
@@ -855,6 +896,144 @@ class Connector(ABC):
     # re-tried forever; revisit with a give-up counter if that cost ever
     # matters for a larger connector.
     backfills_missing_reference_code: bool = False
+
+    # Issue #643: may the orchestrator's stale-verification pass re-read this
+    # connector's already-known listings to find out whether they are still
+    # there? OFF by default, and opting in is a deliberate per-connector act,
+    # because the pass is the ONLY mechanism in the codebase allowed to
+    # withdraw a listing on a single observation — everything else needs
+    # `_WITHDRAWAL_THRESHOLD` consecutive misses of a full-inventory sweep.
+    #
+    # Two hard preconditions before setting this True:
+    #
+    # 1. `verify_listing()` must obtain its answer from a REAL request for
+    #    THIS listing. A connector whose `fetch_detail()` reads a stash that
+    #    `discover()` filled earlier in the same run (fotocasa_rental, pisos)
+    #    raises `ListingUnavailableError` for "not in the last discover()
+    #    payload" — which during verification would mean "we never looked",
+    #    not "it is gone", and would mass-withdraw live inventory. Such a
+    #    connector must either override `verify_listing()` with a real
+    #    stored-URL fetch (pisos does) or stay opted out (fotocasa_rental).
+    # 2. A 200 that is NOT the listing's real page must never reach
+    #    `normalize()` as if it were: the connector's own soft-block
+    #    detection has to raise `SoftBlockError`/`ConnectorError` first
+    #    (fotocasa/milanuncios both do, via their `__initial_props__`
+    #    marker check).
+    #
+    # Deliberately NOT set for capture-only portals (`supports_discovery =
+    # False`: idealista/aliseda/altamira/hipoges) — background fetching them
+    # is what D-081/D-026/D-027 exist to prevent; their evidence path is
+    # issue #645, not this one.
+    supports_stale_verification: bool = False
+
+    def retired_page_signature(
+        self, html: str, final_url: str | None = None
+    ) -> str | None:
+        """A POSITIVELY identified "this listing was retired" marker, or None.
+
+        Issue #643. Some portals answer a request for a removed listing with
+        an HTTP 200 carrying their own "anuncio caducado / ya no está
+        disponible" page, or redirect to a not-found landing page while
+        keeping a 200. When a connector can recognise that page *by a marker
+        the site itself puts there*, this returns a short Spanish citation of
+        what was seen — which becomes `listing_status_event.evidence`.
+
+        Default: None — "I have no reliable way to tell". That is the honest
+        answer for most portals and it costs nothing: an HTTP 404/410 (D-049)
+        already proves absence on its own, so a connector without a signature
+        still verifies correctly, just via the status code alone.
+
+        **Never invent one.** A false positive here marks a live listing
+        withdrawn, which is precisely the failure the whole design is built
+        to avoid. In particular an unparseable, empty or unexpected 200 is
+        NOT a retired page — that is the soft-block signature (D-047), and
+        conflating the two would let a rate-throttle wall wipe a source's
+        inventory. Return None and let the listing stay unverified.
+
+        `final_url` is the URL the request actually landed on after
+        redirects, when the connector has it — some portals express "not
+        found" as a redirect to a search page rather than as page content
+        (fotocasa's `?propertyNotFound`, observed live 2026-08-22).
+        """
+        return None
+
+    def verify_listing(
+        self, external_id: str, url: str | None, throttle: Throttle
+    ) -> VerificationOutcome:
+        """Re-read ONE already-known listing and report what the source said.
+
+        Issue #643, the evidence half of "time nominates, evidence decides".
+        Called by `etl.orchestrator.verify_stale_listings` for connectors
+        that set `supports_stale_verification = True`, at most
+        `etl.stale_verification_budget_per_run` times per connector per run,
+        always through the connector's own shared rate limiter and circuit
+        breaker.
+
+        Contract:
+
+        * return `VerificationOutcome("gone", ...)` only on a positive
+          removal signal;
+        * return `VerificationOutcome("alive", ..., canonical)` when the real
+          detail page came back and normalized;
+        * raise `ListingUnavailableError` (D-049) for HTTP 404/410 — the
+          orchestrator maps it to `gone` with the exception text as evidence;
+        * raise `SoftBlockError` for a rate-throttle wall and
+          `ConnectorError` for anything else indeterminate. Both mean "no
+          evidence": the orchestrator changes nothing about the listing.
+
+        `url` is the listing's stored `listing.url`, for connectors whose
+        detail page can't be addressed from `external_id` alone. It may be
+        None; a connector that needs it must raise `ConnectorError` rather
+        than guess.
+
+        Default: `NotImplementedError`, guarding the opt-in — a connector
+        that flips `supports_stale_verification` without implementing this
+        fails loudly on the first attempt instead of silently doing nothing.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement verify_listing(); "
+            "set supports_stale_verification = False or implement it "
+            "(see Connector.verify_listing, issue #643)"
+        )
+
+    def verify_via_fetch_detail(
+        self, external_id: str, throttle: Throttle
+    ) -> VerificationOutcome:
+        """`verify_listing` for connectors whose `fetch_detail()` is self-sufficient.
+
+        Issue #643. Reuses the connector's own detail path verbatim — same
+        URL construction, same headers, same soft-block detection, same
+        `normalize()` — so verification can never disagree with the fetch
+        loop about what a page means, and an alive listing comes back fully
+        refreshed rather than merely re-timestamped.
+
+        Only safe for a connector whose `fetch_detail(external_id)` makes a
+        real request for that id without depending on state a `discover()`
+        call left behind this run — see `supports_stale_verification`'s
+        precondition 1 for the connectors this excludes.
+
+        The retired-page check runs BEFORE `normalize()` on purpose: a
+        not-found landing page can still parse into a plausible-looking
+        (but wrong) canonical listing, so it must be intercepted while the
+        raw page is still identifiable as such.
+        """
+        raw = self.fetch_detail(external_id, throttle=throttle)
+        payload = raw.raw if isinstance(raw.raw, dict) else {}
+        html = payload.get("html")
+        final_url = payload.get("url")
+        signature = self.retired_page_signature(
+            html if isinstance(html, str) else "",
+            final_url if isinstance(final_url, str) else None,
+        )
+        if signature is not None:
+            return VerificationOutcome("gone", signature)
+        canonical = self.normalize(raw)
+        where = final_url if isinstance(final_url, str) and final_url else external_id
+        return VerificationOutcome(
+            "alive",
+            f"HTTP 200 con ficha completa y parseable en {where}",
+            canonical,
+        )
 
     def discovered_prices(self) -> dict[str, Decimal]:
         """Prices observed as a side effect of the most recent discover() call.

@@ -226,6 +226,17 @@ class FotocasaRentalConnector(FotocasaConnector):
     # property silently" rule the other explicit attributes here follow.
     min_refetch_interval_seconds = 0
 
+    # Issue #643: stale-verification stays OFF, declared explicitly rather
+    # than inherited — FotocasaConnector turns it ON, and inheriting that
+    # here would be actively dangerous. This connector's `fetch_detail()`
+    # makes no request at all: it re-reads the record `discover()` stashed
+    # this run, and raises `ListingUnavailableError` when the id is not in
+    # that stash. During a verification pass there IS no fresh stash, so
+    # every single nominated listing would report "gone" and the source's
+    # whole inventory would be withdrawn on evidence we never gathered.
+    # Re-enable only behind a real stored-URL fetch (the shape pisos uses).
+    supports_stale_verification = False
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """The resolved geography slug IS the dedup/coverage key — two
         scopes resolving to the same city hit the identical rental search

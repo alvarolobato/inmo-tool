@@ -292,6 +292,28 @@
   requires_restart: []
   components: [dashboard]
 
+# Verificación de anuncios desfasados (issue #643). El tiempo SOLO nomina
+# candidatos; únicamente la respuesta del portal cambia el estado de un anuncio.
+- key: etl.stale_verification_budget_per_run
+  env: ETL_STALE_VERIFICATION_BUDGET_PER_RUN
+  type: int
+  sensitive: false
+  default: 10
+  section: "ETL"
+  description: 'Cuántos anuncios desfasados puede volver a leer cada conector adherido (fotocasa, milanuncios, milanuncios_rental, pisos) al final de cada ejecución, para averiguar si siguen publicados (issue #643). La pasada se ejecuta la última, con el presupuesto de peticiones que haya sobrado del trabajo real de descubrimiento/descarga, y siempre dentro del propio límite de velocidad y del cortacircuitos del conector. Deliberadamente pequeño: un anuncio vivo se refresca y uno no verificable rota al final de la cola, así que el atasco se drena poco a poco en vez de en una ráfaga (que es justo lo que activa la mitigación antibots de los portales). 0 apaga la verificación por completo sin tocar la configuración de ningún conector. Nunca se retira un anuncio por tiempo: hace falta un HTTP 404/410 o una firma de página retirada positivamente identificada.'
+  requires_restart: [etl]
+  components: [etl]
+
+- key: etl.stale_verification_min_age_hours
+  env: ETL_STALE_VERIFICATION_MIN_AGE_HOURS
+  type: int
+  sensitive: false
+  default: 168
+  section: "ETL"
+  description: 'Horas que un anuncio activo debe llevar sin ser observado antes de poder ser NOMINADO para verificación (issue #643). Es solo un filtro de nominación: cruzar este umbral no cambia ningún estado, no escribe ningún evento y no es evidencia de nada — el tiempo transcurrido mide nuestra propia agenda de rastreo, no el inventario del portal. Por defecto 168h (7 días), la misma banda que el dashboard ya muestra como "desfasado" (D-039) y el corte de la cohorte que motivó la incidencia.'
+  requires_restart: [etl]
+  components: [etl]
+
 # Temporary diagnostic HTML retention (issue #654, D-150). Independent of the
 # calibration-based retention D-146 already provides — this lever exists
 # purely so an operator can pull one real captured HTML sample for a
