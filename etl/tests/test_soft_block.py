@@ -328,19 +328,39 @@ class TestChallengeCaptureChangesNothing:
         assert after[0] == "active", "a challenge must never withdraw a listing"
         assert events == 0
 
-    def test_the_challenge_html_is_retained_as_evidence(self, pg_conn):
+    def test_a_classified_challenge_does_NOT_retain_its_html(self, pg_conn):
+        """Retention is for pages the system could not account for, and this
+        one is accounted for: `error_msg` records which phrases matched.
+
+        The obvious implementation — "no fields, so keep the page" — gets
+        this backwards and would hoard every wall we already understand. It
+        is self-correcting in the right direction: if the portal rewords the
+        wall, the phrase table stops matching, the page stops being
+        classified, and it lands in the unexplained bucket that IS retained
+        — so the sample needed to repair the table appears exactly when the
+        table is broken, and never while it works.
+        """
         capture_id = self._insert_pending(pg_conn, CHALLENGE_HTML)
         capture.process_pending_captures(pg_conn)
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+                "SELECT status, html, error_msg FROM extension_capture WHERE id = %s",
+                (capture_id,),
             )
-            html = cur.fetchone()[0]
-        assert html is not None
-        assert "muchas peticiones" in html
+            status, html, error_msg = cur.fetchone()
+        assert status == "blocked"
+        assert html is None, "a CLASSIFIED page is not an anomaly — do not hoard it"
+        assert "reto anti-bot" in error_msg, (
+            "dropping the page is only defensible because the classification "
+            "itself is recorded"
+        )
 
-    def test_an_anomalous_capture_retains_its_html(self, pg_conn):
-        """Issue #692: retain the anomalies, discard the successes.
+    def test_an_UNEXPLAINED_capture_retains_its_html(self, pg_conn):
+        """Issue #692: retain the pages the system could not ACCOUNT FOR.
+
+        The contrast with the test above is the whole rule: a challenge is
+        classified and dropped; this page is not classified by anything, so
+        it is kept.
 
         Without this, a field-less page of an unrecognised shape is
         unclassifiable forever after — which is exactly how the 33 idealista

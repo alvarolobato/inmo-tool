@@ -760,7 +760,7 @@ def _process_one(
     # the queue, `requeue_rank` and all.
     challenge = challenge_page_signature(html)
     if challenge is not None:
-        _mark_blocked(conn, capture_id, url, challenge, connector.name, html)
+        _mark_blocked(conn, capture_id, url, challenge, connector.name)
         return False
 
     raw = RawListing(
@@ -839,8 +839,17 @@ def _process_one(
     # effect on the operator's next processed capture, no code change either
     # direction. See D-150 for exactly how to turn it on/off.
     #
-    # Issue #692: a THIRD retention path — retain the ANOMALIES, discard the
-    # successes. Blanket retention is unaffordable (D-150: ~290 MB of pages
+    # Issue #692: a THIRD retention path — retain the pages the system COULD
+    # NOT ACCOUNT FOR, and only those.
+    #
+    # Not "retain whatever parsed to nothing": a *classified* field-less page
+    # is not an anomaly. A recognised retirement notice (#691) and a
+    # recognised challenge both take their own outcome paths above and both
+    # drop their HTML, because we already know what they were and the
+    # evidence is recorded. The retained set should read as "pages we cannot
+    # explain" — if it ever fills up with pages we DO have a classifier for,
+    # that means the classifier should be handling them, not that storage
+    # should grow. Blanket retention is unaffordable (D-150: ~290 MB of pages
     # against a 204 MB database), which is why it is off for idealista. But
     # that is exactly why the 33 field-less idealista rows this work started
     # from are now permanently unclassifiable: a confirmed withdrawal notice
@@ -928,12 +937,7 @@ def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
 
 
 def _mark_blocked(
-    conn,
-    capture_id: int,
-    url: str,
-    signature: str,
-    connector_name: str,
-    html: str,
+    conn, capture_id: int, url: str, signature: str, connector_name: str
 ) -> None:
     """Record a capture that was an anti-bot CHALLENGE, not a listing (#692).
 
@@ -955,18 +959,24 @@ def _mark_blocked(
     * **No `listing_status_event`.** Nothing about the advert's status was
       observed.
 
-    The HTML **is** retained regardless of the retention config: a challenge
-    page is ~2 KB of interstitial, costs nothing to keep, and is the evidence
-    that lets a human confirm the classification was right (and correct the
-    phrase table if the portal rewords the wall).
+    The HTML is **dropped**, like any other classified outcome. Retention is
+    reserved for pages the system could not account for, and this one is
+    accounted for: `error_msg` records exactly which phrases matched. Keeping
+    the page would add nothing we do not already know.
+
+    This is self-correcting in the direction that matters. If the portal ever
+    REWORDS its wall, the phrase table stops matching, the page stops being
+    classified — and it lands in the unexplained bucket, which *is* retained.
+    The sample needed to repair the phrase table therefore appears exactly
+    when the phrase table is broken, and never while it is working.
     """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE extension_capture "
             "SET status = 'blocked', error_msg = %s, connector_name = %s, "
-            "    fields_extracted = 0, processed_at = NOW(), html = %s "
+            "    fields_extracted = 0, processed_at = NOW(), html = NULL "
             "WHERE id = %s",
-            (signature, connector_name, html, capture_id),
+            (signature, connector_name, capture_id),
         )
     conn.commit()
     logger.warning(

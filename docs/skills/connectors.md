@@ -134,11 +134,20 @@ away a correctly-matched DataDome marker and the batch never halted. A
 signature for a wordy interstitial must set `selfCorroborated: true` and carry
 its own, narrower corroboration instead.
 
-**Diagnosability**: a capture whose `fields_extracted` is at or below 3 keeps
-its HTML regardless of the retention config (D-150). Without this, a
-field-less page is unclassifiable forever after — which is how 33 production
-Idealista rows ended up byte-identical in the database, one of them a
-confirmed withdrawal and the rest unknowable.
+**Diagnosability — retain what you cannot explain**: a capture at or below
+its portal's measured field-count floor (`_ANOMALY_FIELD_FLOOR`, per-portal,
+default 0) keeps its HTML regardless of the retention config (D-150). Without
+this, a field-less page is unclassifiable forever after — which is how 33
+production Idealista rows ended up byte-identical in the database, one of them
+a confirmed withdrawal and the rest unknowable.
+
+The rule is *unexplained*, not *empty*. A **classified** outcome — a
+recognised retirement notice, a recognised challenge — **drops** its HTML: we
+know what it was and the evidence is already recorded. Only pages nothing
+could account for are kept. Get this backwards and retention fills with pages
+you already understand; and note it is self-correcting the right way round —
+a reworded wall stops being classified, so the sample you need to fix the
+phrase table shows up exactly when the table is broken.
 
 Two things to get right when opting a connector in:
 

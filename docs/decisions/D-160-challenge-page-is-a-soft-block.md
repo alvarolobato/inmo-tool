@@ -93,10 +93,23 @@ hoped away.
    the owner. Nothing solves, bypasses, retries, auto-clicks or disguises
    anything (issue #1 §15, D-026/D-027/D-033).
 
-6. **Retain the anomalies, discard the successes.** A capture whose
-   `fields_extracted` is at or below the measured floor of 3 keeps its HTML
-   regardless of the retention config, as does a challenge page and a capture
-   whose `normalize()` raised.
+6. **Retain the pages the system could not ACCOUNT FOR — and only those.**
+   Not "retain whatever parsed to nothing". A *classified* field-less page is
+   not an anomaly: a recognised retirement notice (D-159) and a recognised
+   challenge both drop their HTML, because we already know what they were and
+   the evidence is recorded (`listing_status_event.evidence` and
+   `extension_capture.error_msg` respectively). What is retained is a capture
+   at or below its portal's **measured, per-portal** field-count floor
+   (`{"idealista": 3}`, default 0) — i.e. a page nothing could explain.
+
+   The retained set should read as *"pages we cannot explain"*. If it ever
+   fills up with pages we do have a classifier for, that means the classifier
+   should be handling them, not that storage should grow.
+
+   This is self-correcting in the direction that matters: if a portal rewords
+   its wall, the phrase table stops matching, the page stops being classified,
+   and it lands in the retained bucket — so the sample needed to repair the
+   table appears exactly when the table is broken, and never while it works.
 
 **Alternatives rejected**:
 
@@ -126,6 +139,18 @@ hoped away.
 - **Leaving the capture row `pending` instead of adding `blocked`.** The poll
   query would re-process it forever. `blocked` is terminal for the capture;
   the page returns via its still-pending *worklist* row.
+
+- **Retaining every field-less page ("no fields → keep it").** The obvious
+  implementation, and backwards: it hoards every withdrawal notice and every
+  wall we already understand, while the framing that matters is *unexplained*,
+  not *empty*. Pinned by tests on both sides — a classified challenge must NOT
+  retain, an unclassified field-less page must.
+
+- **A single global anomaly floor of 3.** Tried first; it correctly broke
+  `test_calibrated_hipoges_capture_now_nulls_html`. The 3 was measured on
+  idealista's markup and claiming it for another portal is unmeasured — it
+  would either miss that portal's anomalies or hoard its thin-but-real
+  adverts. The floor is per-portal, defaulting to 0.
 
 - **Detecting the challenge by absence (zero fields, zero photos).** The
   correlation is perfect in the data and still rejected, for the same reason
