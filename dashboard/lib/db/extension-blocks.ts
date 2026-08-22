@@ -18,18 +18,18 @@
  *
  * `recordBlockEpisode` uses the write pool (@/lib/db-write); never import
  * this from a client component. `getRecentBlockEpisodes` uses the read-only
- * pool (@/lib/db), same split as every other data-health reader.
+ * pool (@/lib/db), same split as every other data-health reader — and returns
+ * one row PER PORTAL, not a flat recent list; see its own docstring.
  */
 
 import { query } from "@/lib/db";
 import { sql } from "@/lib/db-write";
 import type { ExtensionBlockEpisode } from "@/lib/data-health";
 
-/** How many recent episodes this returns — enough history to spot a
- * recurring offender without an unbounded read. Estado only ever reads the
- * newest per portal out of it (activeBlocksByPortal); the full chronology is
- * Actividad's own query, not this one. */
-const RECENT_LIMIT = 20;
+/** How many PORTALS this returns a latest-episode row for — a bound on the
+ * read, not on history. See the DISTINCT ON in getRecentBlockEpisodes for why
+ * this is a portal count and not an episode count. */
+const RECENT_PORTALS = 20;
 
 /**
  * Insert one block-episode row. Portal + signature are free-text ids the
@@ -48,14 +48,35 @@ export async function recordBlockEpisode(
   );
 }
 
-/** The most recent block episodes, newest first, bounded to RECENT_LIMIT. */
+/**
+ * The latest block episode PER PORTAL, newest portal first.
+ *
+ * This used to be a flat `ORDER BY detected_at DESC LIMIT 20` over all
+ * episodes, which was fine while the only consumer was a history table on
+ * `/etl/salud`. #642 P2 changed what it feeds: `activeBlocksByPortal` derives
+ * a per-portal STATE from it (the Estado aviso chip, the Fuentes/<portal>
+ * banner), and a flat top-20 makes that state silently wrong — one portal
+ * challenged 20 times in an hour pushes every OTHER portal's still-active
+ * block off the end, and its chip just disappears. A bad state derivation
+ * that looks healthy is worse than no chip at all (PR #710 review).
+ *
+ * DISTINCT ON gives the derivation exactly what it consumes — one row per
+ * portal, the newest — so the answer no longer depends on episode volume. The
+ * bound is now on the number of portals, which is small and bounded by how
+ * many capture sources exist. Full chronology stays Actividad's own query
+ * (#706); this was never it.
+ */
 export async function getRecentBlockEpisodes(): Promise<ExtensionBlockEpisode[]> {
   const res = await query(
     `SELECT portal, signature, detected_at
-       FROM extension_block_episode
+       FROM (
+         SELECT DISTINCT ON (portal) portal, signature, detected_at
+           FROM extension_block_episode
+          ORDER BY portal, detected_at DESC
+       ) latest
       ORDER BY detected_at DESC
       LIMIT $1`,
-    [RECENT_LIMIT],
+    [RECENT_PORTALS],
   );
   return res.rows.map((row) => ({
     portal: String(row[0]),

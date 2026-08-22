@@ -32,8 +32,11 @@ export const dynamic = "force-dynamic";
  * runs inline, server-side — no more client round trip to a route that only
  * this page ever called).
  *
- * `/admin/usage` and `/admin/slow-queries` are now dead routes (404 / 301 —
- * see their own files); `ADMIN_LLM_SUBPAGES` is gone from lib/admin-nav.ts.
+ * `/admin/usage` and `/admin/slow-queries` are now dead routes:
+ * `/admin/slow-queries` 404s, and `/admin/usage` is a wire-level 308 to here
+ * declared in `next.config.js` (its page-level `permanentRedirect()` stub was
+ * deleted by #642 P2 — see D-168 on why a stub is not a deletion and not a
+ * redirect). `ADMIN_LLM_SUBPAGES` is gone from lib/admin-nav.ts.
  */
 export default async function AdminLlmPage() {
   const [usage, llmHealth, slowQueries] = await Promise.all([

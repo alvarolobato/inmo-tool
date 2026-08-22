@@ -10,6 +10,18 @@ rule: "Extension block detection (detect.js) requires !isRenderReady corroborati
 
 *Decided: 2026-08-20*
 
+**Surface clauses superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: every `/etl/salud`
+below is historical — issue #642 P2 deleted the `/etl` tree. An active block
+is an aviso chip on the Estado board (`/admin`) now, linking on to that
+source's `/admin/fuentes/<portal>` page, and the notification's
+`chrome.notifications.onClicked` handler opens `/admin`. `/etl/salud` keeps a
+PERMANENT wire-level 308 to `/admin` in `dashboard/next.config.js` and must
+keep it forever: an already-installed extension build only picks up the new
+target when the owner reloads the packaged zip (D-060). Detection, the
+per-portal pause, the once-per-episode alert and the D-047 clean-notice
+reporting contract are all untouched.
+
 **Context**: Issue #634. The extension's whole value is unattended running
 (#587/D-134 made Auto survive a browser restart and re-fire), which amplifies
 one specific failure: if a portal starts challenging the extension at 03:00,

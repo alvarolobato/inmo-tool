@@ -21,14 +21,24 @@
  *     could only ever render "—". Replaced by connector error counts,
  *     which are real here.
  *
- * Issue #642 P2 shrank this from six aggregates to three. `duration_trend`,
- * `connector_durations` and `top_connectors_by_listings` existed only to feed
- * `EvolutionCharts`, which died with `/etl`; the sole consumer left is the
- * Estado board's `<CrawlRollup/>`, which renders `success_rate`, `last_run`
- * and `errors_24h`. The two duration aggregates are not parked here waiting
- * for #647 (Velocidad): that issue needs PER-SOURCE throughput and a
+ * Issue #642 P2 shrank this from SEVEN aggregates to three. `duration_trend`,
+ * `listings_trend`, `connector_durations` and `top_connectors_by_listings`
+ * existed only to feed `EvolutionCharts`, which died with `/etl`; the sole
+ * consumer left is the Estado board's `<CrawlRollup/>`, which renders
+ * `success_rate`, `last_run` and `errors_24h`.
+ *
+ * `listings_trend` deserves the explicit note (PR #710 review): the discovered
+ * -vs-fetched FUNNEL survives, but only as `last_run`'s point-in-time totals
+ * (`total_discovered` / `total_fetched` / `fetch_rate`). The 30-run SERIES it
+ * fed — EvolutionCharts' second chart — does not survive here at all. What
+ * replaces it is Actividad's per-connector `crawl` rows (#644/D-166), which
+ * carry the same counts run by run in a scrollable ledger rather than a
+ * sparkline; that is a deliberate trade, not an oversight.
+ *
+ * The two duration aggregates are not parked here waiting for #647
+ * (Velocidad): that issue needs PER-SOURCE throughput and a
  * `freshness_cycle_history` ledger this endpoint does not have, so it builds
- * its own reads. Keeping three unread aggregates alive "just in case" is
+ * its own reads. Keeping four unread aggregates alive "just in case" is
  * exactly the inherited dead weight this tracker is deleting.
  *
  * Error codes:

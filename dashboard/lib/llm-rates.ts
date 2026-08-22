@@ -50,7 +50,7 @@ export const DEFAULT_LLM_RATES: LlmRateTable = {
   // what `llm-health.ts` carried before this table was unified. Getting this
   // one wrong matters more than any other row: D-103 makes Haiku 4.5 the
   // DEFAULT model, so an under-price here loosens `checkDailyBudget` and
-  // under-reports /admin/usage for essentially all traffic.
+  // under-reports the usage panel on /admin/llm for essentially all traffic.
   "anthropic/claude-haiku-4-5": { in_eur_per_mtok: 1.0, out_eur_per_mtok: 5.0 },
   // OpenRouter spells Haiku 4.5 with a DOT, and that is the default model
   // (D-103) — without this key the default lands in `unpriced_models` at €0.

@@ -29,10 +29,18 @@
  *     is one tap away — a grouping, not a new page (this phase adds no route).
  *   - **Diagnósticos** (`/admin/diagnostics`, #671) and the extension setup
  *     page (`/admin/extension`, moved here by P2) are deliberately OFF the
- *     strip and owned by Fuentes via `matchPrefixes`: both are per-capture-
- *     source tooling reached from where capture happens, and a seventh and
- *     eighth tab for two deep-link targets is exactly the sprawl this issue
- *     is undoing. Fuentes stays highlighted while you are on them.
+ *     strip and owned by Fuentes via `matchPrefixes`: both are capture-source
+ *     tooling reached from where capture is managed, and a seventh and eighth
+ *     tab for two deep-link targets is exactly the sprawl this issue is
+ *     undoing. Fuentes stays highlighted while you are on them.
+ *
+ *     `matchPrefixes` HIGHLIGHTS, it does not LINK. Each of the two therefore
+ *     needs a real anchor somewhere, or dropping its tab deletes the page by
+ *     omission — the one thing D-168 forbids. Both have one, on Fuentes:
+ *     `/admin/extension` from `<ExtensionCta/>`'s "Abrir en página completa",
+ *     `/admin/diagnostics` from the list header's "Diagnósticos →"
+ *     (`fuentes-to-diagnostics`). `e2e/admin-nav.spec.ts` reaches both by
+ *     CLICKING, not by `goto` — a highlight test cannot catch an orphan.
  *
  * Add or reorder a tab HERE. `e2e/admin-nav.spec.ts` asserts the rendered
  * label list EXHAUSTIVELY, so a new tab cannot appear without a deliberate
@@ -104,12 +112,20 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   // were deleted outright — both tables have 0 rows ever in production. Only
   // `/admin/usage` survives as a redirect (its data, `llm_usage`, is live);
   // `/admin/slow-queries` is gone (its content is a collapsed disclosure here).
+  //
+  // No `matchPrefixes: ["/admin/usage"]` any more (#642 P2, PR #710 review):
+  // that entry existed because `/admin/usage` was a page-level
+  // `permanentRedirect()` stub, so the browser sat on `/admin/usage` while
+  // `/admin/llm` rendered and the tab needed the prefix to stay lit. P2 made
+  // it a wire-level 308 in `next.config.js` like every other retired path, so
+  // the URL is `/admin/llm` before anything renders and `href` alone matches.
+  // A prefix for a path no browser can be on is dead code that reads as a
+  // surviving route.
   {
     href: "/admin/llm",
     label: "LLM",
     description:
       "Uso del modelo (tokens/coste), coste y cobertura de evaluación IA, y consultas SQL lentas.",
-    matchPrefixes: ["/admin/usage"],
   },
   {
     href: "/admin/config",

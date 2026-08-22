@@ -3,12 +3,20 @@ id: D-090
 title: Portal filter discovery is drift DETECTION only — never self-heals URL building
 date: 2026-08-06
 group: Data / connectors
-rule: 'Portal filter discovery is DETECTION-ONLY (supersedes D-063 self-healing). The extension enumerates a portal''s search-form property-type OPTIONS — plausibility-gated per portal (Aliseda: a `comprar-<category>` segment and/or a `subtipo`; Idealista: a `venta-<section>` segment) so branding/nav junk (the Aliseda logo) is dropped and a portal it can''t read yields NOTHING, not junk — and POSTs a catalog to `portal_filter_catalog`. A deterministic, no-LLM pure diff (`lib/search-url/drift.ts::computePortalDrift`) flags ADDED/REMOVED/CHANGED vs each connector''s hard-coded code mapping (`PortalSearchUrlBuilder.codeMapping()`), surfaced on `/etl/discovery`. URL building stays 100% code-driven from the per-portal map — discovery NEVER feeds URL construction.'
+rule: 'Portal filter discovery is DETECTION-ONLY (supersedes D-063 self-healing). The extension enumerates a portal''s search-form property-type OPTIONS — plausibility-gated per portal (Aliseda: a `comprar-<category>` segment and/or a `subtipo`; Idealista: a `venta-<section>` segment) so branding/nav junk (the Aliseda logo) is dropped and a portal it can''t read yields NOTHING, not junk — and POSTs a catalog to `portal_filter_catalog`. A deterministic, no-LLM pure diff (`lib/search-url/drift.ts::computePortalDrift`) flags ADDED/REMOVED/CHANGED vs each connector''s hard-coded code mapping (`PortalSearchUrlBuilder.codeMapping()`), surfaced on `/admin/fuentes/<connector>` (D-168; the old `/etl/discovery` page is gone). URL building stays 100% code-driven from the per-portal map — discovery NEVER feeds URL construction.'
 ---
 
 # D-090: Portal filter discovery is drift DETECTION only — never self-heals URL building
 
 *Decided: 2026-08-06*
+
+**Location clause superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: the per-portal drift
+report is rendered on `/admin/fuentes/<connector>` (#642 P1). `/etl/discovery`
+— named in the rule above and in "Flag it" below — is gone, as is the whole
+`/etl` tree (#642 P2). The DETECTION-ONLY rule itself, the plausibility gate
+and the "discovery never feeds URL construction" constraint are untouched;
+only the surface moved.
 
 **Context**: #336/#339 (D-063) added a "URL-building discovery mode": the
 browser extension enumerated a portal's search-form filter options and the

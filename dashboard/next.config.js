@@ -16,7 +16,7 @@ const nextConfig = {
   // tree is deleted — no page.tsx anywhere under it, so no route-table
   // entries — replaced by wire-level 301s defined here rather than by
   // page-level `permanentRedirect()` stubs. Two reasons this beats the
-  // page-level pattern `/admin/usage/page.tsx` uses:
+  // page-level stub pattern `/admin/usage` used until this phase:
   //   1. The owner's standing complaint on this tracker is specifically
   //      "solo has añadido, no has eliminado nada" — a redirect STUB
   //      (page.tsx that just calls permanentRedirect()) still counts as a
@@ -25,8 +25,8 @@ const nextConfig = {
   //      redirect has no page.tsx at all — the route is genuinely gone.
   //   2. It is a REAL wire-level 308 + `Location` header (verified with
   //      curl against a production build), not the page-level "200 +
-  //      client-side RSC redirect" caveat documented on
-  //      `/admin/usage/page.tsx`. For `/etl/salud` that is not a nicety but
+  //      client-side RSC redirect" `permanentRedirect()` actually produces
+  //      (the #656 caveat). For `/etl/salud` that is not a nicety but
   //      a requirement: an ALREADY-INSTALLED browser extension opens it from
   //      `chrome.notifications.onClicked`, and an extension only picks up the
   //      repointed URL when the owner reloads the zip (D-060). A client-side
@@ -88,6 +88,19 @@ const nextConfig = {
       {
         source: "/etl",
         destination: "/admin/actividad",
+        permanent: true,
+      },
+      // `/admin/usage` — not part of the `/etl` tree, converted here (PR #710
+      // review) because it was the last page-level `permanentRedirect()` stub
+      // left, i.e. the exact anti-pattern the two reasons above reject. It was
+      // #653's, not this phase's, but leaving it would have shipped D-168 with
+      // a live counter-example inside its own route table: `next build`
+      // counted it as a route (14 → 12 becomes 14 → 11 without it) and it
+      // answered `200` with no `Location` to anything that does not run JS.
+      // Same destination, same permanence, now on the wire.
+      {
+        source: "/admin/usage",
+        destination: "/admin/llm",
         permanent: true,
       },
     ];

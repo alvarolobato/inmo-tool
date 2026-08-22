@@ -88,8 +88,11 @@ export function TopBar({
   // deliberately placed next to Perfiles: the day-to-day loop (pick a profile →
   // open its pre-filtered searches → track capture progress) is a first-class
   // user task, not admin. SETUP (extension install, API key, connector config,
-  // the raw worklist table) stays under /etl (Admin). See D-045 — Captura must
-  // stay reachable top-level, including from the mobile hamburger menu below.
+  // the raw worklist table) lives under Admin — on /admin/fuentes since #642
+  // P1 (D-154) and /admin/extension since #642 P2 (D-168); there is no /etl
+  // tree any more. See D-045 (its location clause superseded, the
+  // EXECUTION-vs-SETUP split intact) — Captura must stay reachable
+  // top-level, including from the mobile hamburger menu below.
   // Issue #195: the standalone "Inicio" entry was dropped (owner-approved,
   // 2026-08-03). `/inicio` and `/` now render the same redesigned Perfiles
   // surface the "Perfiles" link points at, so a separate nav entry would be a

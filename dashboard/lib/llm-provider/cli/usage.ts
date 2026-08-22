@@ -41,7 +41,7 @@
  *
  * `total_tokens` deliberately EXCLUDES the cache counters, matching what
  * OpenRouter puts in the same column. An earlier version summed all four so
- * the panel would show "real volume moved" — but `/admin/usage` sums that
+ * the panel would show "real volume moved" — but /admin/llm's usage panel sums that
  * column across providers, so a CLI row reporting 25,700 next to an OpenRouter
  * row reporting 45 made the total meaningless, and `prompt + completion !=
  * total` on one provider only. Cache volume has its own two columns; anything

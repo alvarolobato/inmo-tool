@@ -79,9 +79,16 @@ async function mock(page: Page, opts: { health?: unknown; stats?: unknown; healt
 }
 
 /**
- * Reused verbatim from `e2e/actividad.spec.ts` — the correct measurement.
- * `document.documentElement.scrollWidth` reads clean on these pages even when
- * content overflows, because `.admin-chrome-content` scrolls independently.
+ * A verbatim COPY of `e2e/actividad.spec.ts`'s helper — a duplicate, not an
+ * import (PR #710 review: don't let this read as shared code). Playwright spec
+ * files here don't share helpers unless they live under `e2e/helpers/`, and
+ * lifting one function into that directory for two call sites was not worth
+ * the churn in a deletion PR. If a third spec needs it, hoist all three.
+ *
+ * Why this measurement: `document.documentElement.scrollWidth` reads clean on
+ * these pages even when content overflows, because `.admin-chrome-content`
+ * scrolls independently — so the real signal is the container's own overflow
+ * plus the list of elements sticking out past `clientWidth`.
  */
 async function widths(page: Page): Promise<{
   client: number;

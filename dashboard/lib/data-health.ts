@@ -238,7 +238,7 @@ export function captureSuccessRate(done: number, failed: number): number | null 
 
 /**
  * How recent a block episode must be to count as an ACTIVE block (issue #642
- * P2, D-NNN).
+ * P2, D-168).
  *
  * `extension_block_episode` records a detection, never a resolution — there is
  * no "cleared" row to wait for, because the block clears in the owner's

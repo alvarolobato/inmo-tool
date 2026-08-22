@@ -18,9 +18,10 @@
  *     viewed, a redirect stub nothing linked to any more, or content that
  *     folded into `/admin/llm` as a disclosure with no route of its own);
  *   - `/admin/usage` is NOT the same case: `llm_usage` is live, so it
- *     redirects to `/admin/llm` and the redirect TARGET is asserted to
- *     actually render (not just that the old path is gone — a redirect
- *     nobody tests is a 404 waiting to happen);
+ *     redirects to `/admin/llm` — a wire-level 308 since #642 P2 converted
+ *     its page-level stub — and the redirect TARGET is asserted to actually
+ *     render (not just that the old path is gone — a redirect nobody tests is
+ *     a 404 waiting to happen);
  *   - both Revisión queues are reachable, though only one has a tab;
  *   - the retired `/etl` tree 308s ON THE WIRE (status + Location asserted,
  *     not just where a browser lands) to the homes #642's disposition table
@@ -251,6 +252,33 @@ test("#642 P2: Diagnósticos and the extension setup keep Fuentes highlighted", 
   }
 });
 
+test("#642 P2: /admin/diagnostics is REACHABLE by clicking, not only by URL", async ({ page }) => {
+  // PR #710 review H1. Taking Diagnósticos off the strip left it with a
+  // `matchPrefixes` entry and nothing else — and `matchPrefixes` highlights,
+  // it does not link. The sibling test above `goto`s the path directly, so it
+  // proves the highlighting and CANNOT catch an orphan; this one never types a
+  // URL for the target. #642's binding constraint is that nothing
+  // capability-disappears, and a page you can only reach by typing its path
+  // has disappeared for every practical purpose.
+  await page.goto("/admin");
+
+  // One tap from any admin page to Fuentes...
+  await strip(page).getByRole("link", { name: "Fuentes", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/fuentes$/);
+
+  // ...and one more to Diagnósticos, from the list header.
+  await page.getByTestId("fuentes-to-diagnostics").click();
+  await expect(page).toHaveURL(/\/admin\/diagnostics$/);
+  await expect(page.getByRole("heading", { name: /Diagnósticos/ })).toBeVisible();
+
+  // Landing there still highlights Fuentes — the grouping the strip claims.
+  await expect(
+    strip(page).getByRole("link", { name: "Fuentes", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
 test("EC-2: /admin/candidatos is gone outright (404, no redirect)", async ({ page }) => {
   // #653: the old #508 redirect stub (`/admin/candidatos` → `/admin/clasificacion`)
   // was deleted — its own header said "delete once no external link points
@@ -280,26 +308,30 @@ test("EC-2: /admin/interactions, /admin/tool-calls, /admin/captured-urls and /ad
   }
 });
 
-test("EC-2: /admin/usage permanently redirects to /admin/llm, which renders", async ({ page }) => {
+test("EC-2: /admin/usage 308s to /admin/llm ON THE WIRE, and the target renders", async ({
+  page,
+  request,
+}) => {
   // Asserting the redirect TARGET renders is the point — a redirect nobody
   // tests is a 404 waiting to happen. `llm_usage` is live (17,391 rows as of
   // 2026-08-21), so this is a redirect, not a 404 (unlike interactions/
   // tool-calls/captured-urls above).
   //
-  // What `res` actually is here (corrected per #656 review): Next's
-  // `permanentRedirect()` is NOT a 308 + Location header on the wire for
-  // this app-router page — it streams an RSC redirect instruction inside a
-  // normal 200 HTML document for `/admin/usage` itself, and the navigation
-  // to `/admin/llm` happens client-side once React hydrates. So `res` below
-  // is `/admin/usage`'s OWN response (200, no Location) — a browser
-  // (including Playwright) still ends up on `/admin/llm`, which is what
-  // `toHaveURL` + the visibility assertion below prove; `res.status()` only
-  // confirms the stub route itself didn't error. A non-browser client would
-  // need to run JS to follow this — see the comment on
-  // `app/admin/usage/page.tsx` for what that means going forward.
-  const res = await page.goto("/admin/usage");
+  // This used to be a 200: `app/admin/usage/page.tsx` called
+  // `permanentRedirect()`, which Next streams as an RSC instruction inside a
+  // normal 200 document with no `Location`, resolving client-side after
+  // hydration (the #656 caveat). #642 P2 deleted that stub and moved the
+  // redirect into `next.config.js` alongside the retired `/etl` paths — same
+  // destination, one fewer route in `next build`'s table, and a real 308 for
+  // callers that do not run JS. Asserted here as status + header, exactly
+  // like the /etl tree above; the page-level pattern is now gone from this
+  // app entirely.
+  const res = await request.get("/admin/usage", { maxRedirects: 0 });
+  expect(res.status()).toBe(308);
+  expect(res.headers()["location"]).toBe("/admin/llm");
+
+  await page.goto("/admin/usage");
   await expect(page).toHaveURL(/\/admin\/llm$/);
-  expect(res?.status()).toBe(200);
   await expect(page.getByTestId("admin-llm-page")).toBeVisible();
 
   await expect(page.getByTestId("error-display")).toHaveCount(0);
@@ -341,8 +373,11 @@ test("the consolidated LLM page renders usage, cost/coverage and the slow-querie
   const guidanceBox = await guidanceToggle.boundingBox();
   expect(guidanceBox!.height).toBeGreaterThanOrEqual(44);
 
-  // Visiting /admin/usage highlights the single LLM tab (aria-current="page").
+  // Arriving via /admin/usage lands on /admin/llm (a wire-level 308 since
+  // #642 P2) with the single LLM tab highlighted — by `href`, not by a
+  // matchPrefix: the browser is never on /admin/usage at render time.
   await page.goto("/admin/usage");
+  await expect(page).toHaveURL(/\/admin\/llm$/);
   const llmTab = strip(page).getByRole("link", { name: "LLM", exact: true });
   await expect(llmTab).toHaveAttribute("aria-current", "page");
 

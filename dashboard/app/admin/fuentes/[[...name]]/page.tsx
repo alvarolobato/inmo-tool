@@ -96,6 +96,7 @@ function FuentesList() {
   const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [health, setHealth] = useState<SourceHealthResponse | null>(null);
   const [queues, setQueues] = useState<WorklistPortalSummary[]>([]);
+  const [quality, setQuality] = useState<DataHealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
 
@@ -103,12 +104,16 @@ function FuentesList() {
     setLoading(true);
     setError(null);
     try {
-      const [connectorsRes, healthRes, worklistRes] = await Promise.all([
+      const [connectorsRes, healthRes, worklistRes, healthDataRes] = await Promise.all([
         fetch("/api/etl/connectors"),
         fetch("/api/etl/source-health").catch(() => null),
         // Unscoped on purpose: this is the ONE read that gives every portal's
         // queue depth at once (see the pending-count column below).
         fetch("/api/etl/worklist").catch(() => null),
+        // Same unscoped read the detail page makes — here only for the
+        // extraction-quality chip below. See its comment for why the list
+        // needs it at all.
+        fetch("/api/etl/data-health").catch(() => null),
       ]);
       if (!connectorsRes.ok) {
         const errBody = await connectorsRes.json().catch(() => null);
@@ -129,6 +134,11 @@ function FuentesList() {
         // Additive column — a failure here must not take down the list.
         setQueues([]);
       }
+      if (healthDataRes && healthDataRes.ok) {
+        setQuality((await healthDataRes.json()) as DataHealthResponse);
+      } else {
+        setQuality(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar las fuentes");
     } finally {
@@ -142,6 +152,7 @@ function FuentesList() {
 
   const healthByName = new Map((health?.sources ?? []).map((s) => [s.source, s]));
   const queueByPortal = new Map(queues.map((q) => [q.source_portal, q]));
+  const qualityBySource = new Map((quality?.sources ?? []).map((s) => [s.source, s]));
 
   return (
     <main className="route-shell" style={{ maxWidth: 900 }} data-testid="fuentes-page">
@@ -159,7 +170,18 @@ function FuentesList() {
 
           The cross-link now points at Actividad rather than the deleted
           Monitor ETL: after triggering a sweep, the run's own row — and its
-          drill-down — appear there. */}
+          drill-down — appear there.
+
+          "Diagnósticos →" is the ONLY navigational route to `/admin/diagnostics`
+          (#671). That page had its own strip tab until #642 P2 took it off in
+          favour of a `matchPrefixes` entry on Fuentes — and a `matchPrefixes`
+          entry only highlights a tab once you are already there, it links
+          nowhere. Without this anchor the page is reachable by typing the URL
+          and nothing else, which is exactly the capability-disappears-by-
+          omission failure D-168 forbids. It belongs here rather than on a
+          source's detail page because the diagnostics list is fleet-wide (all
+          portals, newest first — `listDiagnostics()` takes no portal filter),
+          the same scope as this list itself. */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>Fuentes</h1>
         <div
@@ -186,6 +208,21 @@ function FuentesList() {
             }}
           >
             Actividad →
+          </Link>
+          <Link
+            href="/admin/diagnostics"
+            data-testid="fuentes-to-diagnostics"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              minHeight: 44,
+              fontSize: 13,
+              color: "var(--accent)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Diagnósticos →
           </Link>
         </div>
       </div>
@@ -224,6 +261,8 @@ function FuentesList() {
             const h = healthByName.get(c.name);
             const q = queueByPortal.get(c.name);
             const showQueue = q != null && (q.pending > 0 || q.failed > 0);
+            const sq = qualityBySource.get(c.name);
+            const lowPhotos = sq != null && isLowPhotoCoverage(sq.avg_photo_count);
             return (
               <Link
                 key={c.name}
@@ -313,6 +352,48 @@ function FuentesList() {
                     {q.failed > 0 && (
                       <span style={{ color: "#dc2626" }}>{q.failed} fallidas</span>
                     )}
+                  </span>
+                )}
+                {/* Extraction quality (D-084/D-086), as a chip — PR #710
+                    review's "Medium".
+
+                    #642's disposition table sent "Calidad por fuente" from
+                    `/etl/salud` to the per-source detail page, and it went
+                    there whole. But that left the fleet asymmetric: queue
+                    depth got a chip on this list and quality got nothing, so
+                    a source quietly dropping to 0.2 photos/anuncio kept a
+                    green `fresco` dot and the only way to notice was opening
+                    every source in turn — a regression against the very
+                    "one glance, not three pages" argument the move was made
+                    on.
+
+                    Deliberately a CHIP, not a change to the status dot.
+                    `deriveSourceStatus` (lib/source-health.ts) answers ONE
+                    question — how recently did this source produce data —
+                    and both this list and the Estado board render its answer
+                    from the same derivation. Folding a second, unrelated axis
+                    into that dot would make one colour mean two things and
+                    put the two boards' shared vocabulary back in play; a chip
+                    sits beside the dot, reads independently, and is symmetric
+                    with the queue chip right above it. Same quiet-when-clean
+                    rule: rendered only below LOW_PHOTO_THRESHOLD. */}
+                {lowPhotos && (
+                  <span
+                    data-testid={`fuente-quality-${c.name}`}
+                    data-avg-photos={sq.avg_photo_count ?? ""}
+                    title={`${formatNum(sq.avg_photo_count)} fotos por anuncio almacenado — por debajo de ${LOW_PHOTO_THRESHOLD}`}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      background: "var(--danger-soft, #fee2e2)",
+                      color: "var(--danger, #b91c1c)",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {formatNum(sq.avg_photo_count)} fotos/anuncio
                   </span>
                 )}
                 {/* Data freshness, NOT the last run's outcome (#642 P2).

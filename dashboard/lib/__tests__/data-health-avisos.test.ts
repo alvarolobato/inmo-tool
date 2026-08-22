@@ -63,6 +63,7 @@ describe("zeroResultsByConnector", () => {
     consecutive_zeros: zeros,
     last_nonzero_count: 12,
     drift_started_at: hoursAgo(48),
+    last_observed_at: hoursAgo(1),
   });
 
   it("groups by connector and preserves input order within a group", () => {
