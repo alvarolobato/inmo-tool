@@ -26,6 +26,57 @@
       return true;
     }
 
+    // "Forzar captura + diagnóstico" (issue #671): send the raw HTML PLUS
+    // what the extension thought about this page, on ANY page — supported or
+    // not, detail or listing or neither, even a blocked/challenge page. The
+    // diagnostic block itself is built by the PURE self.InmoDiagnostic module
+    // (diagnostic.js), which calls D.isRenderReadyDetail — the EXACT SAME
+    // computation the auto-capture loops below use via D.isRenderReady — so
+    // this can never report a verdict auto-capture wouldn't have seen.
+    if (msg.type === "CAPTURE_DIAGNOSTIC") {
+      const D2 = self.InmoDetect;
+      const Diag = self.InmoDiagnostic;
+      const url = window.location.href;
+      const html = (() => {
+        try {
+          return document.documentElement.outerHTML;
+        } catch (e) {
+          return "";
+        }
+      })();
+      if (!D2 || !Diag) {
+        // detect.js/diagnostic.js failed to load — still send the HTML alone
+        // rather than nothing (exit criterion: an unclassifiable page must
+        // still be sendable).
+        sendResponse({ html, url, title: document.title, diagnostic: null });
+        return true;
+      }
+      const hrefs = Array.from(document.querySelectorAll("a[href]")).map((a) => a.href);
+      (async () => {
+        let autoCap = true;
+        try {
+          const cfg = await chrome.storage.sync.get("autoCaptureEnabled");
+          autoCap = cfg.autoCaptureEnabled === undefined ? true : !!cfg.autoCaptureEnabled;
+        } catch {
+          /* default true, mirrors AUTO_CAPTURE_DEFAULT */
+        }
+        let extensionVersion = null;
+        try {
+          extensionVersion = chrome.runtime.getManifest().version;
+        } catch {
+          /* best-effort */
+        }
+        const diagnostic = Diag.buildDiagnosticBlock(D2, document, url, {
+          hrefs,
+          extensionVersion,
+          autoCaptureEnabled: autoCap,
+          validationActive: typeof validationActive !== "undefined" ? validationActive : false,
+        });
+        sendResponse({ html, url, title: document.title, diagnostic });
+      })();
+      return true; // async response
+    }
+
     // Batch capture (issue #262): the popup asks whether THIS tab is a
     // listing/search page and, if so, for the detail URLs it links to. The
     // pure classification + extraction lives in detect.js (self.InmoDetect);

@@ -1112,14 +1112,31 @@
    *   2. total body text above MIN_BODY_TEXT.
    * `doc` is injected (not the global `document`) so it's testable against
    * fabricated DOM fixtures. Never throws.
+   *
+   * Returns the FULL verdict — `{ ready, selector, reason, bodyTextLength }` —
+   * where `selector` is the FIRST readySelectors entry (in declaration order)
+   * that satisfied the "key node" check, or null when none did / body-text
+   * floor failed / doc wasn't ready. `reason` is one of 'no_doc',
+   * 'not_interactive', 'no_key_node', 'body_text_too_short', or null when
+   * ready — a short breadcrumb for the force-capture diagnostic (issue #671),
+   * which is exactly the field that would have explained the Hipoges empty-
+   * shell capture (`init-front-list` alone satisfying `main`) instantly.
+   *
+   * isRenderReady() below is a THIN WRAPPER over this — the diagnostic
+   * feature and every auto-capture caller share this ONE computation, never
+   * two independently-drifting implementations.
    */
-  function isRenderReady(doc, portal) {
-    if (!doc || typeof doc.querySelector !== "function") return false;
+  function isRenderReadyDetail(doc, portal) {
+    if (!doc || typeof doc.querySelector !== "function") {
+      return { ready: false, selector: null, reason: "no_doc", bodyTextLength: 0 };
+    }
     var rs = doc.readyState;
-    if (rs && rs !== "interactive" && rs !== "complete") return false;
+    if (rs && rs !== "interactive" && rs !== "complete") {
+      return { ready: false, selector: null, reason: "not_interactive", bodyTextLength: 0 };
+    }
 
     var selectors = readySelectorsFor(portal);
-    var hasKeyNode = false;
+    var matchedSelector = null;
     for (var i = 0; i < selectors.length; i++) {
       var el = null;
       try {
@@ -1128,14 +1145,35 @@
         el = null;
       }
       if (el && (el.textContent || "").trim().length >= MIN_HEADING_TEXT) {
-        hasKeyNode = true;
+        matchedSelector = selectors[i];
         break;
       }
     }
-    if (!hasKeyNode) return false;
-
     var bodyText = ((doc.body && doc.body.textContent) || "").trim();
-    return bodyText.length >= MIN_BODY_TEXT;
+    if (!matchedSelector) {
+      return {
+        ready: false,
+        selector: null,
+        reason: "no_key_node",
+        bodyTextLength: bodyText.length,
+      };
+    }
+
+    if (bodyText.length < MIN_BODY_TEXT) {
+      return {
+        ready: false,
+        selector: matchedSelector,
+        reason: "body_text_too_short",
+        bodyTextLength: bodyText.length,
+      };
+    }
+
+    return { ready: true, selector: matchedSelector, reason: null, bodyTextLength: bodyText.length };
+  }
+
+  /** Boolean-only view of isRenderReadyDetail() — every existing caller's shape. */
+  function isRenderReady(doc, portal) {
+    return isRenderReadyDetail(doc, portal).ready;
   }
 
   /**
@@ -1391,6 +1429,7 @@
     nextResultsUrlFromHrefs: nextResultsUrlFromHrefs,
     toListingUrl: toListingUrl,
     isRenderReady: isRenderReady,
+    isRenderReadyDetail: isRenderReadyDetail,
     detectBlockSignals: detectBlockSignals,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,

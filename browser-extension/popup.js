@@ -1228,6 +1228,106 @@ $('#copy-json-btn').addEventListener('click', async () => {
   }, 2000);
 });
 
+// ─── "Forzar captura + diagnóstico" (issue #671) ──────────────────
+//
+// ALWAYS reachable (the footer sits outside every #state-* panel showState()
+// toggles), independent of whatever detection/mode init() chose to show —
+// that's the whole point: a page the popup currently REFUSES to handle (an
+// unsupported host used to just fall through to manual single capture; a
+// blocked/challenge page has no other escape hatch at all) must still be
+// diagnosable in one click.
+
+function setDiagnosticStatus(text, kind) {
+  const el = $('#diagnostic-status');
+  el.textContent = text;
+  el.classList.remove('hidden');
+  el.style.color = kind === 'error' ? '#ef4444' : kind === 'success' ? '#16a34a' : '#64748b';
+}
+
+async function activeTabOrNull() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
+}
+
+/** Ask the content script for {html, url, title, diagnostic}, injecting it
+ * first (detect.js → diagnostic.js → content-script.js, same dependency
+ * order as manifest.json's static content_scripts) if it isn't loaded yet —
+ * mirrors detectPage()/runSingleCapture()'s own on-demand-injection fallback,
+ * which is what already lets manual capture work on an unsupported host. */
+async function captureDiagnosticFromTab(tab) {
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+  } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['detect.js', 'diagnostic.js', 'content-script.js'],
+    });
+    res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+  }
+  if (!res || !res.html) throw new Error('No se recibió contenido de la página.');
+  return res;
+}
+
+/** Shorten a URL for the confirm() dialog — enough to recognise the page
+ * (origin + path), never so long the dialog truncates the important half. */
+function diagnosticConfirmUrl(rawUrl) {
+  const url = String(rawUrl || '');
+  if (url.length <= 120) return url;
+  return url.slice(0, 117) + '…';
+}
+
+$('#diagnostic-btn').addEventListener('click', async () => {
+  const btn = $('#diagnostic-btn');
+  // This button is deliberately UNGATED by host (issue #671: a page the
+  // extension refuses to classify is exactly when a diagnostic is needed),
+  // which means one misclick with a bank, webmail or any other authenticated
+  // tab focused would upload that page's fully-rendered DOM — session-
+  // specific content and all — to the dashboard. So the URL about to be sent
+  // is named in a confirm() BEFORE anything is read from the tab (PR #675
+  // review S2). The delete button on /admin/diagnostics already confirms a
+  // far smaller action; sending a whole authenticated page must not be the
+  // one destructive-by-accident path with no prompt.
+  let tab;
+  try {
+    tab = await activeTabOrNull();
+  } catch {
+    tab = null;
+  }
+  if (!tab || !tab.id) {
+    setDiagnosticStatus('No se pudo acceder a la pestaña actual.', 'error');
+    return;
+  }
+  const confirmed = window.confirm(
+    'Se enviará el HTML completo de esta página al panel de diagnóstico:\n\n' +
+      diagnosticConfirmUrl(tab.url) +
+      '\n\nIncluye todo lo que la página muestra ahora mismo, incluida ' +
+      'cualquier información de tu sesión. ¿Continuar?',
+  );
+  if (!confirmed) return;
+  btn.disabled = true;
+  setDiagnosticStatus('Capturando diagnóstico…');
+  try {
+    const captured = await captureDiagnosticFromTab(tab);
+    const res = await chrome.runtime.sendMessage({
+      type: 'SEND_DIAGNOSTIC',
+      tabId: tab.id,
+      url: captured.url,
+      html: captured.html,
+      title: captured.title,
+      diagnostic: captured.diagnostic,
+    });
+    if (!res || !res.success) {
+      throw new Error((res && res.error && res.error.message) || 'No se pudo enviar el diagnóstico.');
+    }
+    setDiagnosticStatus('Diagnóstico enviado ✓', 'success');
+  } catch (err) {
+    setDiagnosticStatus(err.message || 'No se pudo enviar el diagnóstico.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 init();
 
 // Publish for the unit tests (Node/vitest) — same pattern as
@@ -1243,5 +1343,6 @@ if (typeof module !== 'undefined' && module.exports) {
     formatClockTime,
     formatElapsed,
     blockSignatureLabelEs,
+    setDiagnosticStatus,
   };
 }

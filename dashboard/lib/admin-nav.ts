@@ -108,6 +108,15 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Ver y editar la configuración del sistema (config.yaml) desde el navegador.",
   },
+  // "Forzar captura + diagnóstico" (issue #671): recent extension diagnostics
+  // (HTML + detection state), retrievable without SQL — see
+  // lib/db/extension-diagnostics.ts and the D-153 record for this feature.
+  {
+    href: "/admin/diagnostics",
+    label: "Diagnósticos",
+    description:
+      "Capturas de diagnóstico enviadas desde la extensión: HTML crudo más el estado de detección en el momento de la captura.",
+  },
 ];
 
 /** All path prefixes that should mark a given nav item active. */
