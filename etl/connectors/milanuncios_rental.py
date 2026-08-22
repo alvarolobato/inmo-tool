@@ -218,6 +218,13 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # rental source can never spend the sale source's budget.
     supports_stale_verification = True
 
+    # Stated explicitly rather than inherited, same reasoning this file
+    # applies to `rate_limit_per_minute` and `supports_search_override`: 1,
+    # strictly below the sale connector's 2, because this connector already
+    # runs at half its parent's rate against the same host's bot mitigation
+    # (issue #643, PR #685 review M2).
+    stale_verification_budget_per_run = 1
+
     # Skip-if-seen stays OFF here (0 = the base `Connector` default: always
     # re-fetch), stated explicitly rather than inherited — Opus review,
     # PR #225. Exactly the same reasoning as `discovers_full_inventory`

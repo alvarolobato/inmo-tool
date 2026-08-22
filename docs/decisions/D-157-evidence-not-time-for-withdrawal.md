@@ -67,7 +67,13 @@ and anything after them).
    budget: it runs last, through the connector's own rate limiter and circuit
    breaker, on whatever the real discovery/fetch work left behind — the same
    posture `_record_discovery_price_observations` has (D-070). A tripped
-   breaker means the pass does not run.
+   breaker means the pass does not run. The global budget
+   (`etl.stale_verification_budget_per_run`) is a ceiling a connector may
+   lower for itself via a `stale_verification_budget_per_run` class
+   attribute, never raise — milanuncios sets 2 and its rental subclass 1,
+   because D-017/#179 measured that portal serving ~5 detail fetches before a
+   60+ minute soft block, and a lockout that long outlives the run and
+   poisons the next hour's `discover()`.
 7. **A per-connector opt-in gates it** (`supports_stale_verification`, default
    `False`), because this is the only mechanism allowed to withdraw a listing
    on a *single* observation. Capture-only portals
@@ -77,12 +83,44 @@ and anything after them).
    during verification would report every listing as gone (see
    `FotocasaRentalConnector`, which opts out explicitly against its parent).
 8. **A mass-withdrawal guard applies anyway.** Withdrawals are buffered and
-   applied only once every verdict is in, and only if fewer than
-   `_VERIFICATION_GONE_ALARM_RATIO` (80%) of them came back gone. "Every
-   listing we asked about is 404" is the signature of our own URL construction
-   breaking, not of a removal wave. The cost is asymmetric: a missed
-   withdrawal is invisible, a false one silently removes a live candidate from
-   every profile feed.
+   applied only once every verdict is in, and only if all three of these
+   clear (`_mass_withdrawal_alarm` in `etl/orchestrator.py`):
+
+   a. **fewer than three withdrawals** in the run — below that nothing else
+      is consulted, because one or two withdrawals are not a mass withdrawal
+      at any sample size and a ratio over two verdicts is noise. The floor is
+      on the *withdrawals*, never on the verdict count: putting it on the
+      denominator switches the guard off for small samples, which is exactly
+      when the detail path has broken and the breaker has cut the pass short
+      (PR #685 review, M1);
+   b. **strictly fewer than `_VERIFICATION_GONE_ALARM_RATIO` (80%)** of the
+      run's verdicts came back gone. At *exactly* 80% the guard fires — "all
+      ten 404" is the signature of our own URL construction breaking, and so
+      is eight of ten;
+   c. **no more than `_VERIFICATION_GONE_BASELINE_MARGIN` (50 percentage
+      points) above the source's own historical gone rate**, taken from
+      `connector_run_results.verified_gone_count`/`verified_count` over its
+      last 50 runs, and only once it has accumulated 20 verdicts. A stateless
+      single-run ratio cannot distinguish a 60% systemic break from 60%
+      genuine churn — that is undecidable inside one run — but *a source that
+      has withdrawn 0 in its entire history suddenly withdrawing 8* is
+      decidable, and is precisely the signal a ratio cannot see.
+
+   When the guard fires, nothing is withdrawn, the listings stay `active` to
+   be re-nominated later, and the run records which check tripped in
+   `connector_run_results.verification_alarm` (NULL whenever it stayed quiet).
+   That column is not redundant with the counters: every other signal on that
+   row reports an action taken, and a guarded run stores `verified_count=10,
+   verified_gone_count=0` — byte-identical to a run where all ten listings
+   genuinely came back alive. A suppressed action must be visible.
+
+   Note the ratchet in (c): a blocked run records
+   `verified_gone_count = 0` and so lowers the baseline, meaning a source
+   whose every run trips it stays blocked until an operator looks. That is
+   intended — the cost is asymmetric: a missed withdrawal is invisible, a
+   false one silently removes a live candidate from every profile feed — and
+   it self-heals for ordinary churn, where sub-threshold runs do apply and
+   raise the baseline as they go.
 
 **Alternatives rejected**:
 
@@ -119,4 +157,5 @@ posture), D-099 (accepted properties exempt), D-098 (price history), D-039
 (staleness as a display band), D-030 (queue rotation as anti-starvation);
 `etl/orchestrator.py` (`verify_stale_listings`, `_nominate_stale_listings`),
 `etl/connectors/base.py` (`VerificationOutcome`, `retired_page_signature`,
-`verify_listing`), `etl/tests/test_stale_verification.py`.
+`verify_listing`, `stale_verification_budget_per_run`),
+`etl/tests/test_stale_verification.py`.

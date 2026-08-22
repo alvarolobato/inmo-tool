@@ -926,6 +926,25 @@ class Connector(ABC):
     # issue #645, not this one.
     supports_stale_verification: bool = False
 
+    # Issue #643 (PR #685 review, M2): this connector's own ceiling on how
+    # many stale listings the verification pass may re-read per run, or None
+    # to accept the global `etl.stale_verification_budget_per_run`. Same
+    # pattern as `rate_limit_per_minute`: a plain class attribute, set by the
+    # connector that measured its own limit.
+    #
+    # Applied as a `min()` against the global budget, never as a replacement —
+    # so setting the global to 0 still stops every connector dead, which is
+    # the operator's kill switch and must not be overridable from code.
+    #
+    # It exists because the global budget is one number for portals with very
+    # different tolerances. Verification is extra detail traffic appended to
+    # every hourly run, and on a portal that walls after a handful of detail
+    # fetches the resulting soft block OUTLIVES the run: D-070's "spend only
+    # what real work left over" posture protects THIS run, but a 60-minute
+    # lockout poisons the next run's `discover()` too. Milanuncios is the
+    # measured case (D-017/#179: ~5 successful fetches, then 60+ minutes).
+    stale_verification_budget_per_run: int | None = None
+
     def retired_page_signature(
         self, html: str, final_url: str | None = None
     ) -> str | None:
@@ -1016,11 +1035,34 @@ class Connector(ABC):
         not-found landing page can still parse into a plausible-looking
         (but wrong) canonical listing, so it must be intercepted while the
         raw page is still identifiable as such.
+
+        That check reads `raw.raw["html"]`, which is a real coupling: a
+        connector whose `fetch_detail()` returns a parsed payload with no
+        `html` key (milanuncios returns `{"url", "props"}`) would hand
+        `retired_page_signature` an empty string forever, and a signature
+        keyed on page content would silently never fire. Harmless while the
+        connector has no signature — but silent, and a silent never-fires is
+        exactly what PR #685's review caught. So it is checked, and a
+        connector that overrides `retired_page_signature` without exposing
+        HTML raises instead: `ConnectorError` means "no evidence", so the
+        orchestrator changes nothing about the listing and logs the reason.
         """
         raw = self.fetch_detail(external_id, throttle=throttle)
         payload = raw.raw if isinstance(raw.raw, dict) else {}
         html = payload.get("html")
         final_url = payload.get("url")
+        has_own_signature = (
+            type(self).retired_page_signature is not Connector.retired_page_signature
+        )
+        if has_own_signature and not isinstance(html, str):
+            raise ConnectorError(
+                f"{type(self).__name__} overrides retired_page_signature() but "
+                f"its fetch_detail() payload for external_id={external_id} "
+                f"carries no 'html' key (keys: {sorted(payload)}) — the "
+                "signature would silently never fire. Either return the page "
+                "HTML from fetch_detail() or override verify_listing() "
+                "(issue #643)."
+            )
         signature = self.retired_page_signature(
             html if isinstance(html, str) else "",
             final_url if isinstance(final_url, str) else None,

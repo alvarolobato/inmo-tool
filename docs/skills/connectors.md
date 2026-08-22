@@ -92,6 +92,22 @@ The same spike is the best available argument for why a soft block must change
 nothing: of two stale milanuncios ads checked, one served the real page and the
 other served the "Pardon Our Interruption" GeeTest wall with HTTP 200.
 
+Two things to get right when opting a connector in:
+
+* **`verify_via_fetch_detail()` reads `raw.raw["html"]`** to run your
+  signature. If your `fetch_detail()` returns a parsed payload without that
+  key (milanuncios returns `{"url", "props"}`), the signature can never fire.
+  The helper now raises rather than silently passing an empty string, but the
+  real fix is to return the page HTML alongside whatever you parsed — add the
+  two in the same change, never the signature alone.
+* **`stale_verification_budget_per_run`** is a per-connector ceiling on the
+  global `etl.stale_verification_budget_per_run`, applied as a `min()` so the
+  global 0 remains a kill switch. Set it when your portal's measured detail
+  budget is tight: verification appends extra detail fetches to *every* hourly
+  run, and unlike a within-run budget overrun, a soft block that lasts longer
+  than the run interval poisons the *next* run's `discover()` too. Milanuncios
+  sets 2 and its rental subclass 1 (D-017/#179: ~5 fetches, then 60+ minutes).
+
 ## Skip-if-seen: the fetch-budget policy (issue #143)
 
 `etl/orchestrator.py`'s fetch loop used to call `fetch_detail()` for every id `discover()` returned, every run, unconditionally. That's invisible at ~30 ids and a blocker at ~1,500 (Fotocasa's zone-partitioned sweep, issue #65) — 1,500 ids at 3 req/min is ~8h against an hourly schedule. `_should_skip_fetch` (called once per discovered id, inside `run_connector`) decides whether a listing already known from a prior run is worth re-fetching this run.

@@ -496,6 +496,19 @@ class MilanunciosConnector(Connector):
     # single best argument for why a soft block must change nothing.
     supports_stale_verification = True
 
+    # Issue #643 (PR #685 review, M2): 2, not the global 10. This is the
+    # tightest measured detail budget in the repo — D-017/#179 recorded 16 of
+    # 18 circuit-open runs at exactly `discovered=41 fetched=5`, i.e. the site
+    # serves about five successful `fetch_detail`s and then soft-blocks for
+    # 60+ minutes. At the global budget, verification would append up to ten
+    # MORE detail fetches to every hourly run against that wall. D-070's
+    # leftover-budget posture protects this run's real work, but a lockout
+    # that long outlives the run and poisons the next hour's discover(), so
+    # the failure mode here is not a false withdrawal — it is verification
+    # quietly degrading real ingestion. Two per run still drains the backlog,
+    # just slowly, which is the trade this connector has to make.
+    stale_verification_budget_per_run = 2
+
     # Issue #478: an owner-pinned milanuncios search URL is this connector's
     # recall source for a profile. Since Phase 5 (D-101) discover() consumes it
     # (`scope.override_url`) as its entry page. NOTE: this is the SALE connector
@@ -764,6 +777,15 @@ class MilanunciosConnector(Connector):
     # GeeTest bot wall. Inventing a signature out of "the props are missing"
     # would therefore map a rate-throttle straight to `withdrawn`. Left at
     # the base `None` until a real retired page is captured.
+    #
+    # CONSTRAINT if that day comes (PR #685 review, M3): `fetch_detail()` here
+    # returns `raw={"url", "props"}` and NO `html` key, so a signature added
+    # to this class could never be reached through `verify_via_fetch_detail`,
+    # which reads `raw.raw["html"]`. That helper now raises rather than
+    # silently passing an empty string, so the mistake is loud — but the
+    # actual fix is to also return the page HTML from `fetch_detail()` (or
+    # override `verify_listing()`) at the same time as the signature. Do not
+    # add one without the other.
 
     def verify_listing(
         self, external_id: str, url: str | None, throttle: Throttle

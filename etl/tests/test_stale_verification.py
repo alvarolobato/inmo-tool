@@ -20,7 +20,9 @@ test_orchestrator.py uses it: what is under test is what ends up persisted.
 
 from __future__ import annotations
 
+import ast
 import re
+import textwrap
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -44,6 +46,7 @@ from etl.connectors.circuit_breaker import CircuitBreaker
 from etl.connectors.fotocasa import FotocasaConnector
 from etl.connectors.fotocasa_rental import FotocasaRentalConnector
 from etl.connectors.milanuncios import MilanunciosConnector
+from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
 from etl.connectors.pisos import PisosConnector
 from etl.connectors.rate_limit import RateLimiter
 
@@ -51,6 +54,71 @@ _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 _SOURCE = "stale-verify-test"
+
+
+# --------------------------------------------------------------------------
+# EC-4's source scanner (shared by the guard and by the guard's own self-test)
+# --------------------------------------------------------------------------
+
+
+_AGE_PREDICATE = re.compile(
+    r"NOW\(\)\s*-|CURRENT_TIMESTAMP\s*-|make_interval|INTERVAL\s*'",
+    re.IGNORECASE,
+)
+
+# A WRITE of a terminal status, not a read of one. Anchored on `SET`, and
+# forbidden from crossing a `WHERE` or a `;` on its way to the assignment, so
+# `UPDATE listing SET last_seen_at = NOW() WHERE status = 'withdrawn'` (a
+# clock write on already-withdrawn rows) is correctly not a status write.
+_STATUS_WRITE = re.compile(
+    r"\bSET\b(?:(?!\bWHERE\b|;)[\s\S])*?\bstatus\s*=\s*"
+    r"'(?:withdrawn|expired|sold|reserved)'",
+    re.IGNORECASE,
+)
+
+
+def _sql_literals(source: str) -> list[str]:
+    """Every string literal in `source`, with adjacent fragments already joined.
+
+    The scanner works off the parsed AST rather than off raw text because SQL
+    in this codebase is routinely written as several implicitly-concatenated
+    fragments — `"UPDATE ... " " WHERE ..."` — and the whole point of PR
+    #685's H1 is that a text scan which stops at the fragment carrying the
+    status write never reaches the fragment carrying the WHERE clause.
+    Python's own parser concatenates those fragments for us, so the statement
+    arrives whole. f-strings (`JoinedStr`) are flattened to their literal
+    parts, which is enough: an interpolated value can't hide a `NOW() -`.
+    """
+    literals: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            literals.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            literals.append(
+                "".join(
+                    part.value
+                    for part in node.values
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                )
+            )
+    return literals
+
+
+def _statements_deriving_status_from_time(source: str) -> list[str]:
+    """SQL statements in `source` that write a terminal listing status AND
+    filter on elapsed time — i.e. that derive a status from the clock.
+
+    Split on `;` so two unrelated statements sharing one triple-quoted
+    literal (a status write here, an age predicate there) don't read as one
+    offender. Returns the offending statements, whitespace-collapsed, for the
+    assertion message.
+    """
+    offenders: list[str] = []
+    for literal in _sql_literals(source):
+        for statement in literal.split(";"):
+            if _STATUS_WRITE.search(statement) and _AGE_PREDICATE.search(statement):
+                offenders.append(" ".join(statement.split()))
+    return offenders
 
 
 # --------------------------------------------------------------------------
@@ -354,6 +422,8 @@ class TestOutcomeMapping:
                 "alive": 1,
                 "soft_blocked": 0,
                 "errors": 0,
+                "alarm": None,
+                "suppressed_withdrawals": 0,
             }
             after = _listing_row(pg_conn, listing_id)
             assert after["status"] == "active"
@@ -416,6 +486,9 @@ class TestOutcomeMapping:
                 "alive": 1,
                 "soft_blocked": 1,
                 "errors": 1,
+                # The guard stayed quiet: one withdrawal is never a mass one.
+                "alarm": None,
+                "suppressed_withdrawals": 0,
             }
             assert _listing_row(pg_conn, gone_id)["status"] == "withdrawn"
             assert _listing_row(pg_conn, alive_id)["status"] == "active"
@@ -855,40 +928,159 @@ class TestTimeOnlyNominates:
         Behavioural tests can only cover the paths they happen to exercise. A
         future "expire anything older than N days" would most plausibly arrive
         as one new UPDATE somewhere in `etl/`, and might well not go through
-        `verify_stale_listings` at all. So this scans every statement in the
-        package that writes a non-active `listing.status` and fails if the
+        `verify_stale_listings` at all. So this scans every SQL statement in
+        the package that writes a non-active `listing.status` and fails if the
         same statement also carries an age predicate.
 
         If this test fails, the fix is NOT to relax the pattern: it is that a
         status is being derived from a clock, which the whole of issue #643
         exists to forbid. Evidence comes from the source, never from the
         calendar.
+
+        The scanner itself is exercised against a deliberate offender by
+        `test_the_time_derived_status_guard_actually_fires` below — a guard
+        nobody has ever seen fire is a green check, not a guarantee.
         """
-        age_predicate = re.compile(
-            r"NOW\(\)\s*-|CURRENT_TIMESTAMP\s*-|make_interval|INTERVAL\s*'",
-            re.IGNORECASE,
-        )
-        status_write = re.compile(
-            r"SET[^;]*\bstatus\s*=\s*'(withdrawn|expired|sold|reserved)'",
-            re.IGNORECASE | re.DOTALL,
-        )
         offenders: list[str] = []
         for path in sorted(Path(__file__).parent.parent.rglob("*.py")):
             if "tests" in path.parts:
                 continue
-            text = path.read_text(encoding="utf-8")
-            for match in status_write.finditer(text):
-                # The statement this write belongs to: from the preceding
-                # UPDATE keyword to the end of the SET clause's line group.
-                start = text.rfind("UPDATE", 0, match.start())
-                statement = text[start if start != -1 else match.start() : match.end()]
-                if age_predicate.search(statement):
-                    offenders.append(f"{path.name}: {' '.join(statement.split())}")
+            for statement in _statements_deriving_status_from_time(
+                path.read_text(encoding="utf-8")
+            ):
+                offenders.append(f"{path.name}: {statement}")
         assert offenders == [], (
             "A listing status is being written by a statement that also filters "
             "on elapsed time. Time may only NOMINATE a listing for verification "
             "(issue #643) — a status change requires evidence from the source:\n"
             + "\n".join(offenders)
+        )
+
+    @pytest.mark.parametrize(
+        "label,source",
+        [
+            (
+                "one-line UPDATE",
+                """
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn'"
+                    " WHERE last_seen_at < NOW() - INTERVAL '45 days'"
+                )
+                """,
+            ),
+            (
+                "implicitly concatenated fragments, predicate in the WHERE",
+                """
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn' "
+                    " WHERE status = 'active' "
+                    "   AND last_seen_at < NOW() - INTERVAL '45 days'"
+                )
+                """,
+            ),
+            (
+                "triple-quoted SQL with make_interval",
+                '''
+                cur.execute(
+                    """
+                    UPDATE listing SET status = 'expired'
+                     WHERE last_seen_at < NOW() - make_interval(days => %s)
+                    """,
+                    (45,),
+                )
+                ''',
+            ),
+            (
+                "CTE-scoped, the status write far from the predicate",
+                '''
+                cur.execute(
+                    """
+                    WITH overdue AS (
+                        SELECT id FROM listing
+                         WHERE last_seen_at
+                                 < CURRENT_TIMESTAMP - INTERVAL '45 days'
+                    )
+                    UPDATE listing SET status = 'withdrawn'
+                     WHERE id IN (SELECT id FROM overdue)
+                    """
+                )
+                ''',
+            ),
+            (
+                "f-string with an interpolated window",
+                """
+                cur.execute(
+                    f"UPDATE listing SET status = 'sold'"
+                    f" WHERE last_seen_at < NOW() - INTERVAL '{days} days'"
+                )
+                """,
+            ),
+        ],
+    )
+    def test_the_time_derived_status_guard_actually_fires(self, label, source):
+        """The guard above is only worth having if it FIRES on the exact thing
+        D-157 forbids. It previously did not: it sliced the statement off at
+        the closing quote of `'withdrawn'`, so the WHERE clause — the only
+        place an age predicate ever appears — was never scanned, and every
+        offender below sailed straight through it (PR #685 review, H1).
+
+        So the offenders live here, in the one directory the scanner
+        deliberately skips, and are fed to it directly.
+        """
+        found = _statements_deriving_status_from_time(textwrap.dedent(source))
+        assert found, f"guard failed to fire on: {label}"
+
+    @pytest.mark.parametrize(
+        "label,source",
+        [
+            (
+                "nomination: an age predicate with no status write at all",
+                '''
+                cur.execute(
+                    """
+                    SELECT l.id FROM listing l
+                     WHERE l.status = 'active'
+                       AND l.last_seen_at < NOW() - make_interval(hours => %s)
+                    """
+                )
+                ''',
+            ),
+            (
+                "withdrawal on evidence: a status write with no clock",
+                """
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn' WHERE id = %s",
+                    (listing_id,),
+                )
+                """,
+            ),
+            (
+                "reading withdrawn rows by age is not writing a status",
+                """
+                cur.execute(
+                    "SELECT id FROM listing WHERE status = 'withdrawn'"
+                    "   AND last_seen_at < NOW() - INTERVAL '30 days'"
+                )
+                """,
+            ),
+            (
+                "touching a clock column while filtering on one is fine",
+                """
+                cur.execute(
+                    "UPDATE listing SET last_verification_attempt_at = NOW()"
+                    " WHERE status = 'withdrawn' AND id = %s",
+                    (listing_id,),
+                )
+                """,
+            ),
+        ],
+    )
+    def test_the_guard_does_not_fire_on_legitimate_sql(self, label, source):
+        """The other half of proving a guard works: it must stay quiet on the
+        patterns this feature is actually built out of. A guard that fired on
+        `_nominate_stale_listings` would be switched off within a week."""
+        assert _statements_deriving_status_from_time(textwrap.dedent(source)) == [], (
+            label
         )
 
 
@@ -1252,9 +1444,16 @@ class TestEstadoCounters:
                 pg_conn.commit()
             _cleanup(pg_conn)
 
-    def test_a_verification_bug_never_fails_the_run(self, pg_conn):
-        """The pass runs after real data has already been committed, so it must
-        not be able to turn a good ingest into a failed one."""
+    def test_a_single_listings_verification_blowing_up_never_fails_the_run(
+        self, pg_conn
+    ):
+        """The PER-LISTING `except`: one listing's `verify_listing` raising is
+        absorbed as "no evidence" and the pass carries on. The pass runs after
+        real data has already been committed, so it must not be able to turn a
+        good ingest into a failed one.
+
+        The OUTER wrapper — the pass itself blowing up before it ever reaches
+        a listing — is a different code path, covered by the next test."""
         _apply_schema(pg_conn)
         _cleanup(pg_conn)
         run_id = None
@@ -1296,3 +1495,557 @@ class TestEstadoCounters:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
                 pg_conn.commit()
             _cleanup(pg_conn)
+
+    def test_the_whole_verification_pass_blowing_up_never_fails_the_run(
+        self, pg_conn, monkeypatch
+    ):
+        """The OUTER wrapper in `run_connector`, which the per-listing test
+        above does not reach (PR #685 review, L4). If `verify_stale_listings`
+        raises before any listing is looked at — a bad query, a schema drift,
+        a bug in the nomination SQL — the ingest that already committed real
+        data must still be reported as the successful run it was.
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_id = None
+        try:
+            _insert_listing(pg_conn, "outer-boom-1", unseen_days=60)
+
+            def _explode(*args, **kwargs):
+                raise RuntimeError("the verification pass itself is broken")
+
+            monkeypatch.setattr(orchestrator, "_nominate_stale_listings", _explode)
+
+            connector = _VerifyingConnector()
+            orchestrator.CONNECTORS[:] = [connector]
+
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, verified_count, verified_gone_count "
+                    "  FROM connector_run_results "
+                    " WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                status, verified, gone = cur.fetchone()
+            assert status == "ok"
+            assert (verified, gone) == (0, 0)
+            assert connector.verify_calls == []
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM listing WHERE source = %s AND external_id = %s",
+                    (_SOURCE, "outer-boom-1"),
+                )
+                assert cur.fetchone()[0] == "active"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            if run_id is not None:
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM connector_run_results WHERE run_id = %s", (run_id,)
+                    )
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+                pg_conn.commit()
+            _cleanup(pg_conn)
+
+
+# --------------------------------------------------------------------------
+# The mass-withdrawal guard's own boundaries (PR #685 review: H2, M1, L4)
+# --------------------------------------------------------------------------
+
+
+def _seed_verification_history(
+    conn, source: str, *, runs: int, verified_each: int, gone_each: int
+) -> list[int]:
+    """Synthetic `connector_run_results` history for `source`, so the guard's
+    historical-baseline check has a baseline to compare against.
+
+    Returns the run ids, for cleanup.
+    """
+    run_ids: list[int] = []
+    with conn.cursor() as cur:
+        for _ in range(runs):
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status) "
+                "VALUES ('test-history', 'success') RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+            run_ids.append(run_id)
+            cur.execute(
+                "INSERT INTO connector_run_results "
+                "(run_id, connector_name, status, verified_count, "
+                " verified_gone_count) VALUES (%s, %s, 'ok', %s, %s)",
+                (run_id, source, verified_each, gone_each),
+            )
+    conn.commit()
+    return run_ids
+
+
+def _drop_verification_history(conn, run_ids: list[int]) -> None:
+    if not run_ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM connector_run_results WHERE run_id = ANY(%s)", (run_ids,)
+        )
+        cur.execute("DELETE FROM connector_runs WHERE id = ANY(%s)", (run_ids,))
+    conn.commit()
+
+
+def _gone_and_alive(conn, gone: int, alive: int) -> tuple[list[int], dict]:
+    """`gone` listings that 404 plus `alive` listings that answer, wired up."""
+    ids: list[int] = []
+    answers: dict = {}
+    for i in range(gone):
+        external_id = f"boundary-gone-{i}"
+        ids.append(_insert_listing(conn, external_id, unseen_days=90 - i))
+        answers[external_id] = ListingUnavailableError("HTTP 404")
+    for i in range(alive):
+        external_id = f"boundary-alive-{i}"
+        _insert_listing(conn, external_id, unseen_days=60 - i)
+        answers[external_id] = VerificationOutcome("alive", "HTTP 200")
+    return ids, answers
+
+
+class TestMassWithdrawalGuardBoundaries:
+    """The guard is the last thing standing between a broken detail path and a
+    source's whole inventory going `withdrawn`, so its edges are tested
+    directly rather than inferred from the middle of the range.
+
+    Every case here was a real defect found by PR #685's review, reproduced
+    before it was fixed:
+
+    * exactly 80% sailed through, because the comparison was `>` while both
+      the docstring and D-157 promised "fewer than 80%" (H2);
+    * a 5-*verdict* floor switched the guard off entirely below five verdicts
+      — i.e. precisely when the detail path has broken, half the attempts are
+      erroring and the breaker has already cut the pass short (M1).
+    """
+
+    def test_exactly_the_alarm_ratio_withdraws_nothing(self, pg_conn):
+        """8 of 10 is 80%, and 80% is already the systemic signature. The
+        boundary belongs on the blocking side: a clean systemic break that
+        happens to spare two listings is still a systemic break."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=8, alive=2)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (10, 0)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "active"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_just_under_the_alarm_ratio_still_withdraws(self, pg_conn):
+        """The other side of the same boundary — 7 of 10 is under it, and the
+        guard must not creep into swallowing ordinary churn."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=7, alive=3)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (10, 7)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "withdrawn"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_a_tiny_sample_that_is_entirely_gone_withdraws_nothing(self, pg_conn):
+        """The M1 scenario, which the old verdict floor let through ungated:
+        the detail path breaks, most attempts error, the breaker opens after
+        four verdicts — and all four of them are 404s. Four is a small sample,
+        which is an argument for MORE caution, not less."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=4, alive=0)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (4, 0)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "active"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_one_or_two_withdrawals_are_never_a_mass_withdrawal(self, pg_conn):
+        """Why the floor exists at all, and why it belongs on the WITHDRAWALS
+        rather than on the verdict count: two listings verified, both 404, is
+        a 100% gone rate and is also just two listings. A ratio over two
+        verdicts is noise, and blocking here would mean a source that only
+        ever has a listing or two overdue could never withdraw anything."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=2, alive=0)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (2, 2)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "withdrawn"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_a_source_that_has_never_withdrawn_anything_does_not_start_in_bulk(
+        self, pg_conn
+    ):
+        """The historical-baseline check (M1-ii). 6 of 10 is 60%: comfortably
+        under the single-run ratio, and indistinguishable inside one run from
+        genuine churn. What IS distinguishable is that this source has 100
+        verdicts of history and has never once withdrawn a listing — so 60%
+        today is a break, not a market event, and a stateless ratio can never
+        see it."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_ids: list[int] = []
+        try:
+            run_ids = _seed_verification_history(
+                pg_conn, _SOURCE, runs=10, verified_each=10, gone_each=0
+            )
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=6, alive=4)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (10, 0)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "active"
+        finally:
+            _drop_verification_history(pg_conn, run_ids)
+            _cleanup(pg_conn)
+
+    def test_a_source_whose_history_already_shows_churn_is_left_alone(self, pg_conn):
+        """The same 6-of-10 run, against a source that has always withdrawn
+        about half of what it verifies. The baseline check must recognise its
+        own source's normal and stay out of the way — otherwise it would be a
+        second, stricter ratio guard rather than a break detector."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_ids: list[int] = []
+        try:
+            run_ids = _seed_verification_history(
+                pg_conn, _SOURCE, runs=10, verified_each=10, gone_each=5
+            )
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=6, alive=4)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (10, 6)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "withdrawn"
+        finally:
+            _drop_verification_history(pg_conn, run_ids)
+            _cleanup(pg_conn)
+
+    def test_too_little_history_leaves_the_baseline_check_out_of_it(self, pg_conn):
+        """A source with almost no verification history has no baseline, and
+        an absent baseline must not read as "has never withdrawn anything" —
+        that would mean the very first pass could never withdraw a batch, and
+        the mechanism would never start."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_ids: list[int] = []
+        try:
+            run_ids = _seed_verification_history(
+                pg_conn, _SOURCE, runs=1, verified_each=5, gone_each=0
+            )
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=6, alive=4)
+
+            result = _run_verification(
+                pg_conn, _VerifyingConnector(answers=answers), budget=20
+            )
+
+            assert (result["verified"], result["gone"]) == (10, 6)
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "withdrawn"
+        finally:
+            _drop_verification_history(pg_conn, run_ids)
+            _cleanup(pg_conn)
+
+    def test_a_fired_guard_is_visible_on_the_run_row(self, pg_conn):
+        """A suppressed action has to leave a trace (PR #685 review, L2).
+
+        `verified_count=10, verified_gone_count=0` is byte-identical whether
+        ten listings came back alive or ten came back gone and every one of
+        them was withheld — and the second is the single most important thing
+        an operator could be told about this pass. So the guard writes which
+        check tripped to `connector_run_results.verification_alarm`, and a
+        quiet run leaves it NULL.
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_id = None
+        try:
+            _, answers = _gone_and_alive(pg_conn, gone=8, alive=2)
+            connector = _VerifyingConnector(answers=answers)
+            orchestrator.CONNECTORS[:] = [connector]
+
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT verified_count, verified_gone_count, "
+                    "       verification_alarm "
+                    "  FROM connector_run_results "
+                    " WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                verified, gone, alarm = cur.fetchone()
+
+            assert (verified, gone) == (10, 0)
+            assert alarm is not None and alarm.startswith("ratio 8/10"), alarm
+        finally:
+            orchestrator.CONNECTORS.clear()
+            if run_id is not None:
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM connector_run_results WHERE run_id = %s", (run_id,)
+                    )
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+                pg_conn.commit()
+            _cleanup(pg_conn)
+
+    def test_a_quiet_guard_leaves_the_alarm_null(self, pg_conn):
+        """The other half: `WHERE verification_alarm IS NOT NULL` is only a
+        usable "show me the suppressed runs" query if an ordinary run really
+        does store NULL rather than an empty string or a cheerful 'ok'."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        run_id = None
+        try:
+            gone_ids, answers = _gone_and_alive(pg_conn, gone=3, alive=7)
+            connector = _VerifyingConnector(answers=answers)
+            orchestrator.CONNECTORS[:] = [connector]
+
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT verified_count, verified_gone_count, "
+                    "       verification_alarm "
+                    "  FROM connector_run_results "
+                    " WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                verified, gone, alarm = cur.fetchone()
+
+            assert (verified, gone) == (10, 3)
+            assert alarm is None
+            for listing_id in gone_ids:
+                assert _listing_row(pg_conn, listing_id)["status"] == "withdrawn"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            if run_id is not None:
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM connector_run_results WHERE run_id = %s", (run_id,)
+                    )
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+                pg_conn.commit()
+            _cleanup(pg_conn)
+
+
+# --------------------------------------------------------------------------
+# Crash survival, per-connector budget, and the helper's HTML contract
+# --------------------------------------------------------------------------
+
+
+class TestVerificationAttemptIsCommittedBeforeTheRequest:
+    """The one property that actually matters about
+    `last_verification_attempt_at`: it is committed BEFORE the request goes
+    out, so a process that dies mid-request still rotates that listing to the
+    back of the queue. Recorded after the fact, a crash-looping request would
+    re-ask about the same head-of-queue listing forever and the backlog behind
+    it would never drain.
+
+    Asserted from a SECOND connection, because that is the only thing that can
+    tell "committed" from "written in our own open transaction" — the
+    distinction the crash-loop property depends on.
+    """
+
+    def test_another_connection_sees_the_attempt_while_the_request_is_in_flight(
+        self, pg_conn
+    ):
+        import os
+
+        import psycopg2
+
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        observer = psycopg2.connect(os.environ["POSTGRES_DSN"])
+        seen: list[object] = []
+        try:
+            listing_id = _insert_listing(pg_conn, "crash-1", unseen_days=90)
+            # Committed up front and asserted below, so the observer's view of
+            # the row is never in question — the ONLY thing this test is
+            # allowed to be measuring is whether the attempt timestamp itself
+            # was committed before the request went out.
+            pg_conn.commit()
+
+            class _ObservingConnector(_VerifyingConnector):
+                def verify_listing(self, external_id, url, throttle):
+                    # Mid-request: what would a process that died right here
+                    # have left behind in the database?
+                    observer.rollback()  # fresh snapshot, not a stale one
+                    with observer.cursor() as cur:
+                        cur.execute(
+                            "SELECT last_verification_attempt_at FROM listing "
+                            " WHERE id = %s",
+                            (listing_id,),
+                        )
+                        row = cur.fetchone()
+                    assert row is not None, "the listing row itself is not visible"
+                    seen.append(row[0])
+                    raise RuntimeError("process dies here")
+
+            _run_verification(pg_conn, _ObservingConnector())
+
+            assert seen and seen[0] is not None, (
+                "last_verification_attempt_at was NOT committed before the "
+                "request — a crash mid-request would re-ask about this same "
+                "listing forever"
+            )
+            # And the crash itself changed nothing else about the listing.
+            assert _listing_row(pg_conn, listing_id)["status"] == "active"
+            assert _status_events(pg_conn, listing_id) == []
+        finally:
+            observer.close()
+            _cleanup(pg_conn)
+
+
+class TestPerConnectorBudgetCeiling:
+    """`Connector.stale_verification_budget_per_run` (PR #685 review, M2).
+
+    Milanuncios is the reason it exists: D-017/#179 measured it serving ~5
+    successful detail fetches before a 60+ minute soft block, so appending up
+    to 10 verification fetches to every hourly run would wall the connector
+    for longer than the interval between runs — degrading real ingestion,
+    which is a different and worse failure than a false withdrawal.
+    """
+
+    def test_a_connector_can_lower_the_global_budget(self, pg_conn):
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            for i in range(8):
+                _insert_listing(pg_conn, f"capped-{i}", unseen_days=90 - i)
+
+            class _Capped(_VerifyingConnector):
+                stale_verification_budget_per_run = 2
+
+            connector = _Capped()
+            _run_verification(pg_conn, connector, budget=10)
+
+            assert len(connector.verify_calls) == 2
+        finally:
+            _cleanup(pg_conn)
+
+    def test_a_connector_can_never_raise_the_global_budget(self, pg_conn):
+        """The global knob is the operator's kill switch: setting
+        `etl.stale_verification_budget_per_run` to 0 must stop every
+        connector, and no class attribute may override that."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            for i in range(8):
+                _insert_listing(pg_conn, f"uncapped-{i}", unseen_days=90 - i)
+
+            class _Greedy(_VerifyingConnector):
+                stale_verification_budget_per_run = 50
+
+            greedy = _Greedy()
+            _run_verification(pg_conn, greedy, budget=3)
+            assert len(greedy.verify_calls) == 3
+
+            off = _Greedy()
+            result = _run_verification(pg_conn, off, budget=0)
+            assert off.verify_calls == []
+            assert result["nominated"] == 0
+        finally:
+            _cleanup(pg_conn)
+
+    def test_milanuncios_caps_itself_below_the_global_budget(self):
+        """The measured value, pinned. Not a style preference: this connector
+        has the tightest detail budget in the repo (D-017/#179)."""
+        assert MilanunciosConnector.stale_verification_budget_per_run == 2
+        assert MilanunciosRentalConnector.stale_verification_budget_per_run == 1
+        # Stated on the subclass rather than inherited, same as its rate limit.
+        assert (
+            "stale_verification_budget_per_run" in MilanunciosRentalConnector.__dict__
+        )
+
+
+class TestVerifyViaFetchDetailHtmlContract:
+    """`verify_via_fetch_detail` reads `raw.raw["html"]` to run the
+    retired-page signature. A connector whose `fetch_detail()` returns a
+    parsed payload without that key (milanuncios: `{"url", "props"}`) would
+    hand the signature an empty string forever — silently never firing.
+
+    `TestRetiredPageSignatures` cannot catch this: it calls
+    `retired_page_signature` directly rather than through the helper, so the
+    wiring between the two is exactly the untested gap (PR #685 review, M3).
+    """
+
+    def test_a_connector_with_a_signature_but_no_html_fails_loudly(self):
+        class _SignatureWithoutHtml(_VerifyingConnector):
+            def retired_page_signature(self, html, final_url=None):
+                return "retirado" if "retirado" in html else None
+
+            def fetch_detail(self, external_id, throttle):
+                return RawListing(
+                    external_id=external_id,
+                    source=_SOURCE,
+                    raw={"url": "https://example.test/x", "props": {}},
+                )
+
+        with pytest.raises(ConnectorError) as excinfo:
+            _SignatureWithoutHtml().verify_via_fetch_detail(
+                "x-1", throttle=lambda: None
+            )
+        assert "no 'html' key" in str(excinfo.value)
+
+    def test_a_connector_with_no_signature_of_its_own_is_unaffected(self):
+        """Milanuncios' actual shape: no signature by design (404/410 carries
+        the whole signal), so a payload without `html` is fine and must not
+        start raising."""
+
+        class _NoSignature(_VerifyingConnector):
+            def fetch_detail(self, external_id, throttle):
+                return RawListing(
+                    external_id=external_id,
+                    source=_SOURCE,
+                    raw={"url": "https://example.test/x", "props": {}},
+                )
+
+            def normalize(self, raw):
+                return _canonical(raw.external_id)
+
+        outcome = _NoSignature().verify_via_fetch_detail("x-1", throttle=lambda: None)
+        assert outcome.state == "alive"
+
+    def test_milanuncios_still_has_no_signature_of_its_own(self):
+        """If this ever fails, milanuncios has grown a signature — and the
+        comment above `verify_listing` in that file says what must land in the
+        same change: `fetch_detail()` must also return the page HTML."""
+        assert (
+            MilanunciosConnector.retired_page_signature
+            is Connector.retired_page_signature
+        )

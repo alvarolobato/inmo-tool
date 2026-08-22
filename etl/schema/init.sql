@@ -269,12 +269,17 @@ ALTER TABLE listing ADD COLUMN IF NOT EXISTS operation TEXT NOT NULL DEFAULT 'sa
 -- ever derive a status from it.
 ALTER TABLE listing ADD COLUMN IF NOT EXISTS last_verification_attempt_at TIMESTAMPTZ;
 
--- Nomination reads (source, status, then the rotation clock) once per
--- connector per run and takes the first N rows; this index keeps that a
--- cheap ordered scan instead of a sort over every active listing of the
--- biggest sources (fotocasa alone: 4.346 activos).
+-- Nomination runs once per connector per run: it filters on (source, status)
+-- plus an age predicate, orders by the rotation clock and takes the first N
+-- rows. The ORDER BY is an EXPRESSION — COALESCE(last_verification_attempt_at,
+-- last_seen_at, first_seen_at) — so the index has to carry that expression to
+-- serve the ordering; a plain trailing-column index only narrows the scan and
+-- still sorts (PR #685 review, L1: the earlier comment here claimed otherwise).
+-- Irrelevant at today's 13k rows either way, and stated so the next person
+-- reading an EXPLAIN isn't misled.
 CREATE INDEX IF NOT EXISTS idx_listing_stale_verification_queue
-    ON listing (source, status, last_verification_attempt_at NULLS FIRST, last_seen_at);
+    ON listing (source, status,
+                (COALESCE(last_verification_attempt_at, last_seen_at, first_seen_at)));
 
 -- ============================================================
 -- Change tracking (append-only)
@@ -1221,6 +1226,21 @@ ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
 -- is most of them, so a nonzero value always means real work happened.
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verified_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verified_gone_count INTEGER NOT NULL DEFAULT 0;
+
+-- Issue #643: set ONLY when the mass-withdrawal guard suppressed this run's
+-- withdrawals, naming which of its checks tripped and by how much (e.g.
+-- 'ratio 8/10 >= 80%', 'baseline 60% vs 0% histórico'). NULL whenever the
+-- guard stayed quiet, so `WHERE verification_alarm IS NOT NULL` is the
+-- "show me the suppressed runs" query.
+--
+-- It needs its own column because every other signal on this row reports an
+-- action TAKEN, and this one reports an action WITHHELD: a guarded run stores
+-- verified_count = 10, verified_gone_count = 0, which is byte-identical to a
+-- run where all ten listings genuinely came back alive. Without this, the one
+-- event an operator most needs to see — "we found ten listings gone and
+-- deliberately withdrew none of them, because it looked like our own bug" —
+-- exists only as a log line that rotates away.
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verification_alarm TEXT;
 
 -- Issue #143: listings this connector's run left unfetched under the
 -- skip-if-seen policy ("known, still present per discover(), deliberately

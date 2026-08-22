@@ -89,14 +89,52 @@ _DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS = 168
 # "every listing we asked about is 404" is not a market event — it is the
 # detail-URL shape having broken, and acting on it would withdraw a source's
 # inventory on an artefact of our own bug. So withdrawals are collected during
-# the pass and only applied at the end, and only if the gone fraction of
-# verdicts stays below this ratio (or the sample is too small to judge).
-# Above it: nothing is withdrawn, and the run logs a structural alarm.
-# Deliberately generous — these listings were nominated precisely BECAUSE they
-# look abandoned, so a genuinely high gone rate is expected here in a way it
-# never is in the fetch loop (hence 0.8 vs #291's 0.5).
+# the pass and only applied at the end, and only if all three checks below
+# clear. If any of them trips: nothing is withdrawn, the run logs a structural
+# alarm, and `connector_run_results.verification_alarm` records which one.
+#
+# 1. RATIO. The gone fraction of this run's verdicts must stay strictly below
+#    this. Deliberately generous — these listings were nominated precisely
+#    BECAUSE they look abandoned, so a genuinely high gone rate is expected
+#    here in a way it never is in the fetch loop (hence 0.8 vs #291's 0.5).
+#    `>=` and not `>`: at exactly 8-of-10 the ratio is already the systemic
+#    signature, and "fewer than 80%" is what D-157 point 8 promises (PR #685
+#    review, H2 — the original `>` let exactly-80% through).
 _VERIFICATION_GONE_ALARM_RATIO = 0.8
-_VERIFICATION_GONE_ALARM_MIN_VERDICTS = 5
+
+# 2. FLOOR, on WITHDRAWALS — never on verdicts. A ratio computed over one or
+#    two verdicts says nothing, so some floor is needed; the mistake the first
+#    version made was to put it on the denominator (`verified >= 5`), which
+#    switched the guard OFF for small samples and therefore switched it off in
+#    exactly the scenario it exists for: the detail path breaks, most attempts
+#    raise, the breaker opens after four verdicts, and all four gone verdicts
+#    are applied ungated (PR #685 review, M1). Moved onto the quantity being
+#    gated, where it reads as what it is — "withdrawing one or two listings on
+#    a 100% gone rate is not a mass withdrawal; withdrawing three is enough to
+#    be worth a ratio check". Applies at every sample size.
+_VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS = 3
+
+# 3. HISTORICAL BASELINE. A single-run ratio is stateless and cannot tell a
+#    60% systemic break from 60% genuine churn — that is undecidable inside
+#    one run. What IS decidable is whether this run looks like this source's
+#    own history: `connector_run_results.verified_gone_count` gives a free
+#    per-source baseline, and "a source that has withdrawn 0 in its entire
+#    history suddenly withdrawing 8" is precisely the signal a ratio cannot
+#    see. This run's gone fraction may exceed the source's historical gone
+#    fraction by at most this many percentage points.
+#
+#    Only consulted once the source has accumulated enough verdicts to have a
+#    baseline at all, otherwise the very first pass could never withdraw
+#    anything. Note the deliberate ratchet: a blocked run records
+#    `verified_gone_count = 0`, which pushes the baseline DOWN, so a source
+#    whose every run trips this stays blocked until an operator looks. That is
+#    the intended posture (D-157's asymmetry: a missed withdrawal is
+#    invisible, a false one silently removes a live candidate from every
+#    profile feed) and it self-heals for ordinary churn, where sub-threshold
+#    runs do apply and raise the baseline as they go.
+_VERIFICATION_GONE_BASELINE_MARGIN = 0.5
+_VERIFICATION_GONE_BASELINE_MIN_HISTORY = 20
+_VERIFICATION_GONE_BASELINE_RUNS = 50
 
 logger = logging.getLogger("etl.orchestrator")
 
@@ -703,6 +741,110 @@ def _refresh_verified_alive(conn, listing_id: int) -> None:
     conn.commit()
 
 
+def _mass_withdrawal_alarm(
+    conn, source: str, gone_verdicts: int, verified: int
+) -> tuple[str, str] | None:
+    """Should this run's withdrawals be suppressed? Returns why, or None.
+
+    `(code, explanation)`: a short stable code for
+    `connector_run_results.verification_alarm` (so "the guard fired" is
+    queryable rather than only a log line — a suppressed ACTION has to be
+    visible, which a pair of zeroed counters is not), and the prose for the
+    operator-facing log.
+
+    Issue #643's mass-withdrawal guard, in one place so the rule and the
+    operator-facing explanation can't drift apart. Three checks, all of which
+    must clear before a single listing is withdrawn — see the
+    `_VERIFICATION_GONE_*` constants for the reasoning behind each number.
+
+    The floor is on WITHDRAWALS, not on verdicts: below it nothing else is
+    consulted, because withdrawing one or two listings is not a mass
+    withdrawal at any sample size and a ratio over two verdicts is noise.
+    Above it, both the single-run ratio and the source's own history apply.
+    """
+    if gone_verdicts < _VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS:
+        return None
+    if verified <= 0:  # unreachable while gone_verdicts > 0, kept total
+        return None
+
+    run_rate = gone_verdicts / verified
+    if run_rate >= _VERIFICATION_GONE_ALARM_RATIO:
+        return (
+            f"ratio {gone_verdicts}/{verified} >= {_VERIFICATION_GONE_ALARM_RATIO:.0%}",
+            (
+                f"at or above the {_VERIFICATION_GONE_ALARM_RATIO:.0%} guard. "
+                "That is the signature of the detail-URL shape (or the whole "
+                "detail path) having broken, not of a real removal wave, so"
+            ),
+        )
+
+    historical_gone, historical_verified = _historical_verified_gone_rate(conn, source)
+    if historical_verified < _VERIFICATION_GONE_BASELINE_MIN_HISTORY:
+        return None
+    historical_rate = historical_gone / historical_verified
+    if run_rate > historical_rate + _VERIFICATION_GONE_BASELINE_MARGIN:
+        return (
+            f"baseline {run_rate:.0%} vs {historical_rate:.0%} histórico",
+            (
+                f"({run_rate:.0%}) — under the "
+                f"{_VERIFICATION_GONE_ALARM_RATIO:.0%} single-run guard, but "
+                f"more than {_VERIFICATION_GONE_BASELINE_MARGIN:.0%} above this "
+                f"source's own historical rate of {historical_rate:.0%} "
+                f"({historical_gone}/{historical_verified} over its last "
+                f"{_VERIFICATION_GONE_BASELINE_RUNS} runs). A source that has "
+                "barely withdrawn anything suddenly withdrawing a batch is the "
+                "break a single-run ratio cannot see, so"
+            ),
+        )
+    return None
+
+
+def _historical_verified_gone_rate(conn, source: str) -> tuple[int, int]:
+    """`(gone, verified)` summed over this connector's PREVIOUS verification runs.
+
+    Issue #643 / PR #685 review (M1-ii). The free half of the mass-withdrawal
+    guard: `connector_run_results` already carries `verified_count` and
+    `verified_gone_count` per source per run, so the source's own historical
+    gone rate costs one indexed aggregate and no new state.
+
+    Reads the most recent `_VERIFICATION_GONE_BASELINE_RUNS` result rows so an
+    ancient baseline can't outvote current behaviour forever. The current
+    run's row does not exist yet — `_record_connector_result` is called after
+    the verification pass — so there is nothing to exclude.
+
+    Returns `(0, 0)` on any failure, which the caller reads as "no baseline,
+    don't apply this check": the baseline is a bonus signal, and a query
+    problem must never be able to withdraw listings that the ratio check
+    would have stopped, nor block ones it would have allowed.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(verified_gone_count), 0),
+                       COALESCE(SUM(verified_count), 0)
+                  FROM (SELECT verified_gone_count, verified_count
+                          FROM connector_run_results
+                         WHERE connector_name = %s
+                         ORDER BY id DESC
+                         LIMIT %s) recent
+                """,
+                (source, _VERIFICATION_GONE_BASELINE_RUNS),
+            )
+            row = cur.fetchone()
+        return (int(row[0]), int(row[1])) if row else (0, 0)
+    except Exception:  # a missing baseline is a valid answer
+        conn.rollback()
+        logger.warning(
+            "Connector %s: could not read the historical verified-gone "
+            "baseline — the mass-withdrawal guard falls back to its ratio "
+            "check alone this run",
+            source,
+            exc_info=True,
+        )
+        return (0, 0)
+
+
 def _withdraw_verified_gone(conn, source: str, gone: list[tuple[int, str, str]]) -> int:
     """Mark verified-absent listings `withdrawn`, each citing its own evidence.
 
@@ -795,15 +937,32 @@ def verify_stale_listings(
     nothing, which is an honest state to be in.
 
     **Mass-withdrawal guard.** Withdrawals are buffered and applied only once
-    every verdict is in, and only if the gone fraction is below
-    `_VERIFICATION_GONE_ALARM_RATIO`. "All ten 404" is far more likely to be
-    our detail-URL construction having broken than ten simultaneous
-    removals, and the cost of being wrong is asymmetric: a missed withdrawal
-    is invisible, a false one silently deletes a live candidate from every
-    profile feed.
+    every verdict is in, and only if `_mass_withdrawal_alarm` stays silent:
+    fewer than `_VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS` withdrawals (below
+    which nothing else is consulted), a gone fraction strictly below
+    `_VERIFICATION_GONE_ALARM_RATIO`, and — once the source has enough
+    history to have a baseline — a gone fraction no more than
+    `_VERIFICATION_GONE_BASELINE_MARGIN` above the source's own historical
+    one. "All ten 404" is far more likely to be our detail-URL construction
+    having broken than ten simultaneous removals, and the cost of being wrong
+    is asymmetric: a missed withdrawal is invisible, a false one silently
+    deletes a live candidate from every profile feed. When the guard fires
+    nothing is withdrawn and the nominated listings stay active, so they are
+    simply re-nominated on a later run.
+
+    **Budget.** `budget` is the global `etl.stale_verification_budget_per_run`;
+    a connector may lower it further via its own
+    `stale_verification_budget_per_run` class attribute (never raise it — see
+    `Connector.stale_verification_budget_per_run`). Milanuncios uses this:
+    D-017/#179 measured it serving ~5 successful detail fetches before a 60+
+    minute soft block, and a block that long outlives the run and poisons the
+    next hourly `discover()`, so verification must not append 10 more detail
+    fetches to every run there.
 
     Returns per-source counters for Estado: `nominated`, `verified` (verdicts
-    reached), `gone` (withdrawn), `alive`, `soft_blocked`, `errors`.
+    reached), `gone` (withdrawn), `alive`, `soft_blocked`, `errors`, plus
+    `alarm`/`suppressed_withdrawals` — non-null only when the guard above
+    fired, naming which check tripped and how many withdrawals it withheld.
     """
     result = {
         "nominated": 0,
@@ -812,9 +971,21 @@ def verify_stale_listings(
         "alive": 0,
         "soft_blocked": 0,
         "errors": 0,
+        # Set only when the mass-withdrawal guard fired: a short code naming
+        # which check tripped, plus how many withdrawals it suppressed. Stored
+        # on the run row so a SUPPRESSED ACTION is visible — `verified=10,
+        # gone=0` is otherwise byte-identical to "all ten came back alive".
+        "alarm": None,
+        "suppressed_withdrawals": 0,
     }
     if not connector.supports_stale_verification:
         return result
+    # A connector may cap the global budget further, never raise it — so an
+    # operator setting `etl.stale_verification_budget_per_run = 0` still stops
+    # every connector dead (issue #643, PR #685 review M2).
+    connector_cap = getattr(connector, "stale_verification_budget_per_run", None)
+    if connector_cap is not None:
+        budget = min(budget, max(int(connector_cap), 0))
     if breaker.tripped:
         # No leftover budget: the connector already spent its error allowance
         # on real work this run. Verification is the lowest-priority consumer
@@ -874,6 +1045,16 @@ def verify_stale_listings(
             # for a week, rather than meeting it in passing during a sweep.
             conn.rollback()
             result["verified"] += 1
+            # `record_success`, deliberately — and note this INVERTS what the
+            # fetch loop does with the same exception ~200 lines up in
+            # `run_connector`, which records a FATAL breaker error precisely
+            # so a wholesale 404 break trips the breaker. Both are right for
+            # their context: there, a 404 met in passing is a symptom; here,
+            # we asked a specific question and got a definitive answer, so the
+            # request succeeded whatever the answer was. The cost is that a
+            # fully broken detail path yields a run of "successes" and the
+            # breaker never trips during verification — which is exactly what
+            # `_mass_withdrawal_alarm` is for, and why it is not optional.
             breaker.record_success()
             pending_withdrawals.append((listing_id, external_id, str(exc)))
             continue
@@ -941,21 +1122,23 @@ def verify_stale_listings(
         breaker.record_success()
 
     gone_verdicts = len(pending_withdrawals)
-    if (
-        result["verified"] >= _VERIFICATION_GONE_ALARM_MIN_VERDICTS
-        and gone_verdicts > result["verified"] * _VERIFICATION_GONE_ALARM_RATIO
-    ):
+    alarm = _mass_withdrawal_alarm(
+        conn, connector.name, gone_verdicts, result["verified"]
+    )
+    if alarm is not None:
+        alarm_code, alarm_prose = alarm
+        result["alarm"] = alarm_code
+        result["suppressed_withdrawals"] = gone_verdicts
         # Structural break, not a market event. Withdraw nothing.
         logger.error(
-            "Connector %s: %d/%d verified listings came back gone — above the "
-            "%.0f%% guard. That is the signature of the detail-URL shape (or "
-            "the whole detail path) having broken, not of a real removal "
-            "wave, so NO listing was withdrawn this run. Check "
-            "verify_listing/fetch_detail against the live site.",
+            "Connector %s: %d/%d verified listings came back gone — %s NO "
+            "listing was withdrawn this run; they stay active and get "
+            "re-nominated next run. Check verify_listing/fetch_detail against "
+            "the live site.",
             connector.name,
             gone_verdicts,
             result["verified"],
-            _VERIFICATION_GONE_ALARM_RATIO * 100,
+            alarm_prose,
         )
         return result
 
@@ -1294,6 +1477,7 @@ def _record_connector_result(
     geography_scope: list[dict] | None = None,
     verified_count: int = 0,
     verified_gone_count: int = 0,
+    verification_alarm: str | None = None,
 ) -> None:
     """`failure_classification` (issue #242, D-079) is the typed, queryable
     counterpart to `error_msg`'s prose — one of the taxonomy values in
@@ -1322,6 +1506,17 @@ def _record_connector_result(
     they changed nothing, so reporting them as verifications would overstate
     what the run actually established. Both are 0 for every connector that
     does not opt into verification.
+
+    `verification_alarm` (issue #643, PR #685 review L2) is set only when the
+    mass-withdrawal guard SUPPRESSED this run's withdrawals — a short code
+    naming which check tripped and by how much. It exists because a fired
+    guard is otherwise invisible: `verified_count=10, verified_gone_count=0`
+    reads identically whether ten listings came back alive or ten came back
+    gone and were all withheld. Unlike the other health signals on this row it
+    describes an action NOT taken, so it cannot be inferred from the counters.
+    NULL on every run where the guard stayed quiet, keeping
+    `WHERE verification_alarm IS NOT NULL` the "show me the suppressed runs"
+    query.
 
     `skipped_unchanged_count` (issue #435, D-099) is a further, distinct sense:
     listings this run did NOT deep-capture because the connector's list page
@@ -1356,9 +1551,9 @@ def _record_connector_result(
                  skipped_count, skipped_unchanged_count, skipped_scopes,
                  failure_classification,
                  geography_scope, extraction_quality_summary,
-                 verified_count, verified_gone_count)
+                 verified_count, verified_gone_count, verification_alarm)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s)
+                    %s, %s, %s)
             """,
             (
                 run_id,
@@ -1380,6 +1575,7 @@ def _record_connector_result(
                 else None,
                 verified_count,
                 verified_gone_count,
+                verification_alarm,
             ),
         )
     conn.commit()
@@ -4724,7 +4920,7 @@ def run_all_connectors(
         # never prove absence by sweeping, but they can ask about one listing
         # at a time. Never raises into the run: a verification bug must not be
         # able to fail an ingest that already committed real data.
-        verification = {"verified": 0, "gone": 0}
+        verification = {"verified": 0, "gone": 0, "alarm": None}
         try:
             verification = verify_stale_listings(
                 conn,
@@ -4882,6 +5078,7 @@ def run_all_connectors(
             geography_scope=geography_scope,
             verified_count=verification["verified"],
             verified_gone_count=verification["gone"],
+            verification_alarm=verification.get("alarm"),
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
         )
