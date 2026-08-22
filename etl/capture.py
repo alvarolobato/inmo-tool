@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import fields
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urljoin, urlparse
 
@@ -662,13 +662,45 @@ def _mark_listing(
 
 
 # How far the size a notice PRINTS may sit from the size we STORED before
-# the two are treated as describing different properties. One square metre
-# absorbs the only benign source of disagreement there is — the notice
-# renders a rounded whole number ("80 m²") while `property.m2_built` holds
-# NUMERIC(8,2) straight from the structured capture (79,60) — while still
-# catching the case this check exists for, a notice about someone else's
-# flat. Rooms are compared exactly: nobody rounds a bedroom.
-_NOTICE_M2_TOLERANCE = Decimal(1)
+# the two are treated as describing different properties. Rooms are compared
+# exactly: nobody rounds a bedroom.
+#
+# Two benign sources of disagreement have to be absorbed, and they have
+# different shapes:
+#
+#   1. ROUNDING. The notice renders a whole number ("80 m²") while
+#      `property.m2_built` holds NUMERIC(8,2) straight from the structured
+#      capture (79,60). One square metre covers it, whatever the flat's size.
+#   2. DEDUPLICATION. `property.m2_built` is a PROPERTY-level field, shared by
+#      every listing merged onto that property, so it is not necessarily
+#      Idealista's own figure at all. Dedup merges on `sizes_close` — a 5%
+#      band (`etl/dedup/signals/address_coords.py:_MAX_SIZE_RATIO`), exact
+#      equality being reserved for the photo-hash auto-merge path
+#      (`etl/dedup/engine.py`, D-137). A legitimately merged property can
+#      therefore sit several m² from what Idealista printed, and a flat ±1 m²
+#      rule would VETO those withdrawals silently, precisely on the merged
+#      properties (Opus review, PR #691).
+#
+# So the tolerance is the wider of the two: a 1 m² floor for small flats, and
+# otherwise dedup's own band, which is by construction as wide as the
+# disagreement dedup itself was willing to merge across. The veto still
+# catches what it exists for — a notice about someone else's flat differs by
+# far more than 5% in any realistic case.
+_NOTICE_M2_TOLERANCE_FLOOR = Decimal(1)
+_NOTICE_M2_TOLERANCE_RATIO = Decimal("0.05")
+
+
+def _notice_m2_tolerance(stated: Decimal, stored: Decimal) -> Decimal:
+    """The m² gap tolerated between a notice and the stored property row.
+
+    See the constants above. `max(stated, stored)` is the same denominator
+    `address_coords.sizes_close` uses, so the band is the identical shape to
+    the one dedup merged on.
+    """
+    return max(
+        _NOTICE_M2_TOLERANCE_FLOOR,
+        max(stated, stored) * _NOTICE_M2_TOLERANCE_RATIO,
+    )
 
 
 def _notice_contradicts_stored(
@@ -709,7 +741,8 @@ def _notice_contradicts_stored(
     if (
         facts.stated_m2 is not None
         and stored_m2 is not None
-        and abs(Decimal(stored_m2) - facts.stated_m2) > _NOTICE_M2_TOLERANCE
+        and abs(Decimal(stored_m2) - facts.stated_m2)
+        > _notice_m2_tolerance(facts.stated_m2, Decimal(stored_m2))
     ):
         return (
             f"el aviso describe {facts.stated_m2} m² y el anuncio "
@@ -797,21 +830,35 @@ def _mark_withdrawn(
 
     Idempotent: re-capturing the same retired page appends no second event
     and changes nothing, because the status guard already sees 'withdrawn'.
+
+    The guard is `status != 'withdrawn'`, NOT a whitelist of `active`, so a
+    listing already marked `sold`/`reserved`/`expired` is flipped to
+    `withdrawn` too. That is deliberate: the notice is first-hand, dated,
+    present-tense evidence from the portal itself, and every other status a
+    listing can hold today is inferred rather than observed. Nothing is lost
+    by the flip — `listing_status_event` is append-only, so the earlier claim
+    and this one both stay on the record with their own evidence, and a
+    reader can see which came from where. (In practice nothing in the ETL
+    writes `sold` yet; the rule is stated here so a connector that starts to
+    does not silently change what a withdrawal means.)
     """
     listing_id: int | None = None
     property_id: int | None = None
     stored_m2: Decimal | None = None
     stored_rooms: int | None = None
+    stored_last_seen_at: datetime | None = None
     already_withdrawn = False
 
     # Read first, in its own statement, so the corroboration decision below
     # is made BEFORE anything is written and a veto needs nothing rolled
     # back. `property` carries m2_built/rooms; `listing.property_id` is NOT
     # NULL by schema, so an inner join can never drop a row.
+    # `last_seen_at` is read for the date clamp below, NOT to be written.
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT l.id, l.property_id, l.status, p.m2_built, p.rooms "
+                "SELECT l.id, l.property_id, l.status, p.m2_built, p.rooms, "
+                "l.last_seen_at "
                 "FROM listing l JOIN property p ON p.id = l.property_id "
                 "WHERE l.source = %s AND l.external_id = %s",
                 (connector_name, external_id),
@@ -832,7 +879,14 @@ def _mark_withdrawn(
         return
 
     if row is not None:
-        listing_id, property_id, prev_status, stored_m2, stored_rooms = row
+        (
+            listing_id,
+            property_id,
+            prev_status,
+            stored_m2,
+            stored_rooms,
+            stored_last_seen_at,
+        ) = row
         already_withdrawn = prev_status == "withdrawn"
 
     contradiction = _notice_contradicts_stored(facts, stored_m2, stored_rooms)
@@ -858,6 +912,9 @@ def _mark_withdrawn(
     # falls back to NOW() — the capture time, which is at least honestly
     # "when we saw this" rather than a date we made up.
     delisted_on = facts.delisted_on if facts is not None else None
+    delisted_on, clamp_note = _clamped_delisting_date(delisted_on, stored_last_seen_at)
+    if clamp_note is not None:
+        evidence = f"{evidence}; {clamp_note}"
 
     try:
         with conn.cursor() as cur:
@@ -932,6 +989,51 @@ def _mark_withdrawn(
         ),
         listing_id,
         evidence,
+    )
+
+
+def _clamped_delisting_date(
+    delisted_on: date | None,
+    last_seen_at: datetime | None,
+) -> tuple[date | None, str | None]:
+    """Refuse a delisting date that precedes our own last sighting of the
+    advert alive (Opus review of PR #691).
+
+    Returns `(date_to_stamp, note_or_None)`; the note goes into the evidence
+    so the refusal is auditable, exactly as `_notice_delisting_date`'s own
+    rejections already are.
+
+    `_notice_delisting_date` in the connector already refuses dates that are
+    impossible, in the future, or older than ten years. It cannot make this
+    check: believability is relative to what WE observed, and the connector
+    is a pure function of the page. So the last gate lives here.
+
+    A notice dated before `last_seen_at` is a contradiction of the same class
+    D-157 exists to prevent — it asserts the advert was already dead on a day
+    we have a record of confirming it alive. One of the two observations is
+    wrong and nothing here can say which, so this falls back to the safe
+    default the rest of the function already uses for a disbelieved date:
+    `NOW()`, the capture time. Note the asymmetry with the veto above — a
+    contradicted SIZE kills the whole withdrawal (it means the notice is
+    about someone else's flat), whereas a contradicted DATE costs the
+    transition only its precision. The portal still positively said this
+    advert is gone; only "since when" is in doubt.
+
+    Compared at DAY granularity: the notice prints a date, not a timestamp,
+    so a notice dated the same calendar day as our last sighting is not a
+    contradiction. A listing with no `last_seen_at` at all (nullable by
+    schema) has nothing to contradict, so the stated date stands.
+    """
+    if delisted_on is None or last_seen_at is None:
+        return delisted_on, None
+    last_seen_day = last_seen_at.date()
+    if delisted_on >= last_seen_day:
+        return delisted_on, None
+    return None, (
+        f"la fecha de baja declarada ({delisted_on.strftime('%d/%m/%Y')}) es "
+        f"anterior a la última vez que vimos el anuncio activo "
+        f"({last_seen_day.strftime('%d/%m/%Y')}), así que se descarta; la "
+        "retirada se fecha en el momento de la captura"
     )
 
 

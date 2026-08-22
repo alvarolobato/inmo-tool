@@ -104,22 +104,24 @@ checks the signature first and raises `ListingUnavailableError`, which
 a subclass, so the ordering is load-bearing) and turns into `withdrawn` +
 `listing_status_event.evidence`.
 
-Four lessons from that work worth carrying to the next capture-only portal:
+Five lessons from that work worth carrying to the next capture-only portal:
 
 1. **A capture-only connector's `normalize()` must be able to refuse.** Before
    #690, Idealista's could not: every field is optional, so a non-advert page
    of any kind parsed "successfully" into an all-`None` listing that the
    capture pipeline dutifully persisted — creating 18 phantom listings, erasing
-   8 real photo galleries (`_update_existing_listing` COALESCEs scalars but
+   22 real photo galleries (`_update_existing_listing` COALESCEs scalars but
    assigns `photo_urls` unconditionally), and pushing `last_seen_at` forward on
    listings that were provably gone. If your connector's `normalize()` cannot
    return "this is not an advert", it will eventually persist something that
    isn't one. Add a zero-substantive-fields guard that raises a plain
    `ConnectorError`.
 
-   (The 26 production rows that exposed this are "non-advert pages" and no
-   more: they share one byte-identical stored footprint — `fields_extracted =
-   3`, no photos, the site-wide `<title>` — one is a confirmed withdrawal and
+   (The 40 production rows that exposed this — the count as of 2026-08-22
+   08:28 UTC; it grows while the #683 drain runs, see D-159 — are "non-advert
+   pages" and no more: they share one byte-identical stored footprint —
+   `fields_extracted = 3`, no photos, the site-wide `<title>` — one is a
+   confirmed withdrawal and
    others may be anti-bot challenge pages, and the retained data cannot
    separate the two, because the HTML is discarded once a capture is
    processed.)
@@ -147,7 +149,24 @@ Four lessons from that work worth carrying to the next capture-only portal:
    (twelve, in the page that prompted #691). Sanity-check what you parse — nonexistent
    dates, future dates, absurdly old ones — and fall back to the capture time,
    which is at least honestly "when we saw this". A wrong date is worse than no
-   date, because afterwards it looks exactly like a right one.
+   date, because afterwards it looks exactly like a right one. And run one
+   more sanity check the connector cannot: reject a stated date earlier than
+   the row's own `last_seen_at`. That asserts the advert was dead on a day we
+   have a record of seeing it alive — believability is relative to what *we*
+   observed, so that check belongs where the database is.
+5. **A refusal guard must never count a value that has a site-wide
+   fallback.** This is the one the #691 review caught, and it had silently
+   disabled the whole fail-safe. Idealista's `description` falls back to
+   `og:description`, which is the same site-wide blurb on every page the
+   portal serves. A page with zero real fields therefore still had a
+   non-`None` `description`, the zero-substantive-fields guard never fired,
+   and a merely *reworded* notice reproduced the full corruption — including
+   overwriting a real advert description with the blurb, since
+   `_update_existing_listing` COALESCEs that column. If a field has a
+   chrome-level fallback, capture the selector-derived value in its own local
+   and put **that** in the guard; the merged value is still fine as the
+   returned field. Test it with the fallback PRESENT in the fixture —
+   deleting the meta tag to make the test pass hides the defect.
 
 Two mechanics for lessons 3 and 4: the comparison against stored data needs the
 database, and connectors do not get one. Return the parsed notice values from

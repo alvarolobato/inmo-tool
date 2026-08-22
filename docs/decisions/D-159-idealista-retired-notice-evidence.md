@@ -3,7 +3,7 @@ id: D-159
 title: Idealista's "anuncio retirado" notice is withdrawal evidence; any other non-advert page is refused, never persisted
 date: 2026-08-22
 group: Data / connectors
-rule: 'Withdraw on the Idealista retired notice only if its reference equals the captured external_id and its stated size/rooms do not contradict the stored row; date it from the notice.'
+rule: 'Withdraw on an Idealista retired notice only if its reference equals the captured external_id and its stated size/rooms fit the stored row; date from it, not before last_seen_at.'
 ---
 
 # D-159: Idealista's "anuncio retirado" notice is withdrawal evidence; any other non-advert page is refused, never persisted
@@ -30,16 +30,28 @@ the notice among them — parsed "successfully" into an empty listing and
 
 | signal | real adverts | non-advert pages |
 |--------|-------------:|-----------------:|
-| `fields_extracted` (7d) | 9–15, 1.509 rows | **exactly 3, 23 rows** — nothing in between |
-| listings with zero photos | 23 / 3.263 (0,7 %) | **26 / 26 (100 %)** |
+| `fields_extracted` (7d) | 9–15, 1.509 rows | **exactly 3** — nothing in between |
+| listings with zero photos | 23 / 3.263 (0,7 %) | **100 %** |
+
+**The size of the affected cohort, as of 2026-08-22 08:28 UTC: 40 rows** — 18
+phantoms and 22 real adverts whose gallery was erased; all 40 still `active`,
+all 40 with zero photos. Query it as
+`extension_capture WHERE connector_name='idealista' AND fields_extracted=3 AND
+status='done'`. **The number is a moving target and every figure here is
+stamped for that reason**: it grows each time the #683 drain lands on another
+of these pages, and earlier drafts of this record and of the #690/#691 PR
+bodies quote 26 (18 + 8) from the first measurement earlier the same day,
+and PR #692's own decision record quotes 33 from a measurement between the
+two. All three are the same population at three moments, not a
+disagreement. It stops growing when these PRs land.
 
 All three surviving fields are structural, not extracted: `url` is handed in,
 `operation` is hardcoded `'sale'`, and `property_type` is **fabricated** as
 `'piso'` by `map_property_type()` reading the word "Pisos" out of Idealista's
 *site-wide* `<title>` ("Viviendas venta. Viviendas alquiler. Pisos. Chalets —
-idealista"), which all 26 rows carry in `raw_extra.title`.
+idealista"), which every one of those rows carries in `raw_extra.title`.
 
-**Those 26 rows are "non-advert pages", and it is not determinable which kind.**
+**Those rows are "non-advert pages", and it is not determinable which kind.**
 An earlier draft of this record called them withdrawal notices; they are not
 known to be. All 15 rows examined have a byte-identical stored footprint —
 `fields_extracted = 3`, zero photos, that same site-wide `<title>` — and one of
@@ -54,11 +66,12 @@ gap.
 
 Three separate corruptions came out of that:
 
-1. **8 real listings had their stored photo gallery erased.**
+1. **Real listings had their stored photo gallery erased** (22 of the 40).
    `_update_existing_listing` COALESCEs every scalar — so price, description
    and area survived — but assigns `photo_urls = %s` unconditionally, so an
-   empty parse wipes it. These 8 were captured properly on 18 Aug (real
-   prices, 449–2.475-char descriptions) and re-captured on 22 Aug.
+   empty parse wipes it. The first 8 identified were captured properly on
+   18 Aug (real prices, 449–2.475-char descriptions) and re-captured on
+   22 Aug.
 2. **18 phantom listings were created from nothing**, `status='active'`, no
    price, no description, no photos, `property_type` invented — and counted in
    the 3.289 active total.
@@ -118,7 +131,21 @@ before any field is trusted, with deliberately different outcomes.
    | the page carries none of the advert's own markup | a live advert quoting the phrase; not retired |
    | **«Referencia del anuncio» is present** | no withdrawal — an uncorroborated notice is only "some advert is gone" |
    | **that reference equals the captured `external_id`** | no withdrawal — the page and the URL disagree about which listing this is |
-   | **any m²/room count the notice states agrees with the stored listing** (±1 m², rooms exact) | no withdrawal — the notice describes a different property |
+   | **any m²/room count the notice states agrees with the stored listing** (m²: the wider of ±1 m² and dedup's own 5% band; rooms exact) | no withdrawal — the notice describes a different property |
+
+   **The m² tolerance is the wider of 1 m² and 5%**, and the second half is
+   not slack — it is a correctness requirement. `property.m2_built` is a
+   PROPERTY-level, dedup-shared field, so it is not necessarily Idealista's
+   own figure at all: dedup merges on `sizes_close`, a 5% band
+   (`etl/dedup/signals/address_coords.py`), reserving exact equality for the
+   photo-hash auto-merge path (D-137). A legitimately merged property can
+   therefore sit several m² from what Idealista printed, and the original
+   flat ±1 m² rule would have **silently vetoed genuine withdrawals
+   precisely on merged properties** (Opus review, #691). Matching dedup's own
+   band means the veto tolerates exactly the disagreement dedup itself was
+   willing to merge across, and no more. The 1 m² floor still covers the
+   rounding case it was written for — the notice prints "80 m²", the row
+   holds NUMERIC(8,2) 79,60 — on flats too small for 5% to reach a metre.
 
    Two deliberate asymmetries in that table. **Absence is never a mismatch**:
    a notice that prints no size, or a listing stored without one, yields no
@@ -142,6 +169,49 @@ before any field is trusted, with deliberately different outcomes.
    in `observed_at` is worse than no date, because afterwards it is
    indistinguishable from a real one; every rejection is recorded in the
    evidence so the fallback is auditable rather than invisible.
+
+   **A fourth rejection: a date earlier than our own `last_seen_at`.** The
+   three above are judged by the connector, which can only ask "is this date
+   possible?". Believability is also relative to what *we* observed, and that
+   check needs the database, so it lives in `etl/capture.py`
+   (`_clamped_delisting_date`). A notice dated before the day we last
+   confirmed the advert alive asserts it was already dead on a day we have a
+   record of seeing it live — the same class of contradiction D-157 exists to
+   prevent. One of the two observations is wrong, nothing here can say which,
+   so `observed_at` falls back to `NOW()` and the evidence records the
+   refusal. Compared at **day** granularity: the notice prints a date, not a
+   timestamp, so same-day is not a contradiction. A listing with no
+   `last_seen_at` (nullable) has nothing to contradict.
+
+   Note the asymmetry with the size veto: a contradicted **size** kills the
+   whole withdrawal (it means the notice is about someone else's flat),
+   whereas a contradicted **date** costs the transition only its precision.
+   The portal still positively said this advert is gone.
+
+   **This record has to state the consequence of dating from the notice,
+   because it is a real behaviour change and the owner should not discover
+   it by missing a notification.** `listing_status_event.observed_at` is what
+   the notification layer filters on:
+
+   * `dashboard/lib/notifications/digest.ts` and `seguimiento.ts` select
+     status changes with `observed_at >= $since`. **A withdrawal backdated
+     more than the digest window drops out of the digest entirely** — the
+     owner's own sample was twelve days stale, so a weekly digest would
+     never have mentioned it. Backdating is the normal case here, not the
+     edge case: these pages are found while draining a queue of adverts
+     nobody has looked at in weeks. Accepted deliberately — `observed_at`
+     means "when did this happen", not "when should you be told" — but if
+     withdrawals start going unnoticed, this is why, and the fix belongs in
+     the digest query (filter tracked withdrawals on the event's insertion
+     time, not on `observed_at`), not in reverting to `NOW()`.
+   * `dashboard/lib/candidates.ts` computes `days_on_market` as
+     `MIN(observed_at) - first_seen_at` with **no `GREATEST(0, …)` clamp**
+     (`dashboard/lib/analytics/market-signals.ts` does clamp). A stated date
+     earlier than `first_seen_at` would render a negative figure on the
+     card. The `last_seen_at` clamp above makes that much harder to reach —
+     `last_seen_at >= first_seen_at` for any listing we have actually
+     captured — but it is not a proof, and the clamp belongs in the query
+     either way. Filed as a follow-up rather than fixed here.
 
    **Everything the notice states goes into the evidence**: the sentence, the
    reference, the stated delisting date, and the advert's final stated
@@ -172,6 +242,40 @@ before any field is trusted, with deliberately different outcomes.
    room count, coordinates, photos or features block, and is not the recognised
    notice, `normalize()` refuses to return anything. The capture is recorded
    `failed` and **nothing about any listing changes**.
+
+   **Only SELECTOR-DERIVED values count as substantive.** A value that
+   Idealista serves site-wide is worthless as proof that a page is an advert,
+   however non-None it looks, and the connector carries two of exactly that
+   kind:
+
+   | field | site-wide fallback that must NOT count | what counts instead |
+   |-------|----------------------------------------|---------------------|
+   | title | `og:title` / `<title>` — "Viviendas venta. Viviendas alquiler. Pisos. Chalets — idealista" | the `.main-info__title-main` element |
+   | description | `og:description` — "Casas y pisos, alquiler y venta, anuncios de particulares y inmobiliarias" | the `.adCommentsLanguage` block |
+
+   The first was right from the start; the second was **not**, and the
+   omission was found by an Opus review of PR #691 reproducing the entire
+   #690 corruption on a page whose notice sentence had merely been
+   *reworded* ("ya no **se encuentra** publicado"): `description` fell back
+   to `og:description`, the guard read that as substantive and never fired,
+   the empty parse wiped the stored gallery, and — worse than the original
+   bug, because `_update_existing_listing` COALESCEs `description` — the
+   site-wide blurb **overwrote a real advert description**. The fail-safe
+   this decision rests on ("reword the notice and the page falls through to
+   the refusal guard") was therefore not actually in force for the one page
+   shape it was written about.
+
+   The lesson generalises past this connector: *a fail-safe that rests on a
+   fallback chain is not a fail-safe.* Where a field has a chrome-level
+   fallback, the guard must be given the selector-derived value in its own
+   local, not the merged one. The merged value is still what gets RETURNED —
+   an og: fallback is a reasonable last resort on a real advert whose markup
+   shifted — it just may not VOUCH for the page being an advert.
+
+   Pinned by three tests: the reworded notice page raising `ConnectorError`
+   with the meta tag still present (deleting it from the fixture would hide
+   the defect, not fix it), `og:description` alone not being substantive, and
+   a real `.adCommentsLanguage` block alone still being enough to ingest.
 
 Withdrawal marks and never deletes (D-157): the listing row, its
 `listing_price_history`, its feedback and its dedup identity all survive.
@@ -247,13 +351,35 @@ the measured distribution above: real adverts extract 9–15 fields and
 non-adverts extract exactly 3, all structural, so zero substantive fields
 separates the two populations with the whole nine-field gap to spare.
 
-**Not covered here**: the 26 already-corrupted production rows are left alone.
-Retro-classifying them would mean inferring *withdrawal* from the generic-title
-signature, which proves only "the last capture was not an advert" — it cannot
-distinguish a retired notice from a soft block, and doing it anyway would be
-the same absence-shaped reasoning this decision rejects. They self-correct the
-next time each URL is captured. Whether to repair them another way is the
-owner's call (issue #690).
+**Reading `failed_7d` during a drain.** Every corroboration veto here —
+missing reference, mismatched reference, contradicted size/rooms — resolves
+through `_mark_failed`, which calls `_correlate_worklist(url, "failed")` and
+so flips the `capture_worklist` row out of `pending`. That is the right
+outcome for one page (a page we could not read is visible on data-health,
+rather than silently `done` as before this fix), but it means **a systematic
+parse regression would consume the drain queue**: if Idealista reshapes the
+notice, every dead URL in the queue burns itself as `failed` while nothing is
+learned. So, during a drain, **a spike in `failed_7d` for idealista means
+"the corroboration parse broke", not "the pages are broken"** — the response
+is to look at a retained page (D-160's retention floor keeps unexplained ones)
+and repair the parse, not to requeue.
+
+**Not covered here**: the already-corrupted production rows are left alone by
+this PR. Retro-classifying them would mean inferring *withdrawal* from the
+generic-title signature, which proves only "the last capture was not an
+advert" — it cannot distinguish a retired notice from a soft block, and doing
+it anyway would be the same absence-shaped reasoning this decision rejects.
+
+**And they will NOT self-correct on their own.** An earlier draft of this
+record said they would, "the next time each URL is captured". They will not:
+those captures were recorded `done`, so `_correlate_worklist(url, "captured")`
+already flipped their `capture_worklist` rows out of `pending`, and the
+"Abrir siguiente pendiente" pool selects `status = 'pending'`. Nothing will
+ever hand the owner those URLs again. They sit as `active` phantoms with
+wiped galleries indefinitely. Repairing them means **requeueing the
+`fields_extracted = 3` idealista cohort** with the #683 / D-156 machinery
+once these PRs have landed — filed as a follow-up, deliberately after the
+fix, so a requeued page meets a connector that can classify it.
 
 **See**: issues #690 and #691 (the corroboration/date hardening);
 [D-157](D-157-evidence-not-time-for-withdrawal.md) — time nominates, evidence

@@ -887,6 +887,59 @@ class TestNormalizeRefusesNonAdvertPages:
         canonical = IdealistaConnector().normalize(_raw(thin))
         assert canonical.current_price == Decimal(125000)
 
+    def test_a_reworded_notice_is_refused_and_not_ingested(self):
+        """The fail-safe D-159 claims: reword the sentence and the page
+        falls through to the refusal guard, changing nothing.
+
+        This failed when first written (Opus review, #691). The real notice
+        page carries `<meta property="og:description">` with Idealista's
+        SITE-WIDE blurb, `description` fell back to it, and a non-None
+        `description` made the page look substantive — so a merely reworded
+        notice sailed through the guard and reproduced the whole #690
+        corruption. The fixture keeps that meta tag: the guard has to hold
+        with it present, not because it was deleted.
+        """
+        reworded = _read_retired_fixture().replace(
+            "ya no está publicado", "ya no se encuentra publicado"
+        )
+        assert "Casas y pisos, alquiler y venta" in reworded
+        with pytest.raises(ConnectorError) as excinfo:
+            IdealistaConnector().normalize(_raw(reworded))
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "no listing data at all" in str(excinfo.value)
+
+    def test_the_site_wide_og_description_alone_is_not_substantive(self):
+        """Narrower pin on the same defect, independent of the notice page.
+
+        Only `.adCommentsLanguage` — the advert's own description block —
+        counts towards "this page is an advert". `og:description` is chrome
+        Idealista serves on every URL it owns, exactly like the `<title>`
+        the PR already refuses to trust for `property_type`.
+        """
+        chrome_only = (
+            "<html><head><title>Viviendas venta. Viviendas alquiler. Pisos. "
+            "Chalets — idealista</title>"
+            '<meta property="og:description" content="Casas y pisos, alquiler '
+            'y venta, anuncios de particulares y inmobiliarias">'
+            "</head><body><p>Busca tu nueva casa en idealista.</p>"
+            "</body></html>"
+        )
+        with pytest.raises(ConnectorError):
+            IdealistaConnector().normalize(_raw(chrome_only))
+
+    def test_a_real_advert_description_is_still_substantive_on_its_own(self):
+        """The other side of the same rule: a real `.adCommentsLanguage`
+        block, and nothing else, is enough to ingest. The fix narrowed WHICH
+        description counts, not whether description counts."""
+        advert = (
+            "<html><head><title>Viviendas venta. Viviendas alquiler. Pisos. "
+            "Chalets — idealista</title></head><body>"
+            '<div class="adCommentsLanguage">Luminoso piso exterior '
+            "reformado en 2024.</div></body></html>"
+        )
+        canonical = IdealistaConnector().normalize(_raw(advert))
+        assert canonical.description.startswith("Luminoso piso exterior")
+
 
 class TestRetiredNoticeFacts:
     """Issue #691. The notice does not just say an advert is gone — it prints

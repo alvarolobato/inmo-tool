@@ -710,12 +710,14 @@ class IdealistaConnector(Connector):
         )
 
         description_el = soup.select_one(".adCommentsLanguage")
+        # Kept in its OWN local, separate from the merged `description`
+        # below, because only this one is evidence that the page is an
+        # advert — see the `substantive` dict at the bottom of this method.
+        description_from_advert = (
+            description_el.get_text(strip=True) if description_el is not None else None
+        )
         description = first_present(
-            lambda: (
-                description_el.get_text(strip=True)
-                if description_el is not None
-                else None
-            ),
+            lambda: description_from_advert,
             lambda: _og_meta(soup, "og:description"),
             field="description",
         )
@@ -818,9 +820,36 @@ class IdealistaConnector(Connector):
         # handed in, `operation` is hardcoded, `property_type` is derived
         # from that site-wide title), so ZERO substantive fields separates the
         # two populations with the whole 9-field gap to spare.
+        #
+        # ONLY SELECTOR-DERIVED VALUES BELONG IN THIS DICT. Every entry has to
+        # be something a NON-advert page cannot have; anything Idealista
+        # serves site-wide is worthless here, however non-None it looks. Two
+        # values on this page are exactly that trap, and neither is used:
+        #
+        #   * `title` — falls back to og:title / <title>, which on a notice
+        #     page is the site-wide "Viviendas venta. Viviendas alquiler.
+        #     Pisos. Chalets — idealista" that all 26 corrupted production
+        #     rows carried verbatim. `listing_title` below is `title_el`, the
+        #     `.main-info__title-main` ELEMENT, which only a real advert has.
+        #   * `description` — falls back to og:description, which on every
+        #     Idealista page is the site-wide blurb "Casas y pisos, alquiler
+        #     y venta, anuncios de particulares y inmobiliarias". Counting it
+        #     reproduced the whole #690 corruption on a page whose notice
+        #     sentence had merely been REWORDED (Opus review, PR #691): the
+        #     guard never fired, the empty parse wiped the stored gallery,
+        #     and — worse than the original bug, because
+        #     `_update_existing_listing` COALESCEs description — that
+        #     boilerplate OVERWROTE a real 2.000-character advert
+        #     description. So `description_from_advert` (the
+        #     `.adCommentsLanguage` selector alone) is what counts.
+        #
+        # The merged `description`/`title` are still what get RETURNED as the
+        # listing's field values — the og: fallbacks are a reasonable last
+        # resort on a real advert whose markup shifted. They are just not
+        # allowed to VOUCH for the page being an advert in the first place.
         substantive = {
             "current_price": current_price,
-            "description": description,
+            "description": description_from_advert,
             "address": address,
             "reference_code": reference_code,
             "m2_built": m2_built,

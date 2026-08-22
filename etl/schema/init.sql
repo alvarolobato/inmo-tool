@@ -1884,7 +1884,11 @@ CREATE TABLE IF NOT EXISTS extension_capture (
     -- page, not a detail page — a clean, informational outcome (its detail
     -- links are harvested into capture_worklist), NOT a failure. 'failed' is
     -- reserved for genuinely broken DETAIL captures.
-    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing')),
+    -- 'withdrawn' (issue #690, D-159): the portal's own "anuncio retirado"
+    -- notice, positively identified and corroborated against the stored
+    -- listing. Neither 'failed' (nothing failed) nor 'done' (nothing was
+    -- ingested) — see the ALTER pair below for the full reasoning.
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing','withdrawn')),
     error_msg        TEXT,
     property_id      BIGINT       REFERENCES property(id),
     listing_id       BIGINT       REFERENCES listing(id),
@@ -1932,6 +1936,14 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 --               capture-only portal can give), would inflate failed_7d on the
 --               data-health page, and via _correlate_worklist would mark the
 --               worklist row 'failed' instead of 'stale'.
+--
+-- MERGE NOTE for whoever lands this alongside PR #692, which adds 'blocked'
+-- in this same spot (and to the CREATE TABLE list above): the resolution is
+-- ONE pair carrying BOTH new values —
+--   CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn'))
+-- — never two consecutive pairs, for exactly the reason above: the second,
+-- narrower pair would CheckViolation against a live DB already holding the
+-- other value. The CREATE TABLE list above must end carrying both too.
 ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status_check;
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
     CHECK (status IN ('pending','done','failed','listing','withdrawn'));
