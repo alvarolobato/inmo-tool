@@ -33,6 +33,41 @@ import {
   type StaleProfile,
 } from "@/lib/data-health";
 
+/**
+ * The stale-profile query, exported so the Estado "perfiles por
+ * re-materializar" queue tile (issue #640) counts the SAME population this
+ * page lists instead of re-deriving it. It MUST agree with the reconciler it
+ * surfaces — etl/materialize_reconciler.py::_stale_profiles_exist (#285): the
+ * newest-listing timestamp is MAX(GREATEST(last_seen_at, last_fetched_at,
+ * first_seen_at)), not last_seen_at alone (GREATEST catches every path a
+ * listing's data can change; Postgres GREATEST ignores NULLs). Archived
+ * profiles excluded. Returns ONLY the stale ones — an empty result is the
+ * healthy state. Always gate it with {@link SWEEP_IN_PROGRESS_SQL}.
+ */
+export const STALE_PROFILES_SQL = `WITH newest AS (
+         SELECT MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)) AS ts
+           FROM listing
+       )
+       SELECT sp.id, sp.name, sp.last_materialized_at, newest.ts AS newest_listing_at
+         FROM search_profile sp
+         CROSS JOIN newest
+        WHERE sp.archived_at IS NULL
+          AND newest.ts IS NOT NULL
+          AND (sp.last_materialized_at IS NULL OR sp.last_materialized_at < newest.ts)
+        ORDER BY sp.last_materialized_at ASC NULLS FIRST, sp.id`;
+
+/**
+ * Running-sweep guard (mirrors `_sweep_in_progress`, #285). While a sweep
+ * runs, `last_seen_at` is bumped mid-sweep before `last_materialized_at`
+ * catches up, so an unguarded staleness check flags nearly every active
+ * profile for the whole ~hourly sweep — a false-positive flood an
+ * observability surface must not produce. Exported alongside
+ * {@link STALE_PROFILES_SQL} so every consumer applies the same guard.
+ */
+export const SWEEP_IN_PROGRESS_SQL = `SELECT EXISTS (
+         SELECT 1 FROM connector_runs WHERE status = 'running' LIMIT 1
+       ) AS sweeping`;
+
 /** Coerce a pg value (number | numeric-string | null) to a number, 0 on null. */
 function num(v: unknown): number {
   if (v === null || v === undefined) return 0;
@@ -154,41 +189,14 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
         ORDER BY source`,
     ),
 
-    // 4. Stale profiles: newest listing data (globally) is newer than the
-    //    profile's last materialization. This MUST agree with the reconciler
-    //    it surfaces — etl/materialize_reconciler.py::_stale_profiles_exist
-    //    (#285): the newest-listing timestamp is
-    //    MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)), not
-    //    last_seen_at alone (GREATEST catches every path a listing's data can
-    //    change; Postgres GREATEST ignores NULLs). Archived profiles excluded.
-    //    Returns ONLY the stale ones — an empty result is the healthy state.
-    //    Gated below by the running-sweep guard.
-    query(
-      `WITH newest AS (
-         SELECT MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)) AS ts
-           FROM listing
-       )
-       SELECT sp.id, sp.name, sp.last_materialized_at, newest.ts AS newest_listing_at
-         FROM search_profile sp
-         CROSS JOIN newest
-        WHERE sp.archived_at IS NULL
-          AND newest.ts IS NOT NULL
-          AND (sp.last_materialized_at IS NULL OR sp.last_materialized_at < newest.ts)
-        ORDER BY sp.last_materialized_at ASC NULLS FIRST, sp.id`,
-    ),
-
-    // Running-sweep guard (mirrors _sweep_in_progress, #285). While a sweep
-    // runs, last_seen_at is bumped mid-sweep before last_materialized_at
-    // catches up, so an unguarded staleness check flags nearly every active
-    // profile for the whole ~hourly sweep — a false-positive flood an
-    // observability page must not produce. When one is running we DON'T
-    // evaluate staleness (empty list + a UI annotation), same as the
-    // reconciler defers to the sweep's own end-of-sweep materialize-all.
-    query(
-      `SELECT EXISTS (
-         SELECT 1 FROM connector_runs WHERE status = 'running' LIMIT 1
-       ) AS sweeping`,
-    ),
+    // 4. Stale profiles + the running-sweep guard that gates them. Both SQL
+    //    strings live at the top of this file as exported constants — issue
+    //    #640's Estado queue tile counts the same population and must never
+    //    re-derive it. When a sweep IS running we DON'T evaluate staleness
+    //    (empty list + a UI annotation), same as the reconciler defers to the
+    //    sweep's own end-of-sweep materialize-all.
+    query(STALE_PROFILES_SQL),
+    query(SWEEP_IN_PROGRESS_SQL),
 
     // 5. Zero-results regression monitor (issue #376): (connector, scope) pairs
     //    that used to return listings and now return 0 for N consecutive runs.

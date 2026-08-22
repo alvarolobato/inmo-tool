@@ -27,6 +27,7 @@
 | [D-151](docs/decisions/D-151-config-yaml-canonical-for-etl-tunables.md) | Set `etl.*` tunables only via config.yaml (`/admin/config`); never add one to a compose `environment:` block — an etl-only env var the admin UI cannot see makes OFF a silent no-op. |
 | [D-154](docs/decisions/D-154-fuentes-merges-connector-setup.md) | /admin/fuentes (list) + /admin/fuentes/[name] (detail) merge /etl/connectors + /etl/captura (301s); Fuentes detail also absorbs per-source quality (D-084/D-086), zero-result regressions (D-092), and drift (D-090/D-093) from /etl/salud (unchanged, P2). Supersedes D-045's location clause only ('setup stays under /etl/*') — the execution (/captura) vs. setup split itself is untouched. |
 | [D-162](docs/decisions/D-162-per-listing-timing-three-legs.md) | Per-listing timing is stored as separate legs (render wait / queue idle / processing; crawl fetch_ms_total excludes rate-limit sleep) — never one total. NULL means not measured, never 0. |
+| [D-163](docs/decisions/D-163-queue-depth-and-trend-from-queue-tables.md) | Queue depth AND trend come from the queue table's own entry/exit timestamps, never a snapshot table. An unmeasured leg renders its reason, never 0. Estado links out, never copies. |
 
 ## Data / connectors
 
