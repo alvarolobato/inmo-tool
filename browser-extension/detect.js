@@ -1213,7 +1213,145 @@
    * cases review B1 called out. A bad/throwing selector on one signature must
    * never crash detection or block the others.
    */
+  // ── The rate-limit / "prove you're human" challenge phrase table ──────────
+  //
+  // THE ONE PLACE TO EDIT when a portal rewords its challenge page. Every
+  // entry is an accent-FOLDED, lowercased fragment of the operator's own
+  // voice on a soft-block interstitial — the portal talking to the visitor
+  // about the visitor's own request behaviour. Matched against visible text
+  // via foldAccents(), so "verificación"/"verificacion" and any case
+  // variation all hit the same entry.
+  //
+  // Grounded in the page idealista actually served during the #683 re-capture
+  // drain (owner screenshots, 2026-08-22), which is served AT THE LISTING URL
+  // ITSELF — so a batch capture of `/inmueble/<id>/` captures the challenge
+  // instead of the advert, and every downstream consumer sees a page with no
+  // advert fields on it.
+  //
+  // DELIBERATELY EXCLUDED: the visitor's own IP address and the per-visit
+  // `ID:` UUID the page also renders. Both are per-visit values (and personal
+  // data — public repo), so neither may ever become a signature or reach a
+  // log, a fixture or an issue.
+  var CHALLENGE_PHRASES = [
+    // "Vaya! parece que estamos recibiendo muchas peticiones tuyas en poco
+    // tiempo" — split into two independent fragments so a reworded connector
+    // ("hemos recibido demasiadas peticiones…") still lands one of them.
+    "muchas peticiones",
+    "en poco tiempo",
+    // The slider widget's own instruction.
+    "desliza hacia la derecha",
+    // The explainer heading and its opening line.
+    "por que esta verificacion",
+    "comportamiento del navegador",
+    // The three bulleted "varias posibilidades".
+    "velocidad sobrehumana",
+    "bloquea el funcionamiento de javascript",
+    "un robot se encuentra en la misma red",
+  ];
+
+  // Folding table for the five Spanish accented vowels plus ñ — the same
+  // five-vowel fold etl/soft_block.py applies, kept deliberately narrow so a
+  // 400 KB page costs one regex pass rather than full Unicode normalization.
+  var ACCENT_FOLD_FROM = "áàäâéèëêíìïîóòöôúùüûñÁÀÄÂÉÈËÊÍÌÏÎÓÒÖÔÚÙÜÛÑ";
+  var ACCENT_FOLD_TO = "aaaaeeeeiiiioooouuuunAAAAEEEEIIIIOOOOUUUUN";
+
+  /** Lowercase + fold the five Spanish accented vowels and ñ. Never throws. */
+  function foldAccents(text) {
+    var s = ((text || "") + "").toLowerCase();
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var idx = ACCENT_FOLD_FROM.indexOf(s.charAt(i));
+      out += idx === -1 ? s.charAt(i) : ACCENT_FOLD_TO.charAt(idx);
+    }
+    return out;
+  }
+
+  /**
+   * How many DISTINCT CHALLENGE_PHRASES appear in the document's visible
+   * text. Exported for tests and for the threshold's own justification.
+   *
+   * "Visible text" means `body.textContent` with <script>/<style>/<noscript>
+   * subtrees excluded — the same rule etl/soft_block.py and #691's
+   * `_strip_to_visible_text` apply, for the same reason: a JS string literal
+   * is not the portal telling the human anything. Read-only; never mutates
+   * the live DOM (unlike the Python side, which owns a private soup).
+   */
+  function challengePhraseHits(doc) {
+    if (!doc || !doc.body) return 0;
+    var text;
+    try {
+      var walker = doc.createTreeWalker
+        ? doc.createTreeWalker(doc.body, 4 /* SHOW_TEXT */, null)
+        : null;
+      if (walker) {
+        var parts = [];
+        for (var n = walker.nextNode(); n; n = walker.nextNode()) {
+          var tag =
+            n.parentNode && n.parentNode.nodeName
+              ? ("" + n.parentNode.nodeName).toLowerCase()
+              : "";
+          if (tag === "script" || tag === "style" || tag === "noscript") continue;
+          parts.push(n.nodeValue || "");
+        }
+        text = parts.join(" ");
+      } else {
+        text = doc.body.textContent || "";
+      }
+    } catch (e) {
+      try {
+        text = doc.body.textContent || "";
+      } catch (e2) {
+        return 0;
+      }
+    }
+    var folded = foldAccents(text).replace(/\s+/g, " ");
+    var hits = 0;
+    for (var i = 0; i < CHALLENGE_PHRASES.length; i++) {
+      if (folded.indexOf(CHALLENGE_PHRASES[i]) !== -1) hits++;
+    }
+    return hits;
+  }
+
+  // Two distinct phrases must co-occur. ONE alone is not enough: a
+  // seller-written description could conceivably contain "en poco tiempo"
+  // ("se vende en poco tiempo"), and a portal help page could mention a
+  // CAPTCHA. Two fragments of the operator's own anti-bot voice, in the same
+  // document, is not something a property advert produces — which is what
+  // lets this signature stand WITHOUT the isRenderReady corroboration every
+  // other signature needs (see selfCorroborated below).
+  var CHALLENGE_MIN_PHRASE_HITS = 2;
+
   var BLOCK_SIGNATURES = [
+    {
+      id: "rate_limit_challenge",
+      // ── Why this one is `selfCorroborated` ────────────────────────────────
+      //
+      // MEASURED, not assumed (2026-08-22). The idealista challenge page
+      // renders ~490 characters of prose inside a <main> — its heading, the
+      // slider instruction, the "¿por qué esta verificación?" explainer and
+      // three bullets. That clears BOTH of isRenderReady's tests: the generic
+      // `main`/`h1` fallback readySelectors find a key node with text, and
+      // the 488-char body beats MIN_BODY_TEXT (400).
+      //
+      // So `isRenderReady(challengePage, "idealista") === true`, and the
+      // standard corroboration in detectBlockSignals THREW THE MATCH AWAY —
+      // including the `captcha_wall` DataDome marker, which matched the page
+      // correctly and was then vetoed. That is exactly why the #683 drain
+      // sailed straight through the wall instead of halting: the detector saw
+      // the block and then talked itself out of it.
+      //
+      // The corroboration exists to stop a marker on a HEALTHY page counting
+      // as a block (a Turnstile widget on a contact form, an advert quoting a
+      // phrase). It assumes "rendered real content" and "interstitial" are
+      // mutually exclusive. A text-rich challenge page breaks that assumption
+      // outright, so this signature carries its own corroboration instead:
+      // the two-distinct-phrase requirement above. It is strictly narrower
+      // than a render-readiness heuristic, not looser.
+      selfCorroborated: true,
+      matches: function (doc) {
+        return challengePhraseHits(doc) >= CHALLENGE_MIN_PHRASE_HITS;
+      },
+    },
     {
       id: "cloudflare_challenge",
       matches: function (doc) {
@@ -1358,6 +1496,13 @@
         matched = false;
       }
       if (!matched) continue;
+      // A SELF-CORROBORATED signature skips the render-readiness veto: its
+      // own `matches` is already narrower than the veto would be, and the
+      // veto actively MISFIRES on the case it covers (a text-rich challenge
+      // interstitial reads as "rendered" — see rate_limit_challenge above).
+      if (BLOCK_SIGNATURES[i].selfCorroborated) {
+        return { blocked: true, signature: BLOCK_SIGNATURES[i].id };
+      }
       try {
         // A page that actually rendered its real content is NOT a block,
         // regardless of which marker matched (review B1) — a Turnstile
@@ -1413,6 +1558,10 @@
     PORTALS: PORTALS,
     MIN_HEADING_TEXT: MIN_HEADING_TEXT,
     MIN_BODY_TEXT: MIN_BODY_TEXT,
+    CHALLENGE_PHRASES: CHALLENGE_PHRASES,
+    CHALLENGE_MIN_PHRASE_HITS: CHALLENGE_MIN_PHRASE_HITS,
+    foldAccents: foldAccents,
+    challengePhraseHits: challengePhraseHits,
     matchKey: matchKey,
     portalConfigForHost: portalConfigForHost,
     detailPortalForUrl: detailPortalForUrl,

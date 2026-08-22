@@ -19,7 +19,7 @@ import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/e
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 interface CaptureRow {
-  status: "pending" | "done" | "failed" | "listing";
+  status: "pending" | "done" | "failed" | "listing" | "blocked";
   error_msg: string | null;
   property_id: number | string | null;
   fields_extracted: number | null;
@@ -78,6 +78,24 @@ export async function GET(
         status: "listing",
         title: row.title,
         detail_links: row.fields_extracted,
+      });
+    }
+    // Issue #692: the portal served an anti-bot CHALLENGE instead of the
+    // advert. Reported as its OWN status, never folded into `failed` and
+    // never into `done`: nothing was ingested, but nothing is broken either
+    // and — the part the owner acts on — the page is still queued. Without
+    // this branch a `blocked` row falls through to the `done` response below
+    // and the popup cheerfully reports a successful capture of a page that
+    // was never served.
+    if (row.status === "blocked") {
+      return NextResponse.json({
+        success: false,
+        status: "blocked",
+        error: {
+          message:
+            row.error_msg
+            ?? "El portal ha servido un reto anti-bot en lugar del anuncio.",
+        },
       });
     }
     if (row.status === "failed") {
