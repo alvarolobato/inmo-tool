@@ -61,6 +61,18 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Cada fuente (conector o portal de captura): configuración, ejecución, captura y calidad.",
   },
+  // Actividad (issue #644) — the unified ingest chronology: crawl sweeps,
+  // browser-capture sessions, re-capture batches, dedup passes, manual
+  // triggers, listing status changes and capture block episodes, merged
+  // into one time-ordered feed. Slotted here so the strip already reads in
+  // #642's end-state order (Estado / Fuentes / Actividad / Revisión / LLM /
+  // Configuración) before P2 retires Monitor ETL and Salud de datos.
+  {
+    href: "/admin/actividad",
+    label: "Actividad",
+    description:
+      "Cronología de la ingesta: rastreos, sesiones de captura, recolas, pasadas de dedup, retiradas y bloqueos, en un solo hilo.",
+  },
   // Data-health observability (#272) — read-only capture/ETL health. Since #511
   // it also carries the "Deriva de portales" section (the aliseda static drift
   // check that used to live on the retired Descubrimiento tab).
