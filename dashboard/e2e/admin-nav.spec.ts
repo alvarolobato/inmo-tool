@@ -1,30 +1,35 @@
 /**
- * E2E: admin IA consolidation (issue #508), extended by #653/#636 Fase 0
- * borrado, D-041.
+ * E2E: the six-section admin IA (issue #508 → #653 → #642 P1 → #642 P2, D-041).
+ *
+ * This file is #642's EC-1: the strip shows exactly Estado / Fuentes /
+ * Actividad / Revisión / LLM / Configuración, and every retired route
+ * redirects to its named home. P2 is where that end state is finally reached —
+ * by deleting, not by adding: `/etl`, `/etl/[id]`, `/etl/salud` and
+ * `/etl/extension` are gone from the route table entirely.
  *
  * Drives a real Next.js server against a real Postgres. Asserts the admin strip
  * is rendered from the single shared nav source (lib/admin-nav.ts):
  *
- *   - the strip shows the consolidated, renamed tab set (Captura (admin),
- *     Clasificación, Duplicados, LLM) and no longer the four separate LLM tabs,
- *     "URLs capturadas", or the old "Candidatos" label;
+ *   - the strip shows exactly the six sections, in order, and none of the
+ *     fourteen labels that came before them;
  *   - `/admin/candidatos`, `/admin/interactions`, `/admin/tool-calls`,
  *     `/admin/captured-urls` and `/admin/slow-queries` are gone outright
  *     (404) — no replacement PAGE, per #653 (0 rows ever in the tables they
  *     viewed, a redirect stub nothing linked to any more, or content that
  *     folded into `/admin/llm` as a disclosure with no route of its own);
  *   - `/admin/usage` is NOT the same case: `llm_usage` is live, so it
- *     redirects to `/admin/llm` and the redirect TARGET is asserted to
- *     actually render (not just that the old path is gone — a redirect
- *     nobody tests is a 404 waiting to happen);
- *   - Duplicados is reachable from the strip;
+ *     redirects to `/admin/llm` — a wire-level 308 since #642 P2 converted
+ *     its page-level stub — and the redirect TARGET is asserted to actually
+ *     render (not just that the old path is gone — a redirect nobody tests is
+ *     a 404 waiting to happen);
+ *   - both Revisión queues are reachable, though only one has a tab;
+ *   - the retired `/etl` tree 308s ON THE WIRE (status + Location asserted,
+ *     not just where a browser lands) to the homes #642's disposition table
+ *     names, and each of those targets actually renders;
  *   - no error surface anywhere (the D-041 bar).
  *
- * Extensión (#509) and Descubrimiento (#511) have now been removed — their
- * function moved to inline CTAs / Salud de datos. #642 P1 merges "Conectores"
- * + "Captura (admin)" into one "Fuentes" tab, and Diagnósticos (#671) was
- * added on top — an 8-tab intermediate state on the way to #636's 6-section
- * end state (P2 retires Monitor ETL + Salud de datos). Asserted exhaustively.
+ * The strip list is asserted EXHAUSTIVELY, so a tab cannot appear or vanish
+ * without a deliberate edit here.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -34,30 +39,28 @@ import { test, expect } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
-// The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
-// were removed by #509 / #511; "URLs capturadas" was deleted outright by
-// #653; #642 P1 merges "Conectores" + "Captura (admin)" into "Fuentes";
-// Diagnósticos was added by #671 (extension force-capture diagnostics, D-153).
-// P2 (still ahead) retires "Monitor ETL" + "Salud de datos" into Actividad/
-// Estado, reaching the 6-section end state (#636's own EC-1 wording) — this
-// strip is the P1-scoped intermediate state, not that end state yet.
+// The tabs the admin strip ships, in strip order — #636's six sections, and
+// nothing else. How each of the eight it replaced got here:
+//   Extensión + Descubrimiento removed (#509 / #511); "URLs capturadas",
+//   "Interacciones", "Herramientas LLM", "Consultas lentas" deleted outright
+//   (#653); "Conectores" + "Captura (admin)" merged into Fuentes (#642 P1);
+//   "Monitor ETL" + "Salud de datos" deleted with the whole /etl tree (#642
+//   P2); "Duplicados" + "Clasificación" grouped into one "Revisión" tab (#642
+//   P2, with `<RevisionTabs/>` on both pages); "Diagnósticos" (#671) taken off
+//   the strip and owned by Fuentes via matchPrefixes; and "Estado" ADDED,
+//   because the landing since #638 had no tab of its own.
 //
 // This list is EXHAUSTIVE — `toHaveText` below compares it against every link
 // in the strip, so adding an entry to `lib/admin-nav.ts` without adding it
 // here fails this spec. That is deliberate: the strip is the one surface where
 // a silently-appearing admin tab should be a conscious decision.
 const EXPECTED_STRIP_LABELS = [
-  "Monitor ETL",
+  "Estado",
   "Fuentes",
-  // #644 — the unified ingest chronology. Slotted after Fuentes so the
-  // strip already reads in #642's end-state order.
   "Actividad",
-  "Salud de datos",
-  "Clasificación",
-  "Duplicados",
+  "Revisión",
   "LLM",
   "Configuración",
-  "Diagnósticos",
 ];
 
 // Labels that must NOT appear in the consolidated strip anymore.
@@ -75,6 +78,15 @@ const REMOVED_STRIP_LABELS = [
   // Merged into "Fuentes" by #642 P1.
   "Conectores",
   "Captura (admin)",
+  // Deleted with the /etl tree by #642 P2.
+  "Monitor ETL",
+  "Salud de datos",
+  // Grouped into "Revisión" by #642 P2 — both queues still exist, but neither
+  // has a strip tab of its own any more.
+  "Duplicados",
+  "Clasificación",
+  // Off-strip since #642 P2, owned by Fuentes.
+  "Diagnósticos",
 ];
 
 function buildPool(): Pool {
@@ -133,36 +145,138 @@ test("EC-1: strip renders the consolidated nav from the shared source", async ({
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
-test("#642 P1: /etl/connectors and /etl/captura redirect to Fuentes, and the target actually renders", async ({
+test("EC-1: the Estado tab is present and marks itself active on the landing", async ({
   page,
 }) => {
-  // The #642 redirect trap: asserting the old path is unreachable proves
-  // nothing if it was already unreachable — assert the redirect TARGET
-  // renders. Both routes are deleted outright (no page.tsx) and redirect via
-  // `next.config.js`'s `redirects()` — a real wire-level 301, not the
-  // page-level `permanentRedirect()` caveat `/admin/usage/page.tsx`
-  // documents (client-side RSC redirect, not a 308 on the wire). Config-level
-  // was chosen over page-level here specifically so BOTH routes disappear
-  // from the route table (not just off the nav strip) — a page-level stub
-  // would still count as a route, repeating the "only added, never deleted"
-  // complaint this whole tracker exists to fix.
-  await page.goto("/etl/connectors");
-  await expect(page).toHaveURL(/\/admin\/fuentes$/);
-  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+  // The gap #642 P2 closed: `/admin` has been the landing since #638 and the
+  // strip never listed it, so the one surface the owner is sent to on login
+  // was the one with no way back to it.
+  await page.goto("/admin");
+  const estado = strip(page).getByRole("link", { name: "Estado", exact: true });
+  await expect(estado).toHaveAttribute("href", "/admin");
+  await expect(estado).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("estado-board")).toBeVisible();
+});
 
-  await page.goto("/etl/captura");
-  await expect(page).toHaveURL(/\/admin\/fuentes$/);
-  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+test("#642 P2: the whole /etl tree is gone from the route table and 308s on the wire", async ({
+  page,
+  request,
+}) => {
+  // The redirect trap this tracker has fallen into before: a page-level
+  // `permanentRedirect()` is NOT a redirect on the wire — Next streams it as
+  // an RSC instruction inside a 200, so a browser follows it and anything
+  // else does not. `/etl/salud` MUST be a real 308 + Location: an installed
+  // browser extension opens it from a notification handler and only picks up
+  // the new URL when the owner reloads the zip (D-060). So this asserts the
+  // STATUS AND HEADER, not just where a browser ends up.
+  const wire: Array<[string, string]> = [
+    ["/etl", "/admin/actividad"],
+    ["/etl/salud", "/admin"],
+    ["/etl/extension", "/admin/extension"],
+    ["/etl/connectors", "/admin/fuentes"],
+    ["/etl/captura", "/admin/fuentes"],
+  ];
+  for (const [from, to] of wire) {
+    const res = await request.get(from, { maxRedirects: 0 });
+    expect(res.status(), `${from} should be a permanent redirect`).toBe(308);
+    expect(res.headers()["location"], `${from} Location`).toBe(to);
+  }
+
+  // A numeric run id maps onto the moved drill-down, and only a numeric one:
+  // the rule is constrained to \d+ so a future /etl/<word> can never resolve
+  // to a run detail page for a non-numeric id.
+  const run = await request.get("/etl/12345", { maxRedirects: 0 });
+  expect(run.status()).toBe(308);
+  expect(run.headers()["location"]).toBe("/admin/actividad/run/12345");
+
+  // And the targets actually render — a redirect nobody follows is a 404
+  // waiting to happen.
+  await page.goto("/etl");
+  await expect(page).toHaveURL(/\/admin\/actividad$/);
+  await expect(page.getByTestId("actividad-page")).toBeVisible();
+
+  await page.goto("/etl/salud");
+  await expect(page).toHaveURL(/\/admin$/);
+  await expect(page.getByTestId("estado-board")).toBeVisible();
+
+  await page.goto("/etl/extension");
+  await expect(page).toHaveURL(/\/admin\/extension$/);
+  await expect(page.getByTestId("extension-setup-page")).toBeVisible();
 
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
-test("EC-1: /admin index cards match the strip (single source, no drift)", async ({ page }) => {
+test("EC-3 (#642): a pre-update extension's block notification still lands on a live page", async ({
+  request,
+}) => {
+  // Exactly what an already-installed build does: open `${apiUrl}/etl/salud`
+  // in a tab. It must not 404, and it must not need JS to resolve.
+  const res = await request.get("/etl/salud", { maxRedirects: 0 });
+  expect(res.status()).toBe(308);
+  expect(res.headers()["location"]).toBe("/admin");
+});
+
+test("#642 P2: Revisión groups both queues, and each is one tap from the other", async ({
+  page,
+}) => {
   await page.goto("/admin");
-  // The index grid links (excludes the strip nav) — every strip href appears.
-  for (const label of EXPECTED_STRIP_LABELS) {
-    await expect(page.getByRole("link", { name: label, exact: true }).first()).toBeVisible();
+  const revision = strip(page).getByRole("link", { name: "Revisión", exact: true });
+  await expect(revision).toHaveAttribute("href", "/admin/dedup");
+  await revision.click();
+  await expect(page).toHaveURL(/\/admin\/dedup$/);
+  await expect(page.getByRole("heading", { name: "Revisión de duplicados" })).toBeVisible();
+
+  // The other queue lost its strip tab, so it has to be reachable here — a
+  // grouping, not a deletion.
+  const tabs = page.getByTestId("revision-tabs");
+  await expect(tabs).toBeVisible();
+  await tabs.getByTestId("revision-tab-clasificacion").click();
+  await expect(page).toHaveURL(/\/admin\/clasificacion$/);
+  await expect(page.getByTestId("clasificacion-page")).toBeVisible();
+  // …and the strip still shows Revisión as the active section from there.
+  await expect(revision).toHaveAttribute("aria-current", "page");
+
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
+test("#642 P2: Diagnósticos and the extension setup keep Fuentes highlighted", async ({
+  page,
+}) => {
+  // Both are off-strip deep links owned by Fuentes (lib/admin-nav.ts's
+  // matchPrefixes). A deep link that highlights no tab reads as "you have left
+  // the admin"; two extra tabs for two deep links is the sprawl #642 undoes.
+  const fuentes = strip(page).getByRole("link", { name: "Fuentes", exact: true });
+  for (const path of ["/admin/diagnostics", "/admin/extension"]) {
+    await page.goto(path);
+    await expect(fuentes, path).toHaveAttribute("aria-current", "page");
   }
+});
+
+test("#642 P2: /admin/diagnostics is REACHABLE by clicking, not only by URL", async ({ page }) => {
+  // PR #710 review H1. Taking Diagnósticos off the strip left it with a
+  // `matchPrefixes` entry and nothing else — and `matchPrefixes` highlights,
+  // it does not link. The sibling test above `goto`s the path directly, so it
+  // proves the highlighting and CANNOT catch an orphan; this one never types a
+  // URL for the target. #642's binding constraint is that nothing
+  // capability-disappears, and a page you can only reach by typing its path
+  // has disappeared for every practical purpose.
+  await page.goto("/admin");
+
+  // One tap from any admin page to Fuentes...
+  await strip(page).getByRole("link", { name: "Fuentes", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/fuentes$/);
+
+  // ...and one more to Diagnósticos, from the list header.
+  await page.getByTestId("fuentes-to-diagnostics").click();
+  await expect(page).toHaveURL(/\/admin\/diagnostics$/);
+  await expect(page.getByRole("heading", { name: /Diagnósticos/ })).toBeVisible();
+
+  // Landing there still highlights Fuentes — the grouping the strip claims.
+  await expect(
+    strip(page).getByRole("link", { name: "Fuentes", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
 test("EC-2: /admin/candidatos is gone outright (404, no redirect)", async ({ page }) => {
@@ -194,38 +308,32 @@ test("EC-2: /admin/interactions, /admin/tool-calls, /admin/captured-urls and /ad
   }
 });
 
-test("EC-2: /admin/usage permanently redirects to /admin/llm, which renders", async ({ page }) => {
+test("EC-2: /admin/usage 308s to /admin/llm ON THE WIRE, and the target renders", async ({
+  page,
+  request,
+}) => {
   // Asserting the redirect TARGET renders is the point — a redirect nobody
   // tests is a 404 waiting to happen. `llm_usage` is live (17,391 rows as of
   // 2026-08-21), so this is a redirect, not a 404 (unlike interactions/
   // tool-calls/captured-urls above).
   //
-  // What `res` actually is here (corrected per #656 review): Next's
-  // `permanentRedirect()` is NOT a 308 + Location header on the wire for
-  // this app-router page — it streams an RSC redirect instruction inside a
-  // normal 200 HTML document for `/admin/usage` itself, and the navigation
-  // to `/admin/llm` happens client-side once React hydrates. So `res` below
-  // is `/admin/usage`'s OWN response (200, no Location) — a browser
-  // (including Playwright) still ends up on `/admin/llm`, which is what
-  // `toHaveURL` + the visibility assertion below prove; `res.status()` only
-  // confirms the stub route itself didn't error. A non-browser client would
-  // need to run JS to follow this — see the comment on
-  // `app/admin/usage/page.tsx` for what that means going forward.
-  const res = await page.goto("/admin/usage");
+  // This used to be a 200: `app/admin/usage/page.tsx` called
+  // `permanentRedirect()`, which Next streams as an RSC instruction inside a
+  // normal 200 document with no `Location`, resolving client-side after
+  // hydration (the #656 caveat). #642 P2 deleted that stub and moved the
+  // redirect into `next.config.js` alongside the retired `/etl` paths — same
+  // destination, one fewer route in `next build`'s table, and a real 308 for
+  // callers that do not run JS. Asserted here as status + header, exactly
+  // like the /etl tree above; the page-level pattern is now gone from this
+  // app entirely.
+  const res = await request.get("/admin/usage", { maxRedirects: 0 });
+  expect(res.status()).toBe(308);
+  expect(res.headers()["location"]).toBe("/admin/llm");
+
+  await page.goto("/admin/usage");
   await expect(page).toHaveURL(/\/admin\/llm$/);
-  expect(res?.status()).toBe(200);
   await expect(page.getByTestId("admin-llm-page")).toBeVisible();
 
-  await expect(page.getByTestId("error-display")).toHaveCount(0);
-});
-
-test("EC-3: Duplicados is reachable from the strip", async ({ page }) => {
-  await page.goto("/admin");
-  const dup = strip(page).getByRole("link", { name: "Duplicados", exact: true });
-  await expect(dup).toHaveAttribute("href", "/admin/dedup");
-  await dup.click();
-  await expect(page).toHaveURL(/\/admin\/dedup$/);
-  await expect(page.getByRole("heading", { name: "Revisión de duplicados" })).toBeVisible();
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
@@ -265,8 +373,11 @@ test("the consolidated LLM page renders usage, cost/coverage and the slow-querie
   const guidanceBox = await guidanceToggle.boundingBox();
   expect(guidanceBox!.height).toBeGreaterThanOrEqual(44);
 
-  // Visiting /admin/usage highlights the single LLM tab (aria-current="page").
+  // Arriving via /admin/usage lands on /admin/llm (a wire-level 308 since
+  // #642 P2) with the single LLM tab highlighted — by `href`, not by a
+  // matchPrefix: the browser is never on /admin/usage at render time.
   await page.goto("/admin/usage");
+  await expect(page).toHaveURL(/\/admin\/llm$/);
   const llmTab = strip(page).getByRole("link", { name: "LLM", exact: true });
   await expect(llmTab).toHaveAttribute("aria-current", "page");
 

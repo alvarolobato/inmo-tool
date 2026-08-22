@@ -6,7 +6,8 @@ import type { LlmHealthResponse } from "@/lib/llm-health";
 /**
  * LLM / IA — cost, usage and assessment-coverage panel (issue #324).
  *
- * Moved here verbatim from "Salud de datos" (`app/etl/salud/page.tsx`) as part
+ * Moved here verbatim from "Salud de datos" (the since-deleted
+ * `app/etl/salud/page.tsx`) as part
  * of #653/#636's Fase 0 borrado: the section leaves salud (shrinking it ahead
  * of #642) and joins the single `/admin/llm` page, next to `llm_usage`'s raw
  * per-provider/per-endpoint tables. Data source (`getLlmHealth()` /

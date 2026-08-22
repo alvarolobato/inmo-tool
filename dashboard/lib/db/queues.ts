@@ -229,7 +229,7 @@ export async function getQueues(): Promise<QueuesResponse> {
     ),
 
     // 9. Profiles whose materialization is behind the newest listing data —
-    //    /etl/salud's "Perfiles sin re-materializar" section, which #642's
+    //    the since-deleted /etl/salud's "Perfiles sin re-materializar" section, which #642's
     //    disposition table sends to Estado. Same SQL as the page, imported
     //    from lib/db/data-health.ts rather than restated.
     query(STALE_PROFILES_SQL),

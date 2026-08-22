@@ -22,7 +22,7 @@
  * that isn't already eligible via some other active profile.
  * `newly_eligible_count` is exactly that delta — draft-scope matches, minus
  * whatever is already eligible today — and `projected_days` reuses the
- * SAME backlog-projection arithmetic `/etl/salud`'s LLM panel uses
+ * SAME backlog-projection arithmetic `/admin/llm`'s cost panel uses
  * (`projectBacklogSeconds`, `loadSchedulerConfig`), so the two numbers can
  * never drift apart.
  *

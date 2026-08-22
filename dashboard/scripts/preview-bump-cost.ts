@@ -2,10 +2,10 @@
 /**
  * F-7 pre-bump cost preview CLI (docs/roadmap/llm-batching-plan.md Phase 0,
  * PR 0b). Run this BEFORE bumping a `*_PROMPT_VERSION` constant, so the
- * reopened-backlog cost is a number you saw, not a surprise on `/etl/salud`
+ * reopened-backlog cost is a number you saw, not a surprise on `/admin/llm`
  * the next morning.
  *
- * Why a script and not a `/etl/salud` block: a bump preview is checked at ONE
+ * Why a script and not an admin-page block: a bump preview is checked at ONE
  * moment — right before an agent edits a `*_PROMPT_VERSION` constant and opens
  * that PR — never polled. Building it as a live panel would mean a new API
  * route, response types threaded through `LlmHealthResponse`, and a form
@@ -13,7 +13,7 @@
  * stale — all for a check that happens a handful of times per phase. The
  * underlying arithmetic (`previewBumpCost`, `lib/ai-assessment/bump-preview.ts`)
  * is the reusable, tested part; this script is a thin CLI shell over it, and
- * nothing stops a future `/etl/salud` "bump preview" form from calling the
+ * nothing stops a future admin "bump preview" form from calling the
  * same function if it turns out to be wanted more often (see PR body).
  *
  * Usage:

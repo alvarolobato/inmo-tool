@@ -248,7 +248,27 @@ test("kind chips narrow the feed and stay tappable at 390px", async ({ page }) =
 test("a row drills through to the surface that explains it", async ({ page }) => {
   await gotoActividad(page);
   await page.locator('[data-testid^="act-row-crawl:"]').first().click();
-  await expect(page).toHaveURL(new RegExp(`/etl/${runId}$`));
+  // #642 P2 moved the run drill-down under Actividad; `/etl/[id]` is gone.
+  await expect(page).toHaveURL(new RegExp(`/admin/actividad/run/${runId}$`));
+  await expect(page.getByTestId("run-detail")).toBeVisible();
+});
+
+test("a deep link pre-filters the feed by kind and source (#642 P2)", async ({ page }) => {
+  // Estado's aviso chips and the Fuentes active-block notice link here with
+  // `?tipo=…&fuente=…`; without it, "ver los episodios anteriores" would drop
+  // the operator into the whole unfiltered feed to hunt for the row.
+  await page.goto("/admin/actividad?tipo=crawl");
+  await expect(page.getByTestId("actividad-page")).toBeVisible();
+  await expect(page.getByTestId("kind-chip-crawl")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("kind-chip-todo")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('[data-testid^="act-row-crawl:"]').first()).toBeVisible();
+  await expect(page.locator('[data-testid^="act-row-captura:"]')).toHaveCount(0);
+
+  // An unknown kind is DROPPED, not rejected — a stale bookmark shows the
+  // feed rather than an error page.
+  await page.goto("/admin/actividad?tipo=no-such-kind");
+  await expect(page.getByTestId("kind-chip-todo")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
 test("paging loads older days without duplicating the current ones", async ({ page }) => {

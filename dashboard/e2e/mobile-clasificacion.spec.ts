@@ -13,8 +13,9 @@
  * capping each pill at `min(240px, 60vw)` with an ellipsis.
  *
  * `/etl` and `/etl/captura` — #606's other two targets — are NOT covered
- * here: both are mid-deletion/merge under #642 (P1 merges `/etl/captura`
- * into `/admin/fuentes`; P2 deletes `/etl` outright), so fixing their
+ * here: both are gone (#642 P1 merged `/etl/captura` into `/admin/fuentes`;
+ * P2 deleted `/etl` outright, taking the overflowing run table with it).
+ * `mobile-main-content-padding.spec.ts` measures their replacements. Fixing
  * tables now would be wasted work that conflicts with that in-flight
  * deletion. See `mobile-main-content-padding.spec.ts`'s route-exclusion
  * comment for the same note.

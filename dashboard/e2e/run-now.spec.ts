@@ -7,7 +7,8 @@
  * these tests assert the two halves the UI is actually responsible for:
  *
  *   1. The button writes the correct trigger row — scoped to one connector on
- *      the connectors page, or NULL (full sweep) from the /etl monitor. This
+ *      one source's detail page, or NULL (full sweep) from the Fuentes list
+ *      header, where #642 P2 moved it from the deleted /etl monitor. This
  *      is the load-bearing backend contract, inspected in the same DB row the
  *      ETL poll loop reads (mirrors connectors.spec.ts's approach).
  *   2. Once a trigger reaches 'done' (here simulated by updating the row, as
@@ -120,8 +121,12 @@ test("per-connector run writes a scoped trigger, shows a busy state, no error su
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
-test("full-sweep run from /etl writes a NULL-connector trigger", async ({ page }) => {
-  await page.goto("/etl");
+test("full-sweep run from the Fuentes list writes a NULL-connector trigger", async ({ page }) => {
+  // #642 P2 deleted `/etl`, which owned this button. It moved to the Fuentes
+  // LIST header — the all-sources view of the same control each source's
+  // detail page carries for one source — because #642's constraints forbid a
+  // capability disappearing in a move and it had no other home.
+  await page.goto("/admin/fuentes");
   await expect(page.getByTestId("run-now-all")).toBeVisible();
 
   await page.getByTestId("run-now-all").click();

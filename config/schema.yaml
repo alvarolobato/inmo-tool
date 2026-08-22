@@ -634,7 +634,8 @@
   components: [dashboard]
 
 # Tabla de tarifas por modelo para la estimación de coste LLM en €/1M tokens
-# (panel "LLM / IA" de /etl/salud, #324). JSON: objeto model-id → {in_eur_per_mtok,
+# (panel "LLM / IA" de /admin/llm, #324; se movió fuera de /etl/salud, borrada
+# por #653/#642 P2). JSON: objeto model-id → {in_eur_per_mtok,
 # out_eur_per_mtok}. Se fusiona SOBRE la tabla por defecto de lib/llm-health.ts,
 # así que sólo hace falta declarar los modelos cuyo precio quieras corregir o
 # añadir. El coste es una ESTIMACIÓN (tokens × tarifa), nunca un importe facturado;

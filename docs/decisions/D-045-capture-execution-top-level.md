@@ -18,6 +18,14 @@ this decision's *location* clause ("SETUP stays under `/etl/*`") is
 superseded — the EXECUTION-vs-SETUP split itself, and everything else below,
 still stands as written.
 
+**Location clause fully superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: issue #642 P2 deleted
+the `/etl` tree outright. The last setup surface this decision placed there,
+the extension-install page, is `/admin/extension` now (`/etl/extension` keeps a
+permanent wire-level 308). There is no `/etl/*` left to stay under. The
+EXECUTION (`/captura`) vs. SETUP (admin) split is still exactly as decided
+here; only every path in the text below is historical.
+
 **Context**: Issue #268 (capstone of #237). The guided-capture pieces landed
 under `/etl/*` as they were built: the worklist table page (`/etl/captura`,
 #260/#261), the extension-setup page (`/etl/extension`, #256), and connector

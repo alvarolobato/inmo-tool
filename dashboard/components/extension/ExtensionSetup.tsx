@@ -11,7 +11,7 @@ import type { ApiErrorResponse } from "@/lib/errors";
  *
  * The three setup jobs — download the packaged extension, copy the dashboard's
  * own origin (the "API URL"), copy ADMIN_API_KEY — rendered as a self-contained
- * block so it can live BOTH on the full-page `/etl/extension` route AND inside
+ * block so it can live BOTH on the full-page `/admin/extension` route AND inside
  * the inline `<ExtensionCta/>` modal. Nothing here changed from the original
  * page (#509 explicitly keeps the setup steps identical); it just no longer owns
  * its own admin tab.

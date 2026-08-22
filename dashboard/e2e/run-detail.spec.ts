@@ -1,12 +1,26 @@
 /**
- * E2E: connector monitor UI (issue #104).
+ * E2E: connector run detail (issue #104; moved and renamed by #642 P2).
  *
- * The monitor was inherited from powershop-analytics and kept reading that
- * project's per-table sync tables (`etl_sync_runs`/`etl_sync_run_tables`),
- * which nothing has written to since Phase 1.1 — so the page rendered empty
- * against a schema whose real observability data lives in `connector_runs`/
- * `connector_run_results`. This drives the repointed UI against real seeded
- * rows in those tables.
+ * Was `e2e/etl-monitor.spec.ts`, driving `/etl` (the run list + KPI cards +
+ * charts) and `/etl/[id]` (the per-run drill-down). #642 P2 deleted the
+ * monitor page and MOVED the drill-down to `/admin/actividad/run/[id]`, so
+ * what survives here is the drill-down half, repointed. What was dropped, and
+ * why nothing is lost:
+ *
+ *   - The run-list assertions (funnel totals per run, the ok/failed/skipped
+ *     tally, the "Sin actividad" badge on an all-skipped sweep) tested
+ *     `components/etl/RunList.tsx`, deleted with the page. Actividad (#644,
+ *     #706) is where runs are listed now, one dated row per connector per
+ *     sweep, and it renders the all-skipped case MORE explicitly than the
+ *     badge did — as a `Pasada` row with `Conectores N · Omitidos N`, which
+ *     `e2e/actividad.spec.ts` and `lib/db/__tests__/activity.integration.
+ *     test.ts` both cover.
+ *   - The "Ejecutar todo ahora" assertion moved with the button itself, to
+ *     `e2e/run-now.spec.ts` against the Fuentes list.
+ *
+ * The drill-down still deliberately seeds the two states the inherited
+ * per-table model had no concept of: `circuit_open` (a connector tripped its
+ * breaker mid-run) and `skipped` (an operator disabled it, issue #99).
  *
  * Deliberately seeds the two states the per-table model had no concept of
  * and which therefore had never been rendered anywhere: `circuit_open` (a
@@ -126,12 +140,12 @@ test.beforeEach(async ({ context, baseURL }) => {
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   test.skip(
     !adminKey,
-    "ADMIN_API_KEY unset — /etl is admin-gated by middleware.ts and would " +
+    "ADMIN_API_KEY unset — every UI page is admin-gated by middleware.ts and " +
       "redirect to /admin/login",
   );
-  // The monitor sits behind the same admin gate as the rest of /etl (see
-  // middleware.ts's matcher). Seed the session cookie /admin/login would set
-  // rather than driving the login form on every spec.
+  // Behind the same admin gate as every other UI page (middleware.ts gates
+  // all of them). Seed the session cookie /admin/login would set rather than
+  // driving the login form on every spec.
   await context.addCookies([
     {
       name: "ps_admin",
@@ -141,32 +155,10 @@ test.beforeEach(async ({ context, baseURL }) => {
   ]);
 });
 
-test("monitor lists real connector runs with funnel counts and no error surface", async ({
-  page,
-}) => {
-  await page.goto("/etl");
-
-  await expect(page.getByTestId("run-list")).toBeVisible();
-  const row = page.getByTestId(`run-row-${runId}`);
-  await expect(row).toBeVisible();
-
-  // Funnel totals are aggregated from connector_run_results (31+41+0 found,
-  // 28+4+0 stored) — the run table itself stores no such column.
-  await expect(row).toContainText("72");
-  await expect(row).toContainText("32");
-
-  // ok / failed / skipped — the skipped segment only appears because one is.
-  await expect(page.getByTestId(`run-connectors-${runId}`)).toContainText("1 / 1 / 1");
-
-  // No error surface anywhere on the page.
-  await expect(page.getByTestId("error-display")).toHaveCount(0);
-  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
-});
-
 test("run detail shows the per-connector funnel and the two new statuses", async ({
   page,
 }) => {
-  await page.goto(`/etl/${runId}`);
+  await page.goto(`/admin/actividad/run/${runId}`);
 
   await expect(page.getByTestId("run-detail")).toBeVisible();
   await expect(page.getByTestId("connector-stats")).toBeVisible();
@@ -214,10 +206,19 @@ test("run detail shows the per-connector funnel and the two new statuses", async
   await expect(fotocasaQuality).toContainText("88 %");
   await expect(fotocasaQuality).toContainText("A");
 
+  // #642 P2: the way back is Actividad, the surface that links here, not the
+  // deleted monitor. A drill-down whose "volver" 404s is how a move gets
+  // shipped half-done.
+  const back = page.getByRole("link", { name: /Volver a Actividad/ });
+  await expect(back).toHaveAttribute("href", "/admin/actividad");
+  await back.click();
+  await expect(page).toHaveURL(/\/admin\/actividad$/);
+  await expect(page.getByTestId("actividad-page")).toBeVisible();
+
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
-test("a silently-degraded connector (status ok) is flagged in the ETL monitor (#171)", async ({
+test("a silently-degraded connector (status ok) is flagged on the run detail (#171)", async ({
   page,
 }) => {
   // The #171 failure mode: a connector runs status='ok' with zero fetch errors,
@@ -266,7 +267,7 @@ test("a silently-degraded connector (status ok) is flagged in the ETL monitor (#
     [degradedRunId, JSON.stringify(healthy), JSON.stringify(degraded)],
   );
 
-  await page.goto(`/etl/${degradedRunId}`);
+  await page.goto(`/admin/actividad/run/${degradedRunId}`);
   await expect(page.getByTestId("run-detail")).toBeVisible();
   await expect(page.getByTestId("connector-stats")).toBeVisible();
 
@@ -285,44 +286,4 @@ test("a silently-degraded connector (status ok) is flagged in the ETL monitor (#
 
   await expect(page.getByTestId("error-display")).toHaveCount(0);
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
-});
-
-test("a run where every connector was skipped is not badged as a success", async ({
-  page,
-}) => {
-  // The orchestrator records status='success' whenever failed==0, so an
-  // all-skipped run (the default state since #106 made connectors
-  // disabled-by-default) would otherwise show a green "Completado" — the
-  // badge operators scan first — while nothing actually ran.
-  const r = await pool.query<{ id: number }>(
-    `INSERT INTO connector_runs
-        (trigger, started_at, finished_at, duration_ms, status,
-         connectors_ok, connectors_failed, connectors_skipped, total_connectors)
-     VALUES ($1, NOW() - INTERVAL '3 minutes', NOW() - INTERVAL '3 minutes',
-             900, 'success', 0, 0, 3, 3)
-     RETURNING id`,
-    [TRIGGER],
-  );
-  const skippedRunId = r.rows[0].id;
-
-  await page.goto("/etl");
-  await expect(page.getByTestId(`run-connectors-${skippedRunId}`)).toContainText(
-    "0 / 0 / 3",
-  );
-  await expect(
-    page.locator(`a[href="/etl/${skippedRunId}"]`).first(),
-  ).toContainText("Sin actividad");
-});
-
-test("the Ejecutar todo ahora button is present (issue #244)", async ({ page }) => {
-  // The connector orchestrator now polls etl_manual_trigger
-  // (etl/manual_trigger.py), so /api/etl/run is a real endpoint again — the
-  // full-sweep control is back, not the hard 501 it was after issue #104.
-  await page.goto("/etl");
-  await expect(page.getByTestId("run-list")).toBeVisible();
-
-  await expect(page.getByTestId("run-now-all")).toBeVisible();
-  // The old source-project watermark-resync affordances stay gone.
-  await expect(page.getByTestId("sync-now-button")).toHaveCount(0);
-  await expect(page.getByTestId("force-resync-button")).toHaveCount(0);
 });

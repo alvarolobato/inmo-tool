@@ -11,7 +11,14 @@ import { ExtensionSetup } from "@/components/extension/ExtensionSetup";
  * en página completa" link, rendering the same shared {@link ExtensionSetup}
  * block (download the packaged extension, copy the API URL + key).
  *
- * Admin-gated by middleware (`/etl/:path*`), same as every surface under /etl.
+ * Moved here from `/etl/extension` by issue #642 P2, which retired the whole
+ * `/etl` tree; the old path keeps a wire-level 308 (`next.config.js`). This
+ * supersedes D-045's *location* clause ("setup pages live under `/etl/*`")
+ * only — the execution-vs-setup split D-045 actually decided is untouched.
+ * Still deliberately OFF the nav strip (#509): the strip's Fuentes tab owns
+ * this prefix so it stays highlighted when the modal deep-links here.
+ *
+ * Admin-gated by middleware (every UI page is), same as every `/admin` surface.
  */
 export default function ExtensionSetupPage() {
   return (

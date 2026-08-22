@@ -3,12 +3,19 @@ id: D-154
 title: Fuentes merges connector config + capture worklist; supersedes D-045's setup location
 date: 2026-08-21
 group: Plumbing / process
-rule: "/admin/fuentes (list) + /admin/fuentes/[name] (detail) merge /etl/connectors + /etl/captura (301s); Fuentes detail also absorbs per-source quality (D-084/D-086), zero-result regressions (D-092), and drift (D-090/D-093) from /etl/salud (unchanged, P2). Supersedes D-045's location clause only ('setup stays under /etl/*') — the execution (/captura) vs. setup split itself is untouched."
+rule: "/admin/fuentes (list) + /admin/fuentes/[name] (detail) merge /etl/connectors + /etl/captura (301s); Fuentes detail also absorbs per-source quality (D-084/D-086), zero-result regressions (D-092), and drift (D-090/D-093) that used to live on /etl/salud (deleted by P2, D-168). Supersedes D-045's location clause only ('setup stays under /etl/*') — the execution (/captura) vs. setup split itself is untouched."
 ---
 
 # D-154: Fuentes merges connector config + capture worklist; supersedes D-045's setup location
 
 *Decided: 2026-08-21*
+
+**"(unchanged, P2)" no longer holds (2026-08-22),
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: P1 left `/etl/salud`
+standing and re-displayed its sections on Fuentes; P2 deleted it, along with
+the rest of the `/etl` tree. The rule above is amended accordingly — Fuentes
+is the only per-source home for quality/zero-results/drift now, and the
+fleet-wide rollups moved to Estado. Everything else here stands.
 
 **Context**: Issue #642 P1, part of #636's admin-IA deletion pass. The owner's
 standing complaint ("quiero que unifiques y elimines, no que solo añadas

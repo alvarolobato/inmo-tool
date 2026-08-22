@@ -53,6 +53,22 @@ describe("getRecentBlockEpisodes", () => {
     expect(text).toMatch(/ORDER BY detected_at DESC/);
   });
 
+  it("asks for one row PER PORTAL, so a noisy portal can't hide a quiet one", async () => {
+    // PR #710 review. This read feeds a per-portal STATE derivation
+    // (activeBlocksByPortal → Estado's aviso chip, Fuentes' block banner), not
+    // a history table. A flat `LIMIT 20` over all episodes meant 20 detections
+    // on one portal inside the 24 h window pushed every other portal's
+    // still-active block off the end and its chip silently vanished.
+    mockQuery.mockResolvedValue({ columns: [], rows: [] });
+    await getRecentBlockEpisodes();
+
+    const [text, params] = mockQuery.mock.calls[0];
+    expect(text).toMatch(/DISTINCT ON \(portal\)/);
+    expect(text).toMatch(/ORDER BY portal, detected_at DESC/);
+    // The bound is a PORTAL count now, not an episode count.
+    expect(params).toEqual([20]);
+  });
+
   it("returns an empty array when there are no episodes", async () => {
     mockQuery.mockResolvedValue({ columns: [], rows: [] });
     expect(await getRecentBlockEpisodes()).toEqual([]);

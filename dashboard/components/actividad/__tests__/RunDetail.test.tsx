@@ -206,7 +206,12 @@ describe("RunDetail component", () => {
     render(<RunDetail runId="99999" />);
     await waitFor(() => { expect(screen.getByTestId("not-found")).toBeInTheDocument(); });
     expect(screen.getByText(/Ejecución no encontrada/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Volver al monitor/ })).toHaveAttribute("href", "/etl");
+    // #642 P2: `/etl` is gone; the run detail moved under Actividad, which is
+    // now where a run is found, so that is where "volver" goes.
+    expect(screen.getByRole("link", { name: /Volver a Actividad/ })).toHaveAttribute(
+      "href",
+      "/admin/actividad",
+    );
   });
 
   it("shows error state on fetch failure", async () => {

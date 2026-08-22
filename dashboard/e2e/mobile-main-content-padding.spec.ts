@@ -138,21 +138,31 @@ async function assertNoHorizontalOverflow(page: Page, route: string): Promise<vo
 // this must not be a captura-only fix). Each renders 200 with no seed data
 // (verified against a live dev server before writing this list).
 //
-// `/etl` and `/etl/captura` are deliberately excluded here (#599 review S2,
-// then #606): once measured with a real settle (see
-// `assertNoHorizontalOverflow`'s header) `/etl` overflows with an
-// 812px-wide `<table>` inside a scroll container at 390px — a PRE-EXISTING
-// bug (reproduces identically on unmodified `main`), not something this
-// PR's change touches. Both routes were about to become moot rather than
-// worth fixing: #642 P1 merges `/etl/connectors` and `/etl/captura` into
-// `/admin/fuentes`, and `/etl` itself (Monitor) is slated for deletion in
-// #642 P2 — fixing a table on a page mid-deletion elsewhere would only
-// create a merge conflict with that work. `/admin/clasificacion` (#606's
+// `/etl` and `/etl/captura` used to be excluded here (#599 review S2, then
+// #606): once measured with a real settle (see `assertNoHorizontalOverflow`'s
+// header) `/etl` overflowed with an 812px-wide `<table>` inside a scroll
+// container at 390px. The exclusion was justified as "both routes are about
+// to become moot" — and they now are: #642 P1 merged `/etl/connectors` +
+// `/etl/captura` into `/admin/fuentes`, and P2 deleted `/etl` outright. The
+// overflowing table went with `components/etl/RunList.tsx`. So the exclusion
+// is retired rather than inherited, and the two surfaces that replaced them
+// are IN the list below, measured like everything else.
+// `/admin/clasificacion` (#606's
 // third target, and the one NOT going away) got its own fix — its overflow
 // was individual `<a>`/`<span>` property-reference pills with no width cap,
 // not a table — and its own seeded regression test:
 // `mobile-clasificacion.spec.ts`.
-const MAIN_ROUTES = ["/", "/profiles", "/captura", "/admin", "/glossary", "/inicio", "/conversations"];
+const MAIN_ROUTES = [
+  "/",
+  "/profiles",
+  "/captura",
+  "/admin",
+  "/admin/fuentes",
+  "/admin/actividad",
+  "/glossary",
+  "/inicio",
+  "/conversations",
+];
 
 test.describe("phone width (iPhone 13 emulation)", () => {
   const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
@@ -183,11 +193,11 @@ test.describe("phone width (iPhone 13 emulation)", () => {
   // #599 review (S1): `.main-content` was only the smallest of three
   // horizontal-padding layers on the pages the owner complained about.
   // These two pin the other two shared layers this PR's follow-up fixes:
-  // `AdminChrome.tsx`'s content div (every `/admin/*` and `/etl/*` page)
+  // `AdminChrome.tsx`'s content div (every `/admin/*` page)
   // and `.route-shell` (the repeated per-route `<main style={{padding:
   // 24}}>` shape, 8 call sites across 6 files). Both route through
   // `gotoAndSettle` (its own header has the full history of why).
-  test("AdminChrome content div horizontal padding shrinks on phone (every /admin/* and /etl/* page)", async ({
+  test("AdminChrome content div horizontal padding shrinks on phone (every /admin/* page)", async ({
     page,
   }) => {
     await gotoAndSettle(page, "/admin/fuentes", "fuentes-page");

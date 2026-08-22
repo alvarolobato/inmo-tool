@@ -201,7 +201,7 @@ export async function assembleRequest(
     // The agentic path returned `usage` to its caller and NOBODY persisted it —
     // no `logUsage` call existed on this branch for either provider, so every
     // chat turn (up to 8 tool rounds, each a full model call) was invisible to
-    // `llm_usage`, to the LLM cost panel (`/admin/llm`, moved from `/etl/salud`
+    // `llm_usage`, to the LLM cost panel (`/admin/llm`, moved off the deleted `/etl/salud`
     // in #653), and to `checkDailyBudget`.
     // Log it here, at the single seam every agentic run passes through.
     logUsage(endpoint, model, normalizedUsage, {

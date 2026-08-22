@@ -237,6 +237,72 @@ export function captureSuccessRate(done: number, failed: number): number | null 
 }
 
 /**
+ * How recent a block episode must be to count as an ACTIVE block (issue #642
+ * P2, D-168).
+ *
+ * `extension_block_episode` records a detection, never a resolution — there is
+ * no "cleared" row to wait for, because the block clears in the owner's
+ * browser (solve the challenge, press "Reanudar" in the popup) and nothing
+ * reports that back. So "active" has to be derived from recency, and the
+ * window is a judgement call rather than a measurement.
+ *
+ * 24 h, for two reasons that pull in the same direction:
+ *   - Too short and a block detected overnight is already "history" by the
+ *     time the owner looks in the morning — the exact state that most needs
+ *     the chip. Capture is owner-paced and bursty (measured: 2,175 captures
+ *     one day, zero on several others), so "recent" on this surface has to be
+ *     measured in days, not minutes.
+ *   - Too long and the chip stops meaning anything: a portal that challenged
+ *     once last week is not currently blocked, and a permanently-lit chip is
+ *     one nobody reads.
+ * A stale chip is cheap here (it points at the same page the operator wanted
+ * anyway); a missing one is not.
+ */
+export const ACTIVE_BLOCK_WINDOW_HOURS = 24;
+
+/**
+ * The most recent block episode per portal that falls inside
+ * {@link ACTIVE_BLOCK_WINDOW_HOURS}, keyed by portal.
+ *
+ * `episodes` is expected newest-first (`getRecentBlockEpisodes` orders that
+ * way) but this does not rely on it — it keeps the newest per portal
+ * explicitly, so a caller that re-sorts cannot silently change the answer.
+ * `now` is injected so the derivation is testable without faking the clock.
+ */
+export function activeBlocksByPortal(
+  episodes: ExtensionBlockEpisode[],
+  now: number = Date.now(),
+): Map<string, ExtensionBlockEpisode> {
+  const cutoff = now - ACTIVE_BLOCK_WINDOW_HOURS * 3600_000;
+  const byPortal = new Map<string, ExtensionBlockEpisode>();
+  for (const ep of episodes) {
+    const at = new Date(ep.detected_at).getTime();
+    if (Number.isNaN(at) || at < cutoff) continue;
+    const seen = byPortal.get(ep.portal);
+    if (!seen || new Date(seen.detected_at).getTime() < at) byPortal.set(ep.portal, ep);
+  }
+  return byPortal;
+}
+
+/**
+ * Zero-result regressions grouped by the connector they belong to (issue #642
+ * P2). The list itself is rendered per-source on Fuentes/<name>; Estado only
+ * needs to know WHICH sources currently have one and how many, so it can show
+ * an aviso chip that links there instead of restating the rows.
+ */
+export function zeroResultsByConnector(
+  rows: ZeroResultRegression[],
+): Map<string, ZeroResultRegression[]> {
+  const byConnector = new Map<string, ZeroResultRegression[]>();
+  for (const row of rows) {
+    const list = byConnector.get(row.connector);
+    if (list) list.push(row);
+    else byConnector.set(row.connector, [row]);
+  }
+  return byConnector;
+}
+
+/**
  * True when a source's average photo count is a real number below the
  * under-extraction threshold. Null (no data) is not a flag.
  */

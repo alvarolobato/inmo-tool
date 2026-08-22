@@ -59,6 +59,7 @@ import {
   formatWhen,
   matchesFilter,
   metricsFor,
+  parseActivityFilterQuery,
   rollupDay,
   sourcesIn,
 } from "@/lib/activity";
@@ -84,8 +85,23 @@ export default function ActividadPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [kinds, setKinds] = useState<ActivityKind[]>([]);
-  const [source, setSource] = useState<string | null>(null);
+  // Deep-link filters (issue #642 P2). Read ONCE, from the URL, on the first
+  // client render — the page is already a client component, so this reads
+  // `window.location.search` directly rather than pulling in `useSearchParams`
+  // and the Suspense boundary Next requires with it (the same pattern
+  // `/admin/fuentes/[name]` uses for its `?status=`). Estado's aviso chips and
+  // the Fuentes active-block notice arrive here with `?tipo=bloqueo&fuente=…`,
+  // which is what makes "ver episodios anteriores" land on the episodes.
+  //
+  // Lazy initialiser, not an effect: an effect would render the whole
+  // unfiltered feed first and then snap to the filtered one. Guarded for the
+  // server pass, where `window` does not exist.
+  const [kinds, setKinds] = useState<ActivityKind[]>(
+    () => (typeof window === "undefined" ? [] : parseActivityFilterQuery(window.location.search).kinds),
+  );
+  const [source, setSource] = useState<string | null>(
+    () => (typeof window === "undefined" ? null : parseActivityFilterQuery(window.location.search).source),
+  );
   /** Switched on from the truncation banner; never back off automatically. */
   const [narrow, setNarrow] = useState(false);
 
@@ -208,7 +224,15 @@ export default function ActividadPage() {
           >
             Todo
           </button>
-          {ACTIVITY_KINDS.filter((k) => (kindCounts.get(k) ?? 0) > 0).map((k) => (
+          {/* A kind chip normally appears only when the window HAS that kind,
+              so the row stays short. A kind arrived at by deep link
+              (`?tipo=…`) is the exception and must render even at zero:
+              otherwise a link that filters to something absent from the last
+              three days shows an empty feed with no visible filter to clear,
+              which reads as "Actividad is broken". */}
+          {ACTIVITY_KINDS.filter(
+            (k) => (kindCounts.get(k) ?? 0) > 0 || kinds.includes(k),
+          ).map((k) => (
             <button
               key={k}
               type="button"
@@ -219,7 +243,7 @@ export default function ActividadPage() {
             >
               <span aria-hidden="true">{KIND_GLYPH[k]}</span>
               {KIND_LABEL[k]}
-              <span className="act-chip-count">{kindCounts.get(k)}</span>
+              <span className="act-chip-count">{kindCounts.get(k) ?? 0}</span>
             </button>
           ))}
         </div>
@@ -232,7 +256,11 @@ export default function ActividadPage() {
             onChange={(e) => setSource(e.target.value === "" ? null : e.target.value)}
           >
             <option value="">Todas</option>
-            {sources.map((s) => (
+            {/* Same reason as the kind chips above: a deep-linked source that
+                the loaded window contains no rows for still needs an option,
+                or the select silently falls back to "Todas" while the feed
+                stays filtered. */}
+            {(source !== null && !sources.includes(source) ? [source, ...sources] : sources).map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>

@@ -50,8 +50,9 @@ import { useParams } from "next/navigation";
 import { Card } from "@tremor/react";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { ConnectorCard } from "@/components/connectors/ConnectorCard";
+import { RunNowButton } from "@/components/connectors/RunNowButton";
 import { ExtensionCta } from "@/components/extension/ExtensionCta";
-import { DriftReport } from "@/components/etl/DriftReport";
+import { DriftReport } from "@/components/fuentes/DriftReport";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { ConnectorConfigPatch, ConnectorView } from "@/lib/connectors-schema";
@@ -59,10 +60,17 @@ import { firstPendingUrl, isCapturePortal, isRequeued, WORKLIST_STATUSES } from 
 import type { WorklistPortalSummary, WorklistRow, WorklistStatus } from "@/lib/worklist";
 import { RecapturePanel } from "@/components/worklist/RecapturePanel";
 import type { DataHealthResponse } from "@/lib/data-health";
-import { LOW_PHOTO_THRESHOLD, isLowPhotoCoverage, isStuckPending, captureSuccessRate } from "@/lib/data-health";
+import {
+  LOW_PHOTO_THRESHOLD,
+  activeBlocksByPortal,
+  captureSuccessRate,
+  extensionBlockNoticeEs,
+  isLowPhotoCoverage,
+  isStuckPending,
+} from "@/lib/data-health";
 import type { PortalDriftStatus } from "@/lib/search-url/drift-check";
 import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
-import { SOURCE_STATUS_LABEL, type SourceStatus } from "@/lib/source-health";
+import { SOURCE_STATUS_LABEL, formatSourceAge, type SourceStatus } from "@/lib/source-health";
 
 // Same palette as the Estado board (app/admin/page.tsx) — one status
 // vocabulary, one set of colors, never a second definition (#636 verdict).
@@ -88,6 +96,7 @@ function FuentesList() {
   const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [health, setHealth] = useState<SourceHealthResponse | null>(null);
   const [queues, setQueues] = useState<WorklistPortalSummary[]>([]);
+  const [quality, setQuality] = useState<DataHealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
 
@@ -95,12 +104,16 @@ function FuentesList() {
     setLoading(true);
     setError(null);
     try {
-      const [connectorsRes, healthRes, worklistRes] = await Promise.all([
+      const [connectorsRes, healthRes, worklistRes, healthDataRes] = await Promise.all([
         fetch("/api/etl/connectors"),
         fetch("/api/etl/source-health").catch(() => null),
         // Unscoped on purpose: this is the ONE read that gives every portal's
         // queue depth at once (see the pending-count column below).
         fetch("/api/etl/worklist").catch(() => null),
+        // Same unscoped read the detail page makes — here only for the
+        // extraction-quality chip below. See its comment for why the list
+        // needs it at all.
+        fetch("/api/etl/data-health").catch(() => null),
       ]);
       if (!connectorsRes.ok) {
         const errBody = await connectorsRes.json().catch(() => null);
@@ -121,6 +134,11 @@ function FuentesList() {
         // Additive column — a failure here must not take down the list.
         setQueues([]);
       }
+      if (healthDataRes && healthDataRes.ok) {
+        setQuality((await healthDataRes.json()) as DataHealthResponse);
+      } else {
+        setQuality(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar las fuentes");
     } finally {
@@ -134,29 +152,79 @@ function FuentesList() {
 
   const healthByName = new Map((health?.sources ?? []).map((s) => [s.source, s]));
   const queueByPortal = new Map(queues.map((q) => [q.source_portal, q]));
+  const qualityBySource = new Map((quality?.sources ?? []).map((s) => [s.source, s]));
 
   return (
     <main className="route-shell" style={{ maxWidth: 900 }} data-testid="fuentes-page">
-      {/* Header cross-link, carried over from `/etl/connectors` — the one
-          affordance that page had which the merge had quietly dropped. */}
+      {/* Header, with the two all-sources affordances.
+
+          "Ejecutar todo ahora" (issue #642 P2) is the GLOBAL sweep — every
+          enabled connector, queued through `etl_manual_trigger`. It lived on
+          `/etl`, which P2 deleted, and it had no other home: the per-connector
+          "Ejecutar ahora" is on each source's own detail page, and #642's own
+          constraints forbid a capability disappearing in a move. This list is
+          where it belongs — it is the all-sources view of exactly the control
+          each detail page carries for one source. Estado was the alternative
+          and is wrong: that board is a read-only diagnosis, and Actividad's
+          rule (see its header) is that it carries no controls at all.
+
+          The cross-link now points at Actividad rather than the deleted
+          Monitor ETL: after triggering a sweep, the run's own row — and its
+          drill-down — appear there.
+
+          "Diagnósticos →" is the ONLY navigational route to `/admin/diagnostics`
+          (#671). That page had its own strip tab until #642 P2 took it off in
+          favour of a `matchPrefixes` entry on Fuentes — and a `matchPrefixes`
+          entry only highlights a tab once you are already there, it links
+          nowhere. Without this anchor the page is reachable by typing the URL
+          and nothing else, which is exactly the capability-disappears-by-
+          omission failure D-168 forbids. It belongs here rather than on a
+          source's detail page because the diagnostics list is fleet-wide (all
+          portals, newest first — `listDiagnostics()` takes no portal filter),
+          the same scope as this list itself. */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>Fuentes</h1>
-        <Link
-          href="/etl"
-          data-testid="fuentes-to-monitor"
+        <div
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            minHeight: 44,
-            fontSize: 13,
-            color: "var(--accent)",
-            textDecoration: "none",
             marginLeft: "auto",
-            whiteSpace: "nowrap",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
           }}
         >
-          Monitor ETL →
-        </Link>
+          <RunNowButton label="Ejecutar todo ahora" testIdSuffix="all" onFinished={() => void load()} />
+          <Link
+            href="/admin/actividad"
+            data-testid="fuentes-to-actividad"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              minHeight: 44,
+              fontSize: 13,
+              color: "var(--accent)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Actividad →
+          </Link>
+          <Link
+            href="/admin/diagnostics"
+            data-testid="fuentes-to-diagnostics"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              minHeight: 44,
+              fontSize: 13,
+              color: "var(--accent)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Diagnósticos →
+          </Link>
+        </div>
       </div>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
         Cada fila es un conector o portal de captura. Toca una fila para ver y
@@ -193,6 +261,8 @@ function FuentesList() {
             const h = healthByName.get(c.name);
             const q = queueByPortal.get(c.name);
             const showQueue = q != null && (q.pending > 0 || q.failed > 0);
+            const sq = qualityBySource.get(c.name);
+            const lowPhotos = sq != null && isLowPhotoCoverage(sq.avg_photo_count);
             return (
               <Link
                 key={c.name}
@@ -284,8 +354,66 @@ function FuentesList() {
                     )}
                   </span>
                 )}
+                {/* Extraction quality (D-084/D-086), as a chip — PR #710
+                    review's "Medium".
+
+                    #642's disposition table sent "Calidad por fuente" from
+                    `/etl/salud` to the per-source detail page, and it went
+                    there whole. But that left the fleet asymmetric: queue
+                    depth got a chip on this list and quality got nothing, so
+                    a source quietly dropping to 0.2 photos/anuncio kept a
+                    green `fresco` dot and the only way to notice was opening
+                    every source in turn — a regression against the very
+                    "one glance, not three pages" argument the move was made
+                    on.
+
+                    Deliberately a CHIP, not a change to the status dot.
+                    `deriveSourceStatus` (lib/source-health.ts) answers ONE
+                    question — how recently did this source produce data —
+                    and both this list and the Estado board render its answer
+                    from the same derivation. Folding a second, unrelated axis
+                    into that dot would make one colour mean two things and
+                    put the two boards' shared vocabulary back in play; a chip
+                    sits beside the dot, reads independently, and is symmetric
+                    with the queue chip right above it. Same quiet-when-clean
+                    rule: rendered only below LOW_PHOTO_THRESHOLD. */}
+                {lowPhotos && (
+                  <span
+                    data-testid={`fuente-quality-${c.name}`}
+                    data-avg-photos={sq.avg_photo_count ?? ""}
+                    title={`${formatNum(sq.avg_photo_count)} fotos por anuncio almacenado — por debajo de ${LOW_PHOTO_THRESHOLD}`}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      background: "var(--danger-soft, #fee2e2)",
+                      color: "var(--danger, #b91c1c)",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {formatNum(sq.avg_photo_count)} fotos/anuncio
+                  </span>
+                )}
+                {/* Data freshness, NOT the last run's outcome (#642 P2).
+
+                    Before P2 this column read `<run status> · N descargados`,
+                    and the same last-run outcome was then rendered again on
+                    this source's detail card and a third time as Actividad's
+                    newest `crawl` row — the duplication the #642 review
+                    called out, on a tracker whose whole premise is "unifica y
+                    elimina". #636's verdict decides which copy is wrong here,
+                    not which is prettiest: run outcome is the EXPLANATION,
+                    never the headline, and a run-derived headline is
+                    structurally blind to browser-captured portals, which
+                    produce no run at all. So the list shows the derived
+                    freshness that `lib/source-health.ts` computes from the
+                    `listing` table for BOTH ingest paths — the same number
+                    the Estado board shows — and the run outcome stays where
+                    it explains something: the detail card, and Actividad. */}
                 <span
-                  data-testid={`fuente-lastrun-${c.name}`}
+                  data-testid={`fuente-activity-${c.name}`}
                   style={{
                     fontSize: 12,
                     color: "var(--fg-muted)",
@@ -296,9 +424,7 @@ function FuentesList() {
                     minWidth: 0,
                   }}
                 >
-                  {c.lastRun
-                    ? `${c.lastRun.status} · ${c.lastRun.fetched_count} descargados`
-                    : "sin ejecuciones"}
+                  {h ? `+${h.new24h} en 24h · ${formatSourceAge(h.ageHours)}` : "sin datos"}
                 </span>
               </Link>
             );
@@ -651,6 +777,16 @@ function FuenteDetail({ name }: { name: string }) {
     dataHealth?.connectors.find((c) => c.connector_name === name) ?? null;
   const sourceQuality = dataHealth?.sources.find((s) => s.source === name) ?? null;
   const zeroResultRows = dataHealth?.zero_result_regressions.filter((z) => z.connector === name) ?? [];
+  // Issue #642 P2 — the ACTIVE half of #637's block detection. The episode
+  // HISTORY is Actividad's `bloqueo` rows (#706) and is deliberately not
+  // duplicated here; what this page owes is the current state, because this
+  // is where the operator acts on it (the queue below is the one that is
+  // paused, and its pending rows are preserved). Restoring this also makes
+  // the drill-through #706 nulled honest again: an Actividad `bloqueo` row
+  // links here and now lands on something.
+  const activeBlock = dataHealth
+    ? (activeBlocksByPortal(dataHealth.extension_blocks).get(name) ?? null)
+    : null;
   const driftReport = drift?.find((r) => r.connector === name) ?? null;
 
   return (
@@ -698,6 +834,41 @@ function FuenteDetail({ name }: { name: string }) {
       {connectorsError && (
         <div style={{ marginTop: 16 }}>
           <ErrorDisplay error={connectorsError} />
+        </div>
+      )}
+
+      {/* Extensión bloqueada (#637) — state, not history. D-047 vocabulary:
+          the extension detected a challenge and stopped ITSELF, so this is
+          "go and resolve it", never a crash report. Rendered above everything
+          else on the page because the capture queue below it is the thing
+          that is stopped. */}
+      {activeBlock && (
+        <div
+          data-testid="fuente-block-active"
+          style={{
+            marginTop: 16,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            borderLeft: "3px solid #dc2626",
+            background: "var(--bg-1)",
+          }}
+        >
+          <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "#dc2626" }}>
+            {extensionBlockNoticeEs(activeBlock)}
+          </p>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--fg-muted)" }}>
+            Detectado {formatRelative(activeBlock.detected_at)}. La cola pendiente se conserva:
+            resuelve el reto en el navegador y pulsa &quot;Reanudar&quot; en el popup de la
+            extensión.{" "}
+            <Link
+              href={`/admin/actividad?tipo=bloqueo&fuente=${encodeURIComponent(name)}`}
+              data-testid="fuente-block-history"
+              style={{ color: "var(--accent)", textDecoration: "none" }}
+            >
+              Ver episodios anteriores →
+            </Link>
+          </p>
         </div>
       )}
 
@@ -1046,9 +1217,16 @@ function FuenteDetail({ name }: { name: string }) {
           <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--fg)" }}>Captura por portal</h2>
           <Card className="p-4" style={{ marginTop: 8 }}>
             <dl style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
+              {/* Testids on every value here (issue #642 P2). `/etl/salud`'s
+                  own e2e (e2e/data-health.spec.ts) asserted these numbers via
+                  per-portal testids on the page P2 deletes; the coverage moves
+                  to this section rather than being dropped, so the assertions
+                  need something to hang off. No `-${portal}` suffix: the route
+                  param IS the scope, there is exactly one portal on the page. */}
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <dt style={{ color: "var(--fg-muted)" }}>Pendientes</dt>
                 <dd
+                  data-testid="portal-pending"
                   style={{
                     fontWeight: 600,
                     color: isStuckPending(portalHealth.oldest_pending_age_seconds)
@@ -1058,15 +1236,34 @@ function FuenteDetail({ name }: { name: string }) {
                 >
                   {portalHealth.pending_count}
                   {portalHealth.pending_count > 0 && (
-                    <span style={{ color: "var(--fg-muted)", marginLeft: 6, fontWeight: 400 }}>
+                    <span
+                      data-testid="portal-oldest"
+                      style={{ color: "var(--fg-muted)", marginLeft: 6, fontWeight: 400 }}
+                    >
                       (más antiguo: {formatAge(portalHealth.oldest_pending_age_seconds)})
+                    </span>
+                  )}
+                  {isStuckPending(portalHealth.oldest_pending_age_seconds) && (
+                    <span
+                      data-testid="portal-stuck"
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "1px 8px",
+                        borderRadius: 999,
+                        background: "var(--danger-soft, #fee2e2)",
+                        color: "var(--danger, #b91c1c)",
+                      }}
+                    >
+                      Atascado
                     </span>
                   )}
                 </dd>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <dt style={{ color: "var(--fg-muted)" }}>Éxito (7d)</dt>
-                <dd style={{ fontWeight: 600 }}>
+                <dd data-testid="portal-success" style={{ fontWeight: 600 }}>
                   {formatPct(captureSuccessRate(portalHealth.done_7d, portalHealth.failed_7d))}{" "}
                   <span style={{ color: "var(--fg-muted)", fontWeight: 400 }}>
                     ({portalHealth.done_7d}✓ / {portalHealth.failed_7d}✗)
@@ -1076,16 +1273,22 @@ function FuenteDetail({ name }: { name: string }) {
               {portalHealth.listing_7d > 0 && (
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
                   <dt style={{ color: "var(--fg-muted)" }}>Páginas de resultados (7d)</dt>
-                  <dd style={{ fontWeight: 600 }}>{portalHealth.listing_7d}</dd>
+                  <dd data-testid="portal-listing" style={{ fontWeight: 600 }}>
+                    {portalHealth.listing_7d}
+                  </dd>
                 </div>
               )}
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <dt style={{ color: "var(--fg-muted)" }}>Completitud</dt>
-                <dd style={{ fontWeight: 600 }}>{formatRatio(portalHealth.avg_fields_ratio_7d)}</dd>
+                <dd data-testid="portal-completeness" style={{ fontWeight: 600 }}>
+                  {formatRatio(portalHealth.avg_fields_ratio_7d)}
+                </dd>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <dt style={{ color: "var(--fg-muted)" }}>Fotos/anuncio</dt>
-                <dd style={{ fontWeight: 600 }}>{formatNum(portalHealth.avg_photo_count_7d)}</dd>
+                <dd data-testid="portal-photos" style={{ fontWeight: 600 }}>
+                  {formatNum(portalHealth.avg_photo_count_7d)}
+                </dd>
               </div>
 
               {/* ── Tiempo por anuncio (issue #700) ────────────────────────
@@ -1238,6 +1441,7 @@ function FuenteDetail({ name }: { name: string }) {
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                   <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{z.scope_key}</span>
                   <span
+                    data-testid={`zero-result-badge-${z.connector}-${z.scope_key}`}
                     style={{
                       fontSize: 11,
                       fontWeight: 600,
@@ -1250,7 +1454,10 @@ function FuenteDetail({ name }: { name: string }) {
                     {z.consecutive_zeros} ejec. a 0
                   </span>
                 </div>
-                <p style={{ marginTop: 8, fontSize: 12, color: "var(--danger, #b91c1c)" }}>
+                <p
+                  data-testid={`zero-result-detail-${z.connector}-${z.scope_key}`}
+                  style={{ marginTop: 8, fontSize: 12, color: "var(--danger, #b91c1c)" }}
+                >
                   Antes devolvía{" "}
                   {z.last_nonzero_count !== null ? `${z.last_nonzero_count} anuncio(s)` : "resultados"}
                   ; ahora 0 desde {formatRelative(z.drift_started_at)}.

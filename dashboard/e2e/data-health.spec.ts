@@ -1,21 +1,33 @@
 /**
- * E2E: "Salud de datos" data-health page (issue #272, D-041).
+ * E2E: data health, per source (issue #272, D-041; repointed by #642 P2).
+ *
+ * These are `/etl/salud`'s own exit criteria, still asserted, now against the
+ * surfaces that absorbed them when #642 P2 deleted that page. Repointing
+ * rather than deleting is the whole point: "every deleted section has a named
+ * home" is a claim, and this file is what makes it a checked one.
+ *
+ *   - EC-1/EC-2/EC-3 (capture pending count, oldest age, the >5-min "Atascado"
+ *     flag, success rate, extraction completeness) → `/admin/fuentes/<portal>`,
+ *     the "Captura por portal" section.
+ *   - The #270/#300 clean-vs-error distinction (a connector that stopped for
+ *     budget renders green-with-a-notice; only `failed`/`circuit_open` shows
+ *     attention) → the same source's `<ConnectorCard>` on Fuentes, which #642
+ *     P2 taught to split `error_msg` into a notice vs an error rather than
+ *     appending it raw.
+ *   - Stale profiles + the #285 running-sweep guard → the Estado board's
+ *     "Colas" tile (#640/#702), which reuses `STALE_PROFILES_SQL` and the same
+ *     guard verbatim.
+ *   - EC-4 (no error surface) is asserted on each destination.
  *
  * Drives a real Next.js server against a real Postgres, seeding
- * connector_run_results / extension_capture / listing / search_profile
- * directly via `pg`, then asserts the four exit criteria plus the D-041 bar:
+ * connector_registry / connector_config / connector_run_results /
+ * extension_capture / listing / search_profile directly via `pg`. The two
+ * synthetic connectors are REGISTERED here (unlike on the old page, which read
+ * only run results): Fuentes renders its card from `/api/etl/connectors`, so
+ * an unregistered name shows `fuente-not-found` and no card.
  *
- *   - EC-1: pending count + oldest age per portal render.
- *   - EC-2: a portal with a >5-min-old pending capture is flagged "Atascado".
- *   - EC-3: success rate + extraction completeness render.
- *   - EC-4: no error surface against real seeded data.
- *
- * Also checks the clean-vs-error distinction (#270/#300): a connector that
- * stopped cleanly for budget renders green-with-a-notice, NOT as an error;
- * only a genuine `failed`/`circuit_open` run shows attention styling.
- *
- * Admin-gated (middleware.ts `/etl/:path*` + `/api/etl/:path*`), so the test
- * sets the `ps_admin` cookie the way /admin/login does. Skips cleanly when
+ * Admin-gated (middleware.ts gates every UI page + `/api/etl/:path*`), so the
+ * test sets the `ps_admin` cookie the way /admin/login does. Skips cleanly when
  * Postgres is unreachable or ADMIN_API_KEY is unset, matching the other specs.
  */
 import { test, expect } from "@playwright/test";
@@ -41,9 +53,18 @@ const FAILED_CONN = "e2e_health_failed";
 // attention), and a captured search/listing page must render as a clean,
 // informational outcome (never a failure).
 const SKIPPED_CONN = "e2e_health_skipped";
-const STUCK_URL = "https://www.idealista.com/inmueble/E2E-DH-STUCK";
-const DONE_URL = "https://www.idealista.com/inmueble/E2E-DH-DONE";
-const LISTING_URL = "https://www.idealista.com/venta-viviendas/E2E-DH-LISTING/";
+// A SYNTHETIC host, deliberately not a real portal (#642 P2). The per-portal
+// aggregates are windowed averages over every capture on that host, so seeding
+// three rows on `idealista.com` and asserting "80% completitud" only holds on
+// an empty database — against the shared/demo DB, 2.168 real idealista
+// captures averaging 0.501 drown the fixture and the assertion reads 50%.
+// `hostToPortal` (lib/data-health.ts) falls through to the bare host for a
+// host it doesn't recognise, so this spec gets a portal row of its own,
+// containing exactly the three captures it seeded, on any database.
+const E2E_HOST = "e2e-dh-portal.test";
+const STUCK_URL = `https://${E2E_HOST}/inmueble/E2E-DH-STUCK`;
+const DONE_URL = `https://${E2E_HOST}/inmueble/E2E-DH-DONE`;
+const LISTING_URL = `https://${E2E_HOST}/venta-viviendas/E2E-DH-LISTING/`;
 const E2E_SOURCE = "e2e_health_src";
 const E2E_PROFILE = "E2E Salud Perfil";
 
@@ -60,6 +81,8 @@ async function purge(): Promise<void> {
   await pool.query(
     "DELETE FROM connector_run_results WHERE connector_name LIKE 'e2e_health_%'",
   );
+  await pool.query("DELETE FROM connector_config WHERE connector_name LIKE 'e2e_health_%'");
+  await pool.query("DELETE FROM connector_registry WHERE connector_name LIKE 'e2e_health_%'");
   await pool.query("DELETE FROM search_profile WHERE name = $1", [E2E_PROFILE]);
   await pool.query("DELETE FROM listing WHERE source = $1", [E2E_SOURCE]);
   await pool.query(
@@ -79,6 +102,25 @@ test.beforeAll(async () => {
     return;
   }
   await purge();
+
+  // Register the synthetic connectors. `/etl/salud` listed a connector from
+  // its run results alone; Fuentes renders a source's card from
+  // `/api/etl/connectors`, which reads the registry — without these rows the
+  // page renders `fuente-not-found` and the card assertions below have
+  // nothing to bind to.
+  for (const conn of [HEALTHY_CONN, FAILED_CONN, SKIPPED_CONN]) {
+    await pool.query(
+      `INSERT INTO connector_registry
+         (connector_name, registered, rate_limit_per_minute, discovers_full_inventory,
+          supports_discovery, supported_filters)
+       VALUES ($1, true, 20, false, true, '[]'::jsonb)`,
+      [conn],
+    );
+    await pool.query(
+      `INSERT INTO connector_config (connector_name, enabled) VALUES ($1, true)`,
+      [conn],
+    );
+  }
 
   // A connector run to attach results to.
   const run = await pool.query<{ id: number }>(
@@ -150,14 +192,14 @@ test.beforeAll(async () => {
   );
   // A captured SEARCH/listing page (issue #292): status='listing', clean —
   // its detail links were harvested into the batch worklist. It must be
-  // surfaced as a neutral count and MUST NOT count as a failure (so idealista
+  // surfaced as a neutral count and MUST NOT count as a failure (so the portal
   // stays at 100% success: 1 done / 0 failed).
   await pool.query(
     `INSERT INTO extension_capture
        (url, status, connector_name, fields_extracted, title, created_at, processed_at)
-     VALUES ($1,'listing','idealista', 12,
+     VALUES ($1,'listing',$2, 12,
              'Página de resultados — 12 enlaces de detalle', NOW(), NOW())`,
-    [LISTING_URL],
+    [LISTING_URL, E2E_HOST],
   );
 
   // A profile materialized 1 day ago — AFTER the listing's first/last_seen_at
@@ -193,138 +235,115 @@ test.beforeEach(async ({ page, baseURL }) => {
   ]);
 });
 
-test("renders capture health with pending count and oldest age (EC-1)", async ({
+test("EC-1: capture pending count and oldest age render on the portal's Fuentes page", async ({
   page,
 }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
+  await page.goto(`/admin/fuentes/${E2E_HOST}`);
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
 
-  // Portal capture health for idealista renders, with pending count + age.
-  const pending = page.getByTestId("portal-pending-idealista");
-  await expect(pending).toBeVisible();
-  await expect(pending).toContainText("1");
-  await expect(page.getByTestId("portal-oldest-idealista")).toContainText(
-    /más antiguo/,
-  );
+  const section = page.getByTestId("fuente-portal-health");
+  await expect(section).toBeVisible();
+  await expect(section.getByTestId("portal-pending")).toContainText("1");
+  await expect(section.getByTestId("portal-oldest")).toContainText(/más antiguo/);
 });
 
-test("flags a portal stuck past the threshold (EC-2)", async ({ page }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("portal-health-idealista")).toBeVisible();
+test("EC-2: a portal stuck past the threshold is flagged", async ({ page }) => {
+  await page.goto(`/admin/fuentes/${E2E_HOST}`);
   // The 10-minute-old pending capture is past the 5-minute threshold.
-  await expect(page.getByTestId("portal-stuck-idealista")).toBeVisible();
-  await expect(page.getByTestId("portal-stuck-idealista")).toHaveText("Atascado");
+  await expect(page.getByTestId("portal-stuck")).toBeVisible();
+  await expect(page.getByTestId("portal-stuck")).toHaveText("Atascado");
 });
 
-test("shows success rate and extraction completeness (EC-3)", async ({ page }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("portal-success-idealista")).toBeVisible();
+test("EC-3: success rate and extraction completeness render", async ({ page }) => {
+  await page.goto(`/admin/fuentes/${E2E_HOST}`);
   // 1 done / 0 failed = 100%.
-  await expect(page.getByTestId("portal-success-idealista")).toContainText("100%");
+  await expect(page.getByTestId("portal-success")).toContainText("100%");
   // 8/10 fields extracted = 80% completeness.
-  await expect(page.getByTestId("portal-completeness-idealista")).toContainText(
-    "80%",
-  );
+  await expect(page.getByTestId("portal-completeness")).toContainText("80%");
+});
+
+test("a captured results page is a clean outcome, never a failure (#292)", async ({ page }) => {
+  await page.goto(`/admin/fuentes/${E2E_HOST}`);
+  // The listing capture is surfaced as a neutral informational count …
+  await expect(page.getByTestId("portal-listing")).toContainText("1");
+  // … and it did NOT count as a failure: the portal stays at 100% success
+  // (1 done ✓ / 0 failed ✗), proving a captured results page is not an error.
+  await expect(page.getByTestId("portal-success")).toContainText("100%");
+  await expect(page.getByTestId("portal-success")).toContainText("0✗");
 });
 
 test("distinguishes a clean budget stop from a real failure", async ({ page }) => {
-  await page.goto("/etl/salud");
-
-  // Healthy connector: ok status badge + a "Parada limpia" info note.
-  const okStatus = page.getByTestId(`connector-status-${HEALTHY_CONN}`);
-  await expect(okStatus).toHaveText("OK");
-  await expect(page.getByTestId(`connector-notice-${HEALTHY_CONN}`)).toContainText(
-    "presupuesto",
-  );
+  // D-047's distinction, on the surface that inherited it. Before #642 P2 the
+  // connector card appended `error_msg` to its last-run line with no
+  // distinction at all, so moving the section here without this change would
+  // have quietly dropped the semantics while appearing to preserve the data.
+  await page.goto(`/admin/fuentes/${HEALTHY_CONN}`);
+  await expect(page.getByTestId(`connector-${HEALTHY_CONN}`)).toBeVisible();
+  await expect(page.getByTestId(`lastrun-notice-${HEALTHY_CONN}`)).toContainText("presupuesto");
   // The clean stop is NOT rendered as an error.
-  await expect(page.getByTestId(`connector-error-${HEALTHY_CONN}`)).toHaveCount(0);
+  await expect(page.getByTestId(`lastrun-error-${HEALTHY_CONN}`)).toHaveCount(0);
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
 
-  // Failing connector: attention status + the genuine error message.
-  await expect(
-    page.getByTestId(`connector-status-${FAILED_CONN}`),
-  ).toHaveText("Circuito abierto");
-  await expect(page.getByTestId(`connector-error-${FAILED_CONN}`)).toContainText(
-    "soft-block",
-  );
+  await page.goto(`/admin/fuentes/${FAILED_CONN}`);
+  await expect(page.getByTestId(`lastrun-error-${FAILED_CONN}`)).toContainText("soft-block");
+  await expect(page.getByTestId(`lastrun-notice-${FAILED_CONN}`)).toHaveCount(0);
 });
 
-test("surfaces a profile stale only via last_fetched_at (GREATEST predicate)", async ({
+test("a disabled/skipped connector's reason is neutral, never an error (#292)", async ({
   page,
 }) => {
-  await page.goto("/etl/salud");
+  await page.goto(`/admin/fuentes/${SKIPPED_CONN}`);
+  await expect(page.getByTestId(`connector-${SKIPPED_CONN}`)).toBeVisible();
+  // 'skipped' is healthy per `connectorHealthLevel` — the reason renders as a
+  // notice, not as the red used for real faults.
+  await expect(page.getByTestId(`lastrun-notice-${SKIPPED_CONN}`)).toContainText(
+    "disabled via connector_config",
+  );
+  await expect(page.getByTestId(`lastrun-error-${SKIPPED_CONN}`)).toHaveCount(0);
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
+test("a profile stale only via last_fetched_at reaches the Estado queue tile", async ({
+  page,
+}) => {
   // The profile's last_materialized_at is newer than the listing's
   // first/last_seen_at but older than its last_fetched_at — so it is stale
   // ONLY because the predicate uses GREATEST across all three timestamps,
-  // matching etl/materialize_reconciler.py::_stale_profiles_exist.
-  await expect(page.getByTestId(`stale-profile-${profileId}`)).toBeVisible();
-  await expect(page.getByTestId(`stale-profile-${profileId}`)).toContainText(
-    E2E_PROFILE,
-  );
+  // matching etl/materialize_reconciler.py::_stale_profiles_exist. #702's
+  // Colas tile imports STALE_PROFILES_SQL, so this is the same population the
+  // deleted page listed, counted instead of enumerated.
+  await page.goto("/admin");
+  const tile = page.getByTestId("queue-tile-perfiles_materializar");
+  await expect(tile).toBeVisible();
+  await expect(tile).not.toContainText("0");
 });
 
-test("does not flag stale profiles while a connector sweep is running", async ({
-  page,
-}) => {
+test("stale profiles are not evaluated while a connector sweep is running", async ({ page }) => {
   // A running connector_runs row means last_seen_at is being bumped mid-sweep
-  // before last_materialized_at catches up — the reconciler defers, and so
-  // must this page (else it floods false positives for the whole sweep).
+  // before last_materialized_at catches up — the reconciler defers (#285), and
+  // so must the tile (else it floods false positives for the whole sweep).
   const running = await pool.query<{ id: number }>(
     `INSERT INTO connector_runs (trigger, status) VALUES ('manual','running') RETURNING id`,
   );
   const runningId = running.rows[0].id;
   try {
-    await page.goto("/etl/salud");
-    await expect(page.getByTestId("data-health-page")).toBeVisible();
-    // The section is annotated as not-evaluable, and the otherwise-stale
-    // profile is NOT flagged.
-    await expect(page.getByTestId("stale-profiles-sweep")).toBeVisible();
-    await expect(page.getByTestId("stale-profiles-sweep")).toContainText(
-      "No evaluable",
-    );
-    await expect(page.getByTestId(`stale-profile-${profileId}`)).toHaveCount(0);
-    // Still no error surface.
+    await page.goto("/admin");
+    const tile = page.getByTestId("queue-tile-perfiles_materializar");
+    await expect(tile).toBeVisible();
+    // "sweep en curso", never a fabricated 0 — lib/db/queues.ts's own rule.
+    await expect(tile).toContainText(/sweep en curso/i);
     await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
   } finally {
     await pool.query("DELETE FROM connector_runs WHERE id = $1", [runningId]);
   }
 });
 
-test("renders a disabled/skipped connector as neutral, never as an error (#292)", async ({
-  page,
-}) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId(`connector-health-${SKIPPED_CONN}`)).toBeVisible();
-  // Neutral 'Omitido' badge — NOT the attention (circuit_open/failed) styling.
-  await expect(page.getByTestId(`connector-status-${SKIPPED_CONN}`)).toHaveText(
-    "Omitido",
-  );
-  // A disabled connector never renders an error line, and its "disabled via
-  // connector_config" reason is not surfaced as an error.
-  await expect(page.getByTestId(`connector-error-${SKIPPED_CONN}`)).toHaveCount(0);
-});
-
-test("renders a captured listing/search page as a clean outcome, never a failure (#292)", async ({
-  page,
-}) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("portal-health-idealista")).toBeVisible();
-  // The listing capture is surfaced as a neutral informational count …
-  await expect(page.getByTestId("portal-listing-idealista")).toContainText("1");
-  // … and it did NOT count as a failure: the portal stays at 100% success
-  // (1 done ✓ / 0 failed ✗), proving a captured results page is not an error.
-  await expect(page.getByTestId("portal-success-idealista")).toContainText("100%");
-  await expect(page.getByTestId("portal-success-idealista")).toContainText("0✗");
-});
-
-test("loads with no error surface (EC-4)", async ({ page }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
-  // Real content is present (at least one connector card).
-  await expect(page.getByTestId(`connector-health-${HEALTHY_CONN}`)).toBeVisible();
-
-  // No error surface — the D-041 bar.
-  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
-  await expect(page.getByText("Error al cargar")).toHaveCount(0);
-  await expect(page.getByText("there is no parameter")).toHaveCount(0);
-  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+test("EC-4: no error surface on either destination", async ({ page }) => {
+  for (const path of [`/admin/fuentes/${E2E_HOST}`, `/admin/fuentes/${HEALTHY_CONN}`, "/admin"]) {
+    await page.goto(path);
+    await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+    await expect(page.getByText("Error al cargar")).toHaveCount(0);
+    await expect(page.getByText("there is no parameter")).toHaveCount(0);
+    await expect(page.getByText("HTTP 500")).toHaveCount(0);
+  }
 });

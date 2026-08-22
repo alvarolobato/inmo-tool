@@ -3,12 +3,19 @@ id: D-093
 title: Aliseda filter-drift is read from STATIC assets (sitemap + app bundle), not a DOM scrape
 date: 2026-08-06
 group: Data / connectors
-rule: 'Aliseda filter drift is DETECTED server-side from its STATIC, robots-allowed assets (category sitemap `sitemap-category-aliseda-es-0.xml` for top-level `comprar-<category>` paths + the Angular `main-*.js` app-bundle i18n slug map for `comprar-viviendas` residential subtypes) — the passive DOM-scrape discovery (D-090) is RETIRED for Aliseda because its Angular Material `mat-select` overlay is unreadable without a click. `lib/search-url/aliseda-static.ts` fetches+parses them into a `CatalogAxes` (source `static-asset`); `POST /api/etl/discovery/:connector/refresh` persists it and the same `drift.ts` flag on `/etl/discovery` shows ADDED/REMOVED/CHANGED vs `aliseda.ts` `TYPE_MAP`. Passive DOM discovery is KEPT for Idealista (server-rendered). The capture pass bails on any `#inmo-discover` page. URL building stays 100% code-driven (D-090).'
+rule: 'Aliseda filter drift is DETECTED server-side from its STATIC, robots-allowed assets (category sitemap `sitemap-category-aliseda-es-0.xml` for top-level `comprar-<category>` paths + the Angular `main-*.js` app-bundle i18n slug map for `comprar-viviendas` residential subtypes) — the passive DOM-scrape discovery (D-090) is RETIRED for Aliseda because its Angular Material `mat-select` overlay is unreadable without a click. `lib/search-url/aliseda-static.ts` fetches+parses them into a `CatalogAxes` (source `static-asset`); `POST /api/etl/discovery/:connector/refresh` persists it and the same `drift.ts` flag on `/admin/fuentes/<connector>` (D-168; `/etl/discovery` is gone) shows ADDED/REMOVED/CHANGED vs `aliseda.ts` `TYPE_MAP`. Passive DOM discovery is KEPT for Idealista (server-rendered). The capture pass bails on any `#inmo-discover` page. URL building stays 100% code-driven (D-090).'
 ---
 
 # D-093: Aliseda filter-drift from static assets; retire passive DOM discovery for the SPA
 
 *Decided: 2026-08-06*
+
+**Location clause superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: the ADDED/REMOVED/
+CHANGED drift flag is rendered on `/admin/fuentes/<connector>` (#642 P1), not
+on `/etl/discovery` (retired) or `/etl/salud` (deleted by #642 P2). Detection,
+parsing and the `POST /api/etl/discovery/:connector/refresh` contract are
+unchanged; only the surface moved.
 
 **Context**: D-090 made portal filter discovery a deterministic drift DETECTOR:
 the browser extension enumerates a portal's search-form options and a pure diff

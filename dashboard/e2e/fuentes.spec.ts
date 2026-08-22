@@ -246,8 +246,87 @@ test("list: a capture source shows its queue depth; a drained/plain one shows no
   // A plain crawl connector has no capture queue at all — no chip, not a "0".
   await expect(page.getByTestId(`fuente-queue-${CONNECTOR}`)).toHaveCount(0);
 
-  // The header cross-link restored from /etl/connectors.
-  await expect(page.getByTestId("fuentes-to-monitor")).toHaveAttribute("href", "/etl");
+  // The header cross-link, repointed by #642 P2: `/etl` is gone, and the run
+  // history it offered is Actividad's now.
+  await expect(page.getByTestId("fuentes-to-actividad")).toHaveAttribute(
+    "href",
+    "/admin/actividad",
+  );
+  await expect(page.getByTestId("fuentes-to-monitor")).toHaveCount(0);
+
+  // #642 P2: the list row shows DERIVED freshness, not the last run's outcome.
+  // Before P2 the same run outcome appeared here, on the detail card and on
+  // Actividad's newest crawl row — three copies. #636's verdict picks which
+  // to drop: run outcome is the explanation, never the headline, and it is
+  // structurally blind to capture-only portals, which produce no run at all.
+  const activity = page.getByTestId(`fuente-activity-${CONNECTOR}`);
+  await expect(activity).toBeVisible();
+  await expect(activity).toContainText("en 24h");
+  await expect(activity).not.toContainText("descargados");
+  await expect(page.getByTestId(`fuente-lastrun-${CONNECTOR}`)).toHaveCount(0);
+});
+
+/**
+ * The extraction-quality chip (PR #710 review, "Medium"). #642's disposition
+ * table sent "Calidad por fuente" to the per-source detail page and nothing
+ * stayed fleet-wide, while queue depth got a list chip — so a source dropping
+ * to 0.2 fotos/anuncio kept a green freshness dot and could only be noticed by
+ * opening every source in turn.
+ *
+ * Asserted against `/api/etl/data-health`'s own numbers rather than a seeded
+ * literal (same reasoning as the queue-depth test above): whatever this DB
+ * holds, the chip must agree with the endpoint, and must be ABSENT for a
+ * source above the threshold. That makes the test say something on a clean DB
+ * and on a demo DB alike, without seeding photo counts.
+ */
+test("list: a source below the photo-coverage threshold gets a quality chip; one above gets none", async ({
+  page,
+}) => {
+  await page.goto("/admin/fuentes");
+  await expect(page.getByTestId("fuentes-page")).toBeVisible();
+  await expect(page.getByTestId(`fuente-row-${CONNECTOR}`)).toBeVisible();
+
+  const health = await page.request.get("/api/etl/data-health");
+  expect(health.ok()).toBeTruthy();
+  const sources: Array<{ source: string; avg_photo_count: number | null }> =
+    (await health.json()).sources ?? [];
+  const bySource = new Map(sources.map((s) => [s.source, s]));
+
+  // LOW_PHOTO_THRESHOLD (lib/data-health.ts) — kept as a literal here on
+  // purpose: an e2e importing the constant it is checking would pass even if
+  // the constant and the rendering drifted apart together.
+  const THRESHOLD = 3;
+
+  let asserted = 0;
+  for (const name of [CONNECTOR, CAPTURE_ONLY]) {
+    const row = page.getByTestId(`fuente-row-${name}`);
+    if ((await row.count()) === 0) continue;
+    const chip = page.getByTestId(`fuente-quality-${name}`);
+    const avg = bySource.get(name)?.avg_photo_count ?? null;
+    if (avg !== null && avg < THRESHOLD) {
+      await expect(chip, `${name} is at ${avg} photos/listing`).toBeVisible();
+      await expect(chip).toContainText("fotos/anuncio");
+    } else {
+      // Quiet when clean — no chip, and never a "0 fotos/anuncio" placeholder.
+      await expect(chip, `${name} is at ${avg} photos/listing`).toHaveCount(0);
+    }
+    asserted += 1;
+  }
+  expect(asserted, "neither seeded source rendered a row").toBeGreaterThan(0);
+
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
+test("list: the global 'Ejecutar todo ahora' sweep lives here (#642 P2)", async ({ page }) => {
+  // The one control `/etl` owned that had no home anywhere else. Deleting it
+  // would have been a capability loss, which #642's own constraints forbid.
+  // The trigger-row contract is asserted in e2e/run-now.spec.ts; this just
+  // pins that the affordance is on the list, and tappable on a phone.
+  await page.goto("/admin/fuentes");
+  const btn = page.getByTestId("run-now-all");
+  await expect(btn).toBeVisible();
+  const box = await btn.boundingBox();
+  expect(box!.height).toBeGreaterThanOrEqual(44);
 });
 
 test("detail: connector config starts expanded (no click needed), shows scope + freshness", async ({

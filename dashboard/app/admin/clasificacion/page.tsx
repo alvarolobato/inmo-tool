@@ -5,6 +5,7 @@ import {
   type PromotionCandidate,
 } from "@/lib/db/redflag-candidates";
 import { DismissButton } from "./DismissButton";
+import { RevisionTabs } from "@/components/admin/RevisionTabs";
 
 export const metadata = {
   title: "Clasificación — inmo-tool",
@@ -226,6 +227,9 @@ export default async function AdminClasificacionPage() {
       data-testid="clasificacion-page"
       style={{ maxWidth: 900, display: "flex", flexDirection: "column", gap: 16 }}
     >
+      {/* #642 P2: Duplicados and Clasificación share one "Revisión" strip
+          tab now, so the other queue has to be reachable from here. */}
+      <RevisionTabs />
       <div>
         <h1 style={{ fontSize: 20, fontWeight: 700, color: "var(--fg)", margin: "0 0 6px" }}>
           Clasificación — vocabulario de redflags

@@ -3,12 +3,20 @@ id: D-092
 title: Zero-results regression monitor flags (connector, scope) that went nonzero→0 for N consecutive runs
 date: 2026-08-06
 group: "Data / connectors"
-rule: A (connector, resolved scope/filter) is flagged as a zero-results regression when it had a prior nonzero result AND its last N consecutive measured runs are all 0 (N=`etl.zero_result_regression_runs`, default 3). Always-0 (sparse) scopes and single transient 0s are NOT flagged; a later nonzero clears it. Server counts come from `connector_run_results.geography_scope[].discovered_count`; only 'crawled'/'empty' outcomes are measurements. Surfaced on `/etl/salud` (data-health), NOT `/etl/discovery`.
+rule: A (connector, resolved scope/filter) is flagged as a zero-results regression when it had a prior nonzero result AND its last N consecutive measured runs are all 0 (N=`etl.zero_result_regression_runs`, default 3). Always-0 (sparse) scopes and single transient 0s are NOT flagged; a later nonzero clears it. Server counts come from `connector_run_results.geography_scope[].discovered_count`; only 'crawled'/'empty' outcomes are measurements. Surfaced on `/admin/fuentes/<connector>` (data-health), plus an Estado aviso chip linking there — NOT a drift/discovery surface (D-168; `/etl/salud` and `/etl/discovery` are both gone).
 ---
 
 # D-092: Zero-results regression monitor
 
 *Decided: 2026-08-06*
+
+**Location clause superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: `/etl/salud` no longer
+exists. The per-scope list is on `/admin/fuentes/<connector>` (#642 P1) and an
+active regression also raises an aviso chip on Estado that links there (#642
+P2). The detection semantics in the rule above — what counts as a regression,
+what clears it, which outcomes are measurements — are untouched; only the named
+surface changed.
 
 **Context**: Issue #376. The real fingerprint of a filter/URL drift (the "ático"
 failure the owner hit) is portal-agnostic and needs no DOM scraping: a search

@@ -88,6 +88,34 @@ export const ACTIVITY_KINDS: readonly ActivityKind[] = [
 ];
 
 /**
+ * Parse the deep-link filter query a caller may arrive with (issue #642 P2):
+ * `?tipo=bloqueo&fuente=idealista`. Estado's aviso chips and Fuentes'
+ * active-block notice both link here pre-filtered, so "ver los episodios
+ * anteriores" lands on the episodes rather than on the whole feed.
+ *
+ * Spanish param names on purpose — every other user-visible identifier on
+ * these surfaces is Spanish, and `tipo` takes the same `ActivityKind` values
+ * the filter chips already carry, so the URL reads as what it does.
+ *
+ * Unknown or malformed values are DROPPED, never rejected: a stale bookmark
+ * should show the unfiltered feed, not an error page. `tipo` accepts a
+ * comma-separated list; an empty result means "no kind filter".
+ */
+export function parseActivityFilterQuery(search: string): {
+  kinds: ActivityKind[];
+  source: string | null;
+} {
+  const params = new URLSearchParams(search);
+  const known = new Set<string>(ACTIVITY_KINDS);
+  const kinds = (params.get("tipo") ?? "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k): k is ActivityKind => known.has(k));
+  const source = params.get("fuente")?.trim();
+  return { kinds: [...new Set(kinds)], source: source ? source : null };
+}
+
+/**
  * Five states, shared by every kind — the point of one vocabulary.
  *
  * `aviso` is deliberately distinct from `error`: a tripped circuit breaker or
@@ -218,7 +246,7 @@ export const STATUS_COLOR: Record<ActivityStatus, string> = {
  * "soft_block". Unknown values fall through to the raw string so a future
  * taxonomy value is never swallowed.
  *
- * THE one copy: `components/etl/RunDetail.tsx` imports these rather than
+ * THE one copy: `components/actividad/RunDetail.tsx` imports these rather than
  * keeping its own (it had the only copy before this feed needed them too,
  * and a second copy is how this class of vocabulary silently drifts).
  */
