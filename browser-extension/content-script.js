@@ -92,10 +92,11 @@
       const detailPortal = D.detailPortalForUrl(url);
       let detailUrls = [];
       if (listingPortal) {
-        const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
-          (a) => a.href,
-        );
-        detailUrls = D.extractDetailUrls(hrefs, listingPortal);
+        // Portal-aware harvest (issue #701). This is the exact number the
+        // popup renders as "N anuncio(s) detectado(s) en esta página" / "No se
+        // han detectado anuncios", so an anchors-only read here is what told
+        // the owner there was nothing to capture on a Hipoges page showing 17.
+        detailUrls = D.harvestDetailUrls(document, listingPortal, url);
       }
       // Map-view "convert" hint (issue #529): on an Idealista map search (pins,
       // zero anchors) the popup's "Capturar todas" would be dead (n === 0). Hand
@@ -137,12 +138,18 @@
         return true;
       }
       const HARVEST_POLL_MS = 500;
-      const deadline = Date.now() + 20000;
-      const reply = () => {
+      // Per-portal budget, and the LISTING readiness question — not the detail
+      // one (issue #701). This loop used to reply the instant
+      // `isRenderReady(document, portal)` went true, which on Hipoges was the
+      // first poll, against a header, with the results list still 13/17
+      // skeletons and zero harvestable links. It then handed the enumeration
+      // walk an empty page and the run ended "Sin resultados".
+      const deadline = Date.now() + D.maxWaitMsFor(portal);
+      let settle = null;
+      const reply = (detailUrls) => {
         const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
           (a) => a.href,
         );
-        const detailUrls = D.extractDetailUrls(hrefs, portal);
         // Prefer the portal's clean URL scheme; fall back to the rendered
         // "siguiente" anchor for client-side-rendered pagination.
         const nextUrl =
@@ -150,8 +157,12 @@
         sendResponse({ portal, detailUrls, nextUrl });
       };
       const tick = () => {
-        if (D.isRenderReady(document, portal) || Date.now() > deadline) {
-          reply();
+        const v = D.isRenderReadyListing(document, portal, url, settle);
+        settle = v.state;
+        if (v.ready || Date.now() > deadline) {
+          // At the deadline, hand back whatever HAS been harvested rather than
+          // an empty list — a partial results page still enumerates something.
+          reply(v.detailUrls || []);
           return;
         }
         setTimeout(tick, HARVEST_POLL_MS);
@@ -169,7 +180,13 @@
 
   const AUTO_CAPTURE_DEFAULT = true; // see options page justification / PR notes.
   const READY_POLL_MS = 500; // how often to re-check render-readiness
-  const MAX_WAIT_MS = 20000; // give up auto-capturing after this (manual still works)
+  // Fallback plumbing timeout, and the render budget for any portal that does
+  // not declare its own. The RENDER budget is now per portal — read it with
+  // D.maxWaitMsFor(portal), never this constant (issue #701): a single ceiling
+  // that Idealista clears in ~1s was truncating Hipoges, which server-renders
+  // its chrome first and streams adverts in afterwards. The remaining uses
+  // below are service-worker-callback watchdogs, not render waits.
+  const MAX_WAIT_MS = D.DEFAULT_MAX_WAIT_MS || 20000;
   const QUIESCENCE_MS = 800; // DOM must be mutation-quiet this long after "ready"
 
   const guard = D.createCaptureGuard();
@@ -224,7 +241,7 @@
       lastBlockCheckHref = url;
       const portal = D.supportedPortalForUrl(url);
       if (!portal) return; // not one of our portals — nothing to report
-      const verdict = D.detectBlockSignals(document, portal);
+      const verdict = D.detectBlockSignals(document, portal, window.location.href);
       if (verdict.blocked) {
         chrome.runtime.sendMessage({
           type: "BLOCK_DETECTED",
@@ -346,7 +363,7 @@
       // report it and leave the guard key un-claimed instead of firing — a
       // challenge page must never be ingested as listing data, and a later
       // retry (once the block clears) can still claim this key.
-      const blockVerdict = D.detectBlockSignals(document, info.portal);
+      const blockVerdict = D.detectBlockSignals(document, info.portal, window.location.href);
       if (blockVerdict.blocked) {
         try {
           chrome.runtime.sendMessage({
@@ -383,6 +400,56 @@
     settleTimer = setTimeout(done, QUIESCENCE_MS);
   }
 
+  // ── Abandoned render waits (issue #701) ───────────────────────────────────
+  //
+  // The worst part of the Hipoges failure was not that capture went wrong, it
+  // was that going wrong left NOTHING. Both give-up paths below used to just
+  // `return`: no POST, no row, no counter, nowhere for the owner to look. So a
+  // portal that times out on every single page is indistinguishable, in every
+  // metric the project has — including the render-wait timings #695 just added
+  // — from a portal nobody ever visited. That is why "hipoges tarda mucho y
+  // falla" could be reported twice and still only ever be *measured*.
+  //
+  // Now a page that never renders POSTs the one thing it can honestly report:
+  // that it was opened, how long we waited, and what the readiness check was
+  // still complaining about when the budget ran out. It lands as a terminal
+  // `never_rendered` capture row — never `pending`, so etl/capture.py's poll
+  // never picks it up and no parse is ever attempted on a page we already know
+  // has no advert on it.
+  //
+  // The page's HTML rides along deliberately. Retained shell HTML from two
+  // ordinary failed captures is the entire reason this bug could be diagnosed
+  // from stored data instead of guesswork against the live site, and a portal
+  // that starts timing out after a redesign will need exactly the same
+  // evidence. Fires at most once per page load (both callers are gated by
+  // `loopKey` / `listingHandled` and only re-arm on navigation).
+  function reportRenderGaveUp(info, role, waitedMs, diagnostic) {
+    let html = "";
+    try {
+      html = document.documentElement.outerHTML;
+    } catch {
+      html = "";
+    }
+    try {
+      chrome.runtime.sendMessage({
+        type: "RENDER_GAVE_UP",
+        url: window.location.href,
+        html,
+        portal: info.portal,
+        role,
+        renderWaitMs: waitedMs,
+        diagnostic: diagnostic || null,
+      });
+    } catch {
+      /* best-effort telemetry — never let it break the page */
+    }
+    showToast(
+      "Inmo-Tool: la página no llegó a renderizarse (" +
+        Math.round(waitedMs / 1000) +
+        " s). Registrado como «sin renderizar».",
+    );
+  }
+
   function pollUntilReady(info, deadline, watchStartedAt) {
     if (guard.isDone(info.key)) return;
     const now = currentDetail();
@@ -391,18 +458,22 @@
       waitForQuiescenceThenFire(info, watchStartedAt);
       return;
     }
-    // Gave up after MAX_WAIT_MS; manual popup capture still works.
-    //
-    // KNOWN GAP, deliberately NOT filled here (issue #700 → #644): this is the
-    // Hipoges shape — the page never satisfied readySelectors + the body-text
-    // floor, so the owner waited the full 20s and got nothing, and because no
-    // POST is ever sent the server has NO record the listing was attempted at
-    // all. `render_wait_ms` therefore measures successful captures only, and a
-    // portal that mostly TIMES OUT looks, in the timing data, like a portal
-    // nobody visited. Reporting abandoned waits needs an event channel the
-    // capture POST can't carry; that belongs to the unified activity timeline
-    // (#644), not to a third connector-health surface bolted on here.
-    if (Date.now() > deadline) return;
+    // Budget exhausted. Manual popup capture still works — but this no longer
+    // happens in silence (issue #701; the gap #700 recorded and deferred).
+    if (Date.now() > deadline) {
+      const verdict = D.isRenderReadyDetail(document, info.portal);
+      reportRenderGaveUp(
+        info,
+        "detail",
+        typeof watchStartedAt === "number" ? Date.now() - watchStartedAt : 0,
+        {
+          reason: verdict.reason,
+          bodyTextLength: verdict.bodyTextLength,
+          readySelectors: D.readySelectorsFor(info.portal, "detail"),
+        },
+      );
+      return;
+    }
     setTimeout(() => pollUntilReady(info, deadline, watchStartedAt), READY_POLL_MS);
   }
 
@@ -421,7 +492,8 @@
     if (guard.isDone(info.key)) return; // already captured this listing
     if (loopKey === info.key) return; // already watching this page
     loopKey = info.key;
-    pollUntilReady(info, Date.now() + MAX_WAIT_MS, Date.now());
+    const startedAt = Date.now();
+    pollUntilReady(info, startedAt + D.maxWaitMsFor(info.portal), startedAt);
   }
 
   // ── 3. Listing/search pages: in-page banner + auto-start (issue #297) ──────
@@ -446,11 +518,12 @@
     return { url, portal };
   }
 
+  // Portal-aware harvest (issue #701). Was `a[href]` only, which returns ZERO
+  // on a fully rendered Hipoges results page — its cards are not links (see
+  // detect.js's mediaDetailRef for the evidence and the CDN-path rule that
+  // recovers the reference instead).
   function harvestDetailUrls(portal) {
-    const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
-      (a) => a.href,
-    );
-    return D.extractDetailUrls(hrefs, portal);
+    return D.harvestDetailUrls(document, portal, window.location.href);
   }
 
   function removeBanner() {
@@ -562,18 +635,46 @@
     bannerEl = el;
   }
 
-  function handleListingWhenReady(info, deadline) {
+  // Running settle state for the listing readiness check (issue #701) — see
+  // D.isRenderReadyListing. Reset on navigation alongside `listingHandled`.
+  let listingSettleState = null;
+
+  function handleListingWhenReady(info, deadline, watchStartedAt) {
     if (listingHandled) return;
     const now = currentListing();
     if (!now || now.url !== info.url) return; // navigated away — nav handler re-arms
-    if (D.isRenderReady(document, info.portal)) {
-      const urls = harvestDetailUrls(info.portal);
+    // Readiness for a RESULTS page is its own question now (issue #701).
+    // `isRenderReady` asks "has the page painted", and on Hipoges the answer
+    // was yes — the header had painted — while every advert was still a
+    // skeleton and the harvest returned zero, which is precisely how the owner
+    // got "no hay anuncios que capturar" on a page showing 17.
+    // `isRenderReadyListing` asks the only question that actually matters
+    // here: is there anything to harvest, and has that stopped changing.
+    const ready = D.isRenderReadyListing(
+      document,
+      info.portal,
+      window.location.href,
+      listingSettleState,
+    );
+    listingSettleState = ready.state;
+    if (ready.ready) {
+      const urls = ready.detailUrls;
       const verdict = D.listingCaptureAction(info.url, urls);
       if (verdict.action === "none") {
-        // Rendered but no detail links harvested yet — keep polling to deadline
-        // (anchors may still be streaming in) before giving up.
-        if (Date.now() > deadline) return;
-        setTimeout(() => handleListingWhenReady(info, deadline), READY_POLL_MS);
+        if (Date.now() > deadline) {
+          reportRenderGaveUp(info, "listing", elapsedSince(watchStartedAt), {
+            reason: "no_detail_urls",
+            placeholders: ready.placeholders,
+            harvested: 0,
+            expected: ready.expected,
+            refMisses: ready.refMisses,
+          });
+          return;
+        }
+        setTimeout(
+          () => handleListingWhenReady(info, deadline, watchStartedAt),
+          READY_POLL_MS,
+        );
         return;
       }
       listingHandled = true;
@@ -613,8 +714,50 @@
       }
       return;
     }
-    if (Date.now() > deadline) return; // never rendered enough — nothing to do
-    setTimeout(() => handleListingWhenReady(info, deadline), READY_POLL_MS);
+    if (Date.now() > deadline) {
+      // Budget exhausted without the results list ever settling. If SOMETHING
+      // was harvested, use it: a partial search is strictly better than the
+      // zero the owner has been getting, and on a portal that paints
+      // progressively the alternative is capturing nothing at all. Only a
+      // genuinely empty harvest is reported as never-rendered.
+      const urls = ready.detailUrls || [];
+      if (urls.length > 0) {
+        const verdict = D.listingCaptureAction(info.url, urls);
+        if (verdict.action !== "none") {
+          listingHandled = true;
+          if (verdict.action === "autostart") {
+            startBatchFromPage(
+              verdict.portal,
+              urls,
+              D.parseCaptureQueue(window.location.href),
+            );
+          } else {
+            showBanner(verdict.portal, urls);
+          }
+          return;
+        }
+      }
+      reportRenderGaveUp(info, "listing", elapsedSince(watchStartedAt), {
+        reason: ready.reason,
+        placeholders: ready.placeholders,
+        harvested: urls.length,
+        // How many the page SAID there were, and how many of its own CDN
+        // photos the ref rule could not read (issue #701 review M3/L1). Without
+        // these, "harvested 0" cannot be told apart from "the rule broke".
+        expected: ready.expected,
+        refMisses: ready.refMisses,
+      });
+      return;
+    }
+    setTimeout(
+      () => handleListingWhenReady(info, deadline, watchStartedAt),
+      READY_POLL_MS,
+    );
+  }
+
+  /** ms since `startedAt`, or 0 when the caller didn't record one. */
+  function elapsedSince(startedAt) {
+    return typeof startedAt === "number" ? Date.now() - startedAt : 0;
   }
 
   function startListingLoop() {
@@ -627,7 +770,9 @@
     if (D.discoverSignalPresent(window.location.href)) return;
     const info = currentListing();
     if (!info) return; // not a listing/search page
-    handleListingWhenReady(info, Date.now() + MAX_WAIT_MS);
+    listingSettleState = null;
+    const now = Date.now();
+    handleListingWhenReady(info, now + D.maxWaitMsFor(info.portal), now);
   }
 
   // Detect SPA route changes (URL changes without a full reload).
@@ -638,6 +783,7 @@
       loopKey = null;
       // A new URL is a fresh listing decision: drop any stale banner and re-arm.
       listingHandled = false;
+      listingSettleState = null;
       removeBanner();
       checkForBlock();
       startAutoCaptureLoop();

@@ -289,13 +289,47 @@ higher served version, so shipping a new field without a bump leaves every
 operator on the old build: the server-side column exists, nothing ever
 populates it, and the column reads `—` forever with no error anywhere. That is
 the #693 failure shape, and `render_wait_ms` (0.17.0 → 0.18.0) is the second
-time it nearly landed.
+time it nearly landed. Hipoges render readiness (0.18.0 → 0.19.0, #701/D-165)
+is the third.
 
-**Known gap (belongs to #644, not here):** a page that never satisfies
-`isRenderReady` burns the full `MAX_WAIT_MS` (20s) and then gives up *without
-POSTing*, so it leaves no row at all. Timing therefore covers successful
-captures only, and a portal that mostly times out looks — in this data — like a
-portal nobody visited. That is the Hipoges shape.
+**Abandoned render waits (issue #701, D-165 — the gap #700 recorded).** A page
+that never renders used to give up *without POSTing*, so it left no row
+anywhere: timing covered successful captures only, and a portal that mostly
+timed out looked, in this data, exactly like a portal nobody visited. It now
+POSTs `outcome: 'never_rendered'`, landing a **terminal**
+`extension_capture` row (never `pending`, so `etl/capture.py` never tries to
+parse it) with `render_wait_ms` set and a one-line `error_msg` naming which
+readiness test was still failing and how much of the page had arrived.
+
+**The render budget is per portal**, not one global ceiling — read it with
+`D.maxWaitMsFor(portal)` and never from `MAX_WAIT_MS`. Idealista is ready in
+about a second; Hipoges gets 45 s because it server-renders its chrome first
+and streams its adverts in afterwards. Raising the global number instead would
+make every portal's give-up slower to pay for one portal's slowness.
+
+**Readiness is asked separately for detail and listing pages**
+(`portal.detailReadySelectors` / `listingReadySelectors`). A results page's
+readiness is not a selector question at all: `isRenderReadyListing()` waits for
+the harvest itself to return something, hold steady, **and look complete** —
+complete meaning it reached the total the page's own heading states
+(`expectedResultCount`), or the list has no pending result left, or the page
+states no total to compare against. "Has it stopped changing" on its own is too
+weak: 3 polls × 500 ms is 1.5 s, and a stall mid-paint satisfies it at 9 of 17.
+
+Two traps worth knowing before you touch any of this:
+
+- **A pending-result count is not a count of placeholder tags.** On Hipoges
+  every *painted* card carries a `<p-skeleton>` for its photo carousel, so the
+  raw tag count never reaches zero and anything gating on it deadlocks.
+  `pendingPlaceholderCount()` excludes placeholders inside a
+  `resultCardSelectors` element for exactly this reason.
+- **Selectors read off a real capture are not guesses; selectors chosen for a
+  page nobody has looked at are.** Hipoges shipped `["main","h1"]` as though it
+  were calibrated and it cost two owner reports and a production total of two
+  listings — but the fix for that is to go read a capture, not to refuse
+  selectors on principle.
+
+See D-165.
 
 The crawl-side counterpart is **Tiempo por anuncio (rastreo)**:
 `connector_run_results.fetch_ms_total / fetched_count`, with the rate limiter's

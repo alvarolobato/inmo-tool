@@ -74,6 +74,27 @@ _DETAIL_CASES: list[tuple[str, str | None]] = [
     ("https://realestate.hipoges.com/es", None),
     ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", None),
     ("https://realestate.hipoges.com/es/detail", None),
+    # Issue #701: Hipoges' own home page links six blog articles through the
+    # `:investment` slot as `es/blog/detail/<slug>` (production capture id
+    # 3577). The wildcard used to classify every one of them as an advert.
+    (
+        "https://realestate.hipoges.com/es/blog/detail/pisos-en-alcala-de-henares-oportunidades",
+        None,
+    ),
+    ("https://realestate.hipoges.com/pt/blog/detail/algum-artigo", None),
+    # …but a deny-list closes a HOLE, not a CLASS (issue #701 review L2). Any
+    # other editorial section would have walked through the same slot, so the
+    # `:id` must now carry a digit — every observed asset reference does, and
+    # every observed non-advert `detail/` link is a prose slug.
+    ("https://realestate.hipoges.com/es/news/detail/nuevas-oficinas-en-madrid", None),
+    ("https://realestate.hipoges.com/es/prensa/detail/hipoges-crece-en-espana", None),
+    ("https://realestate.hipoges.com/es/detail/quienes-somos", None),
+    # The real reference shapes must all survive that narrowing. RARE-04347 is
+    # the one we hold a real detail capture of; the rest are read off the CDN
+    # paths of captures 3576/3577/3617.
+    ("https://realestate.hipoges.com/es/detail/RARE-04347", "hipoges"),
+    ("https://realestate.hipoges.com/es/detail/FRRE-20005", "hipoges"),
+    ("https://realestate.hipoges.com/es/venta/detail/GTRE-01142", "hipoges"),
     # Unsupported host → None even on a detail-shaped path.
     ("https://www.fotocasa.es/inmueble/123/", None),
     ("https://example.com/inmueble/123/", None),

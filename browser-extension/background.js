@@ -149,6 +149,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async response
   }
 
+  // Abandoned render wait (issue #701). Fire-and-forget, like BLOCK_DETECTED:
+  // the page has already given up and told the operator so; this is purely the
+  // record. A failure here must never surface to the page.
+  if (msg.type === 'RENDER_GAVE_UP') {
+    handleRenderGaveUp(msg).catch(() => {
+      /* best-effort telemetry */
+    });
+    return false;
+  }
+
   // Block/challenge detection (issue #634) — see content-script.js's
   // checkForBlock/the detail-page last-moment guard for what triggers this,
   // and handleBlockDetected's docstring for the full stop/alert/report
@@ -2844,6 +2854,45 @@ async function handleExtraction({ url, html, renderWaitMs }) {
     throw new Error(err.error?.message || `API error: ${response.status}`);
   }
 
+  return response.json();
+}
+
+/**
+ * Record a page that never rendered within its budget (issue #701).
+ *
+ * Posts to the SAME capture endpoint as a real capture, but with
+ * `outcome: 'never_rendered'`, so the row lands terminal rather than
+ * `pending`: etl/capture.py's poll only ever picks up `pending`, and there is
+ * nothing on this page worth trying to parse — that is the whole point of the
+ * signal. Before this existed the give-up path POSTed nothing at all, so a
+ * portal failing on every page was indistinguishable from one nobody opened.
+ *
+ * `diagnostic` is folded into a short human-readable `error_msg` server-side
+ * rather than being stored structured: the owner reads this in a list next to
+ * other capture outcomes, and the useful content is one line — which readiness
+ * test was still failing, and how much of the page had arrived.
+ */
+async function handleRenderGaveUp({ url, html, portal, role, renderWaitMs, diagnostic }) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const body = {
+    url,
+    html: typeof html === 'string' ? html : '',
+    outcome: 'never_rendered',
+    portal: portal || undefined,
+    role: role || undefined,
+    diagnostic: diagnostic || undefined,
+  };
+  if (typeof renderWaitMs === 'number') body.renderWaitMs = renderWaitMs;
+
+  const response = await fetch(`${apiUrl}/api/extension/capture`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `API error: ${response.status}`);
+  }
   return response.json();
 }
 

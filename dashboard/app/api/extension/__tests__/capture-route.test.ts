@@ -258,3 +258,155 @@ describe("renderWaitMs coercion (issue #700, D-162) — the value that reaches t
     expect(params[2]).toBeNull();
   });
 });
+
+/**
+ * Abandoned render waits (issue #701).
+ *
+ * Before this, a page that never rendered POSTed nothing at all: no row, no
+ * counter, no trace. A portal timing out on every page looked identical, in
+ * every metric the project has, to a portal nobody had opened — which is how
+ * "hipoges tarda mucho y falla" got reported twice and only ever measured.
+ */
+describe("POST /api/extension/capture — outcome: never_rendered", () => {
+  const HIPOGES_URL = "https://realestate.hipoges.com/es/detail/RARE-04347";
+  const PLAIN_URL = "https://www.idealista.com/inmueble/1/";
+  const PLAIN_HTML = "<html><body>ok</body></html>";
+
+  beforeEach(() => {
+    vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
+    vi.clearAllMocks();
+    mockSql.mockResolvedValue([{ id: 7 }] as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("writes a TERMINAL row, never a pending one", async () => {
+    // The load-bearing property: `pending` would make etl/capture.py's poll
+    // pick the row up and spend a parse on a page the extension already
+    // established has no advert on it.
+    const res = await POST(
+      makeRequest(
+        { url: HIPOGES_URL, html: "<html>shell</html>", outcome: "never_rendered", renderWaitMs: 45000 },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const [query, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    expect(query).toContain("'never_rendered'");
+    expect(query).toContain("processed_at");
+    expect(query).not.toContain("'pending'");
+    expect(params[2]).toBe(45000);
+  });
+
+  it("folds the diagnostic into a readable error_msg", async () => {
+    await POST(
+      makeRequest(
+        {
+          url: HIPOGES_URL,
+          html: "<html></html>",
+          outcome: "never_rendered",
+          role: "listing",
+          diagnostic: { reason: "still_loading", harvested: 0, placeholders: 13 },
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    const msg = String(params[3]);
+    expect(msg).toContain("no llegó a renderizarse");
+    expect(msg).toContain("tipo=listing");
+    expect(msg).toContain("motivo=still_loading");
+    expect(msg).toContain("placeholders=13");
+    // No CDN misses on this one, so the field stays out of the line entirely
+    // rather than reading a reassuring "refs_ilegibles=0".
+    expect(msg).not.toContain("refs_ilegibles");
+  });
+
+  it("names how many results the page claimed, next to how many were harvested", async () => {
+    // issue #701 review M3: "anuncios=4" alone cannot be read. "anuncios=4
+    // esperados=17" says the page painted a quarter of itself and stopped.
+    await POST(
+      makeRequest(
+        {
+          url: HIPOGES_URL,
+          html: "<html></html>",
+          outcome: "never_rendered",
+          role: "listing",
+          diagnostic: { reason: "partial_harvest", harvested: 4, expected: 17, placeholders: 13 },
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const msg = String((mockSql.mock.calls[0] as [string, unknown[]])[1][3]);
+    expect(msg).toContain("motivo=partial_harvest");
+    expect(msg).toContain("anuncios=4");
+    expect(msg).toContain("esperados=17");
+  });
+
+  it("distinguishes a stale CDN rule from a page with no adverts on it", async () => {
+    // issue #701 review L1. Both cases report `anuncios=0`; only one of them
+    // means "the rule that finds adverts has stopped matching", and reading
+    // that as a render failure is the conflation #701 exists to end.
+    await POST(
+      makeRequest(
+        {
+          url: HIPOGES_URL,
+          html: "<html></html>",
+          outcome: "never_rendered",
+          role: "listing",
+          diagnostic: { reason: "ref_shape_unmatched", harvested: 0, refMisses: 17 },
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    const msg = String((mockSql.mock.calls[0] as [string, unknown[]])[1][3]);
+    expect(msg).toContain("motivo=ref_shape_unmatched");
+    expect(msg).toContain("anuncios=0");
+    expect(msg).toContain("refs_ilegibles=17");
+  });
+
+  it("accepts a page that produced no HTML at all", async () => {
+    // By definition a never-rendered page may have almost nothing to send;
+    // rejecting it for that would silence the exact case this exists for.
+    const res = await POST(
+      makeRequest({ url: HIPOGES_URL, outcome: "never_rendered" }, { adminKey: ADMIN_KEY }),
+    );
+    expect(res.status).toBe(200);
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    expect(params[1]).toBeNull();
+  });
+
+  it("still requires html on an ORDINARY capture", async () => {
+    const res = await POST(makeRequest({ url: PLAIN_URL }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(400);
+    expect(mockSql).not.toHaveBeenCalled();
+  });
+
+  it("ignores any outcome value it does not know, taking the normal pending path", async () => {
+    // `outcome` is a closed enum on purpose: this endpoint is reachable by
+    // anything holding the admin key, and a caller-named status could
+    // fabricate a 'done' ingestion.
+    for (const outcome of ["done", "withdrawn", "pending", "", null, 42]) {
+      mockSql.mockClear();
+      await POST(
+        makeRequest({ url: PLAIN_URL, html: PLAIN_HTML, outcome }, { adminKey: ADMIN_KEY }),
+      );
+      const [query] = mockSql.mock.calls[0] as [string, unknown[]];
+      expect(query).not.toContain("never_rendered");
+      expect(query).not.toContain("status");
+    }
+  });
+
+  it("still refuses a non-http(s) URL", async () => {
+    const res = await POST(
+      makeRequest(
+        { url: "javascript://idealista.com/x", outcome: "never_rendered" },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(400);
+    expect(mockSql).not.toHaveBeenCalled();
+  });
+});

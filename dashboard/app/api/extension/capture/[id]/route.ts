@@ -19,7 +19,14 @@ import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/e
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 interface CaptureRow {
-  status: "pending" | "done" | "failed" | "listing" | "blocked" | "withdrawn";
+  status:
+    | "pending"
+    | "done"
+    | "failed"
+    | "listing"
+    | "blocked"
+    | "withdrawn"
+    | "never_rendered";
   error_msg: string | null;
   property_id: number | string | null;
   fields_extracted: number | null;
@@ -118,6 +125,24 @@ export async function GET(
         success: false,
         status: "failed",
         error: { message: row.error_msg ?? "La extracción falló." },
+      });
+    }
+    // Issue #701: the extension waited out the portal's whole render budget
+    // and the page never rendered. Needs its own branch for the same reason
+    // `blocked` does — without one it falls through to the `done` response
+    // below and the popup reports a successful capture of a page that was
+    // never even readable. Reported as unsuccessful but NOT as a parse
+    // failure: nothing was parsed, so there is nothing to blame the parser
+    // for, and the actionable fact is the wait itself.
+    if (row.status === "never_rendered") {
+      return NextResponse.json({
+        success: false,
+        status: "never_rendered",
+        error: {
+          message:
+            row.error_msg
+            ?? "La página no llegó a renderizarse dentro del presupuesto de espera.",
+        },
       });
     }
 
