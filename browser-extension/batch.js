@@ -285,6 +285,35 @@
     });
   }
 
+  /**
+   * Pause a running queue BECAUSE A BLOCK/CHALLENGE WAS DETECTED (issue #692)
+   * — pause + return every in-flight slot to `pending`, in one pure step.
+   *
+   * Plain `pause()` is not enough on its own. A block is per-egress-IP, so
+   * every tab open at that moment is looking at (or about to look at) the
+   * same wall — none of them is a trustworthy observation of its listing. If
+   * they are left `inflight`, each one settles a few seconds later via
+   * `recordResultAt(index, false)` (its capture signal never arrives, so
+   * `waitForCaptureSignal` times out) and is permanently marked `failed`. The
+   * queue then resumes having silently CONSUMED those pages: they are neither
+   * pending nor captured, and the owner never sees them again in this run.
+   *
+   * Returning them to `pending` is what makes "stop and wait" mean what the
+   * owner asked for — the run resumes at exactly the pages it was on, having
+   * skipped nothing. `recordResultAt` already ignores any slot that is not
+   * `inflight`, so the late timeout that lands after this reset is a no-op
+   * and cannot re-consume the slot. Re-capturing a page that did happen to
+   * succeed in the last moments before the wall is harmless and idempotent —
+   * the conservative direction to err in.
+   *
+   * A queue that is not `running` is returned untouched (pausing an already
+   * paused queue must not keep re-resetting slots on every repeat detection).
+   */
+  function pauseForBlock(state) {
+    if (!state || state.status !== STATUSES.RUNNING) return state;
+    return resetInflightToPending(pause(state));
+  }
+
   /** Stop a queue outright (running or paused → done). Returns a new state. */
   function stop(state) {
     if (!state) return state;
@@ -1090,6 +1119,7 @@
     countSlot: countSlot,
     inflightCount: inflightCount,
     firstPendingIndex: firstPendingIndex,
+    pauseForBlock: pauseForBlock,
     canLaunch: canLaunch,
     launchNext: launchNext,
     recordResultAt: recordResultAt,
