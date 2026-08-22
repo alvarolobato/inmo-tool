@@ -259,6 +259,42 @@ requeued cohort drains oldest-first there — correct, but not value-first.
 next to the estimate, because with Auto on the ordering it just promised is
 moot.
 
+## Per-listing timing — read the three legs, never the total (D-162)
+
+`/admin/fuentes/<portal>` shows three medians under **Tiempo por anuncio**, and
+they are separate on purpose:
+
+| Leg | Column | What it means |
+|-----|--------|---------------|
+| Espera de render | `extension_capture.render_wait_ms` | Browser waited for the page to paint. **Portal-caused** — the one worth fixing. |
+| Espera en cola | derived: `(processed_at - created_at) - processing_ms` | **Idle.** `run_capture_poll_loop` ticks every 10s, so this is ~5s on *every* portal. |
+| Procesado | `extension_capture.processing_ms` | Real ETL work (`normalize` + upsert). |
+
+**Do not add them up and report one number, and do not reach for
+`processed_at - created_at`.** That subtraction is what made "hipoges tarda
+mucho por anuncio" unanswerable for months: measured over 3906 production
+captures it is flat-uniform across 0–10s (pure poll wait), so Hipoges (5.3s
+mean) and Idealista (5.8s mean) were indistinguishable — both were just half
+the poll interval. Full trace in
+[D-162](../decisions/D-162-per-listing-timing-three-legs.md).
+
+`—` means **not measured**, which is different from 0. `render_wait_ms` is NULL
+for captures from an extension build that predates it and for the
+manual/forced path, which never waits for render.
+
+**Known gap (belongs to #644, not here):** a page that never satisfies
+`isRenderReady` burns the full `MAX_WAIT_MS` (20s) and then gives up *without
+POSTing*, so it leaves no row at all. Timing therefore covers successful
+captures only, and a portal that mostly times out looks — in this data — like a
+portal nobody visited. That is the Hipoges shape.
+
+The crawl-side counterpart is **Tiempo por anuncio (rastreo)**:
+`connector_run_results.fetch_ms_total / fetched_count`, with the rate limiter's
+sleep already subtracted at the write site (`RateLimiter.slept_seconds`).
+Never time `fetch_detail` without that subtraction — `throttle` is
+`limiter.acquire` and sleeps *inside* the call, so an unsubtracted stopwatch
+reports Fotocasa's 20s pacing interval as work (measured: 67× inflation).
+
 ## Loosened searches (#267 caveat)
 
 Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its

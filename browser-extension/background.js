@@ -2782,13 +2782,19 @@ async function sendHeartbeat() {
  * own docstring for why). Returns {success, capture_id}; the caller
  * (popup.js) polls CHECK_CAPTURE_STATUS with that id for the real result.
  */
-async function handleExtraction({ url, html }) {
+async function handleExtraction({ url, html, renderWaitMs }) {
   const { apiUrl, apiKey } = await getApiConfig();
 
   const response = await fetch(`${apiUrl}/api/extension/capture`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
-    body: JSON.stringify({ url, html }),
+    // renderWaitMs (issue #687) is omitted, not sent as null, when the caller
+    // didn't time this capture (manual/forced capture never waits for render).
+    // The route treats absent and null identically, so this is presentational
+    // only — but it keeps "we didn't measure" out of the wire format.
+    body: JSON.stringify(
+      typeof renderWaitMs === 'number' ? { url, html, renderWaitMs } : { url, html },
+    ),
   });
 
   if (!response.ok) {

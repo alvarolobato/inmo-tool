@@ -1485,3 +1485,137 @@ class TestNulByteRejectedByPostgres:
         assert "\x00" not in stored
         # Offsets unchanged — this is precisely why U+FFFD beats deletion.
         assert len(stored) == len(raw)
+
+
+class TestCaptureTiming:
+    """Per-listing timing (issue #687).
+
+    Why this class exists at all: before it, the ONLY per-listing number the
+    pipeline stored was `processed_at - created_at`, and that number is
+    essentially all idle. `run_capture_poll_loop` ticks every 10s, so a capture
+    arriving at a random moment waits ~U(0,10)s before any work begins.
+    Measured on 3906 production Idealista captures the distribution of
+    `processed_at - created_at` is FLAT across every 1-second bucket from 0 to
+    10 — the signature of poll-wait, not of work — and its mean (5.8s) sat
+    within noise of Hipoges' (5.3s) purely because both are half the same poll
+    interval. `processing_ms` is the column that makes the two separable.
+    """
+
+    def test_elapsed_ms_returns_none_when_unmeasured(self) -> None:
+        """None must survive as None all the way to the column. A 0 here would
+        assert "this capture processed instantly", which is a stronger and
+        wronger claim than "we didn't measure it" — and is exactly the class of
+        plausible-looking-but-false number this whole issue is about."""
+        assert capture._elapsed_ms(None) is None
+
+    def test_elapsed_ms_never_returns_negative(self) -> None:
+        """A start instant in the future (clock adjustment, injected fake)
+        clamps to 0 rather than writing a negative duration into an INTEGER
+        column that every downstream aggregate would then average in."""
+        import time as _time
+
+        assert capture._elapsed_ms(_time.monotonic() + 60) == 0
+
+    def test_elapsed_ms_measures_a_real_interval(self, monkeypatch) -> None:
+        """Pinned against a controlled monotonic clock so the assertion is
+        exact instead of a sleep-based approximation."""
+        ticks = iter([100.0, 100.25])
+        monkeypatch.setattr(capture.time, "monotonic", lambda: next(ticks))
+        started = capture.time.monotonic()
+        assert capture._elapsed_ms(started) == 250
+
+    def test_successful_capture_records_processing_ms(self, pg_conn) -> None:
+        """The end-to-end claim: a real capture lands a non-null
+        `processing_ms`, and that number is the WORK, not the queue wait — so
+        it must be far below the 10s poll interval whose midpoint used to be
+        mistaken for it."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            assert capture.process_pending_captures(pg_conn) == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, processing_ms FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, processing_ms = cur.fetchone()
+
+            assert status == "done"
+            assert processing_ms is not None, (
+                "a successful capture must record its own processing time — "
+                "without it the only timing available is poll-wait"
+            )
+            assert 0 <= processing_ms < 10_000
+        finally:
+            _cleanup(pg_conn)
+
+    def test_failed_capture_also_records_processing_ms(self, pg_conn) -> None:
+        """A capture that FAILS still cost real time, and a portal that is slow
+        precisely because it keeps failing must not look fast by being excluded
+        from the timing data.
+
+        Uses an UNRECOGNISED url on purpose. The obvious alternative — feeding
+        a recognised portal deliberately broken HTML — is not deterministic:
+        several connectors' `normalize()` accept a near-empty document and
+        return a sparse listing rather than raising, so that test would
+        sometimes land 'done', and (worse) would leave a stray `listing` +
+        `property` row behind in the session-shared database for every later
+        test in the run to trip over. This path reaches `_mark_failed` through
+        the "no capture-capable connector" branch with no side effects at all.
+        """
+        _apply_schema(pg_conn)
+        url = "https://not-a-portal-687.example.com/anuncio/1"
+        try:
+            capture_id = _insert_pending(pg_conn, url, "<html><body>x</body></html>")
+            capture.process_pending_captures(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, processing_ms FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, processing_ms = cur.fetchone()
+
+            assert status == "failed"
+            assert processing_ms is not None, (
+                "a failed capture must be timed too — otherwise a portal that "
+                "is slow because it keeps failing looks fast"
+            )
+            assert processing_ms >= 0
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()
+
+    def test_render_wait_ms_column_accepts_and_returns_null(self, pg_conn) -> None:
+        """The extension is installed independently of the server and does not
+        upgrade with it, so an INSERT that omits `render_wait_ms` is a normal,
+        permanent state — not a migration window. It must store NULL ("not
+        measured"), never default to 0 ("rendered instantly")."""
+        _apply_schema(pg_conn)
+        url = "https://www.idealista.com/inmueble/687000001/"
+        try:
+            capture_id = _insert_pending(pg_conn, url, "<html></html>")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT render_wait_ms FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                assert cur.fetchone()[0] is None
+
+                cur.execute(
+                    "UPDATE extension_capture SET render_wait_ms = %s WHERE id = %s",
+                    (18_500, capture_id),
+                )
+                pg_conn.commit()
+                cur.execute(
+                    "SELECT render_wait_ms FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                assert cur.fetchone()[0] == 18_500
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()

@@ -378,6 +378,20 @@ function formatRatio(fraction: number | null): string {
   return `${(fraction * 100).toFixed(0)}%`;
 }
 
+/**
+ * A per-listing duration in ms → a short human string (issue #687). Null is
+ * "—": NOT MEASURED, which is a genuinely different statement from "0 ms" and
+ * must never be rendered as a number. Sub-second stays in ms (a 340 ms
+ * processing step reads wrong as "0,3 s"); a second or more goes to one
+ * decimal of seconds, which is the granularity the owner's question ("tarda
+ * mucho por anuncio") actually operates at.
+ */
+function formatMs(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
 function formatNum(n: number | null): string {
   if (n === null || Number.isNaN(n)) return "—";
   return n.toFixed(1);
@@ -628,6 +642,13 @@ function FuenteDetail({ name }: { name: string }) {
   const showWorklist = isCapturePortal(name);
 
   const portalHealth = dataHealth?.portals.find((p) => p.portal === name) ?? null;
+  // Issue #687: the CRAWL-side counterpart to portalHealth's capture timings.
+  // A source has one or the other, essentially never both — a capture-only
+  // portal never runs a sweep, and a crawled one never produces captures — so
+  // the two render as separate sections rather than as one merged table that
+  // would be half-empty whichever kind of source you are looking at.
+  const connectorTiming =
+    dataHealth?.connectors.find((c) => c.connector_name === name) ?? null;
   const sourceQuality = dataHealth?.sources.find((s) => s.source === name) ?? null;
   const zeroResultRows = dataHealth?.zero_result_regressions.filter((z) => z.connector === name) ?? [];
   const driftReport = drift?.find((r) => r.connector === name) ?? null;
@@ -1065,6 +1086,92 @@ function FuenteDetail({ name }: { name: string }) {
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <dt style={{ color: "var(--fg-muted)" }}>Fotos/anuncio</dt>
                 <dd style={{ fontWeight: 600 }}>{formatNum(portalHealth.avg_photo_count_7d)}</dd>
+              </div>
+
+              {/* ── Tiempo por anuncio (issue #687) ────────────────────────
+                  Three separate rows, never one total, because the middle one
+                  is IDLE and the other two are not. Collapsing them is what
+                  made this unanswerable before: `processed_at - created_at`
+                  looked like a per-listing cost and was ~100% poll-wait. */}
+              <div
+                style={{
+                  marginTop: 6,
+                  paddingTop: 6,
+                  borderTop: "1px solid var(--border, #e5e7eb)",
+                  color: "var(--fg-muted)",
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                Tiempo por anuncio (mediana, 7d)
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <dt style={{ color: "var(--fg-muted)" }}>
+                  Espera de render{" "}
+                  <span style={{ fontWeight: 400 }} title="Lo que la extensión esperó a que la página pintara su contenido antes de poder capturarla. En un portal que renderiza en cliente suele ser el tramo dominante, y es el único de los tres que depende del portal.">
+                    (navegador)
+                  </span>
+                </dt>
+                <dd data-testid="capture-render-wait" style={{ fontWeight: 600 }}>
+                  {formatMs(portalHealth.median_render_wait_ms_7d)}
+                </dd>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <dt style={{ color: "var(--fg-muted)" }}>
+                  Espera en cola{" "}
+                  <span style={{ fontWeight: 400 }} title="Tiempo muerto: el sondeo de etl/capture.py corre cada 10 s, así que esto ronda los 5 s en TODOS los portales por construcción. No mide lentitud del portal — si sobra, se reduce bajando el intervalo de sondeo.">
+                    (inactivo)
+                  </span>
+                </dt>
+                <dd
+                  data-testid="capture-queue-wait"
+                  style={{ fontWeight: 600, color: "var(--fg-muted)" }}
+                >
+                  {formatMs(portalHealth.median_queue_wait_ms_7d)}
+                </dd>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <dt style={{ color: "var(--fg-muted)" }}>
+                  Procesado{" "}
+                  <span style={{ fontWeight: 400 }} title="Trabajo real del ETL sobre la captura: normalize() + upsert.">
+                    (servidor)
+                  </span>
+                </dt>
+                <dd data-testid="capture-processing" style={{ fontWeight: 600 }}>
+                  {formatMs(portalHealth.median_processing_ms_7d)}
+                </dd>
+              </div>
+            </dl>
+          </Card>
+        </section>
+      )}
+
+      {/* ── Tiempo por anuncio, lado rastreo (issue #687) ───────────────
+          Only for a source whose last sweep actually fetched something;
+          `ms_per_listing` is null when fetched_count was 0, and a section
+          reading "—" tells the operator nothing they didn't already know from
+          the run counters right above it. */}
+      {connectorTiming?.ms_per_listing != null && (
+        <section style={{ marginTop: 24 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--fg)" }}>
+            Tiempo por anuncio (rastreo)
+          </h2>
+          <Card className="p-4" style={{ marginTop: 8 }}>
+            <dl style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <dt style={{ color: "var(--fg-muted)" }}>
+                  Trabajo real por anuncio{" "}
+                  <span style={{ fontWeight: 400 }} title="fetch_detail() + normalize() + upsert en la última ejecución, dividido entre los anuncios descargados. NO incluye la espera del limitador de ritmo: esa pausa es deliberada y contarla haría parecer lento a un portal que sólo va despacio a propósito.">
+                    (media, última ejecución)
+                  </span>
+                </dt>
+                <dd data-testid="crawl-ms-per-listing" style={{ fontWeight: 600 }}>
+                  {formatMs(connectorTiming.ms_per_listing)}
+                </dd>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <dt style={{ color: "var(--fg-muted)" }}>Anuncios descargados</dt>
+                <dd style={{ fontWeight: 600 }}>{connectorTiming.fetched_count}</dd>
               </div>
             </dl>
           </Card>

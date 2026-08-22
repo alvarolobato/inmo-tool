@@ -61,6 +61,19 @@ export interface ConnectorHealth {
   notice: string | null;
   /** The genuine error message when the last run needs attention. */
   error_msg: string | null;
+  /**
+   * Mean milliseconds of real work per listing on the last run (issue #687):
+   * `fetch_ms_total / fetched_count`, i.e. fetch_detail + normalize + upsert,
+   * with rate-limit sleep already excluded at the write site. This is the
+   * CRAWLED-portal counterpart to the capture path's median_processing_ms_7d.
+   *
+   * Null when the run fetched nothing (no denominator) — never 0, which would
+   * read as "instant" for what is really "didn't run". Note this is a mean,
+   * not a median: only the per-run total is stored, so the distribution is not
+   * recoverable. Good enough to compare portals by order of magnitude, which
+   * is the question being asked; not good enough to chase one slow listing.
+   */
+  ms_per_listing: number | null;
 }
 
 /** Per-portal capture health (extension_capture aggregated by url host). */
@@ -82,6 +95,40 @@ export interface PortalCaptureHealth {
   avg_fields_ratio_7d: number | null;
   /** Avg photo count per done capture over the 7d window, or null. */
   avg_photo_count_7d: number | null;
+  /**
+   * ── Per-listing timing (issue #687) ──────────────────────────────────────
+   * Medians, not means: capture durations are long-tailed (one 20s render
+   * behind a cold CDN drags a mean that a median shrugs off), and the owner's
+   * question is "how long does a listing normally take", not "what is the
+   * arithmetic mean including outliers". All three are null when the 7d window
+   * holds no measured sample — null renders "—", and MUST NOT render as 0.
+   *
+   * The three add up to the wall time the owner actually experiences, and are
+   * kept apart precisely because ONE of them is idle and the other two are
+   * not:
+   */
+  /**
+   * How long the browser extension waited for the page to render before it
+   * could snapshot the DOM. On a client-rendered portal this is the dominant
+   * term and the one worth fixing. Null for captures from an extension build
+   * that doesn't report it, or from the manual/forced path that never waits.
+   */
+  median_render_wait_ms_7d: number | null;
+  /**
+   * How long the capture then sat in `extension_capture` before the ETL poll
+   * picked it up. PURE IDLE — `run_capture_poll_loop` ticks every 10s, so this
+   * is ~U(0,10)s by construction and its median sits near 5s no matter how
+   * fast or slow the portal is. Surfaced *as* idle so nobody mistakes it for
+   * portal slowness again (measured live: Hipoges 5.3s vs Idealista 5.8s —
+   * two samples of half the poll interval, and the reason "hipoges tarda
+   * mucho por anuncio" was unanswerable from stored data).
+   */
+  median_queue_wait_ms_7d: number | null;
+  /**
+   * How long the ETL then spent actually processing it (normalize + upsert).
+   * Real server work, and in practice the smallest of the three.
+   */
+  median_processing_ms_7d: number | null;
 }
 
 /** Per-source stored-listing data quality. */

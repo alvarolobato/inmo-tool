@@ -41,6 +41,35 @@ const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 interface CaptureBody {
   url?: string;
   html?: string;
+  /**
+   * How long the extension waited for this page to render before snapshotting
+   * it (issue #687), in ms. OPTIONAL and frequently absent — the extension is
+   * an independently-installed Chrome artifact that does not upgrade in
+   * lockstep with the server, and its own manual/forced-capture path doesn't
+   * wait for render at all. Absent, null, and non-finite all store NULL
+   * ("not measured"), never 0.
+   */
+  renderWaitMs?: unknown;
+}
+
+/**
+ * Coerce the extension's `renderWaitMs` to a storable integer, or null.
+ *
+ * Deliberately strict, because this value is attacker-controllable in exactly
+ * the same way `url`/`html` are (the endpoint is reachable by anything holding
+ * the admin key) and it lands in an INTEGER column: a non-number, a NaN, an
+ * Infinity, or a value past int4 range would otherwise turn a capture that
+ * parsed perfectly well into a 500 at the INSERT. A nonsense duration is
+ * discarded rather than rejected — the CAPTURE is the payload that matters,
+ * and losing a listing over a bad telemetry field would be a strictly worse
+ * trade than losing the telemetry.
+ */
+const MAX_RENDER_WAIT_MS = 10 * 60 * 1000; // 10 min — far past MAX_WAIT_MS (20s); anything beyond is noise.
+
+function coerceRenderWaitMs(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  if (v < 0 || v > MAX_RENDER_WAIT_MS) return null;
+  return Math.round(v);
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -63,6 +92,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { url, html } = body;
+  const renderWaitMs = coerceRenderWaitMs(body.renderWaitMs);
   if (!url || typeof url !== "string") {
     return NextResponse.json(
       formatApiError("Falta el campo 'url'.", "VALIDATION", undefined, requestId),
@@ -107,8 +137,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // measures what the extension actually sent) and covering `url` too — a
     // NUL anywhere in the tuple fails the same INSERT.
     const rows = await sql<{ id: number }>(
-      "INSERT INTO extension_capture (url, html) VALUES ($1, $2) RETURNING id",
-      [stripNulBytes(url), stripNulBytes(html)],
+      "INSERT INTO extension_capture (url, html, render_wait_ms) VALUES ($1, $2, $3) RETURNING id",
+      [stripNulBytes(url), stripNulBytes(html), renderWaitMs],
     );
     return NextResponse.json({ success: true, capture_id: rows[0].id });
   } catch (err) {

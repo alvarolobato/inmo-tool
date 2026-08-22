@@ -1262,6 +1262,27 @@ ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_count INTEGER
 -- (deep-captured new/changed) as the "sin-cambio vs deep-capturados" counters.
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_unchanged_count INTEGER NOT NULL DEFAULT 0;
 
+-- Issue #687: cumulative milliseconds of REAL per-listing work this run —
+-- fetch_detail() + normalize() + upsert, summed over every successfully
+-- fetched listing across every scope — with the rate limiter's own sleep
+-- SUBTRACTED OUT (etl.connectors.rate_limit.RateLimiter.slept_seconds).
+--
+-- Paired with `fetched_count` (its natural denominator) this is the first
+-- per-listing timing the pipeline has ever stored: "how long does one listing
+-- take on this portal". The subtraction is the entire point — `throttle` is
+-- `limiter.acquire` and connectors call it as fetch_detail's first action, so
+-- an unsubtracted stopwatch would bill Fotocasa's ~20s/listing pacing interval
+-- as work, reproducing exactly the misreading that made
+-- `extension_capture.processed_at - created_at` worthless (see the note on
+-- those columns below: measured flat-uniform over the 10s poll interval, i.e.
+-- ~100% queue idle, yet read as processing cost for months).
+--
+-- Successful fetches only: an error path's duration describes a failure, not
+-- throughput, and averaging the two hides both. 0 (not NULL) for a run that
+-- fetched nothing, which is why fetched_count must be the divisor and a
+-- fetched_count of 0 must render "—", never a division.
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS fetch_ms_total BIGINT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
 -- Recent-runs lookups (dashboards, `ps connector status`-style queries)
 -- filter/sort on started_at; unindexed, that's a seq scan once this table
@@ -1931,6 +1952,39 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status_check;
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
     CHECK (status IN ('pending','done','failed','listing','blocked'));
+
+-- ── Per-listing timing (issue #687) ─────────────────────────────────────────
+-- Why these two columns exist at all: before them the ONLY per-listing timing
+-- in the whole pipeline was `processed_at - created_at`, and that number is
+-- almost entirely IDLE. `run_capture_poll_loop` polls every 10s, so a capture
+-- that arrives at a uniformly random moment waits U(0,10)s in the queue before
+-- any work starts. Measured live on 3906 production Idealista captures, the
+-- distribution of `processed_at - created_at` is FLAT across every 1s bucket
+-- from 0 to 10 (327/387/382/416/377/398/376/399/380/370) — the exact signature
+-- of poll-wait, not of work. Its ~5.8s mean is the poll interval's midpoint,
+-- not a processing cost, which is why "hipoges tarda mucho por anuncio" could
+-- not be answered from it: Hipoges' 5.3s mean and Idealista's 5.8s mean are
+-- the SAME number (half of 10s) measured twice, and neither says anything at
+-- all about how long a listing actually takes.
+--
+-- Both are nullable on purpose, and null means "not measured", never "zero":
+--   * `processing_ms` — server-side wall time of _process_one() alone
+--     (normalize + upsert + the status UPDATE), excluding queue wait. Null on
+--     rows written before this column existed.
+--   * `render_wait_ms` — how long the BROWSER EXTENSION waited for the page to
+--     actually render before it snapshotted the DOM (content-script.js
+--     `pollUntilReady` → `waitForQuiescenceThenFire`). This is where a
+--     capture-only portal's real per-listing cost lives: Hipoges serves an
+--     empty Angular shell whose readySelectors are the generic ["main","h1"],
+--     so the loop either fires early on a shell (a fast, near-empty capture)
+--     or never satisfies the body-text floor and burns the full MAX_WAIT_MS
+--     (20s) before giving up silently. Null whenever the capture came from an
+--     extension build that doesn't send it, or from a path that doesn't wait
+--     (manual/forced capture) — an independently-deployed Chrome extension is
+--     genuinely not upgradeable in lockstep with the server, so a missing
+--     value is a normal state, not a defect.
+ALTER TABLE extension_capture ADD COLUMN IF NOT EXISTS processing_ms   INTEGER;
+ALTER TABLE extension_capture ADD COLUMN IF NOT EXISTS render_wait_ms  INTEGER;
 
 -- Browser-extension presence heartbeat (issue #509). The dashboard origin can
 -- NOT be injected into by the extension (its manifest host_permissions cover
