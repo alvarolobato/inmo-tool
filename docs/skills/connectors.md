@@ -138,9 +138,11 @@ its own, narrower corroboration instead.
 **Diagnosability — retain what you cannot explain**: a capture at or below
 its portal's measured field-count floor (`_ANOMALY_FIELD_FLOOR`, per-portal,
 default 0) keeps its HTML regardless of the retention config (D-150). Without
-this, a field-less page is unclassifiable forever after — which is how 33
-production Idealista rows ended up byte-identical in the database, one of them
-a confirmed withdrawal and the rest unknowable.
+this, a field-less page is unclassifiable forever after — which is how the
+production Idealista rows described in the capture-path section below (40 as of
+2026-08-22 08:28 UTC, and still growing while the #683 drain runs) ended up
+byte-identical in the database, one of them a confirmed withdrawal and the rest
+unknowable.
 
 The rule is *unexplained*, not *empty*. A **classified** outcome — a
 recognised retirement notice, a recognised challenge — **drops** its HTML: we
