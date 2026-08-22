@@ -1472,6 +1472,7 @@ def _record_connector_result(
     finished_at: datetime,
     skipped_count: int = 0,
     skipped_unchanged_count: int = 0,
+    fetch_ms_total: int = 0,
     skipped_scopes: list[dict[str, str]] | None = None,
     failure_classification: str | None = None,
     geography_scope: list[dict] | None = None,
@@ -1548,12 +1549,13 @@ def _record_connector_result(
             INSERT INTO connector_run_results
                 (run_id, connector_name, started_at, finished_at, status,
                  discovered_count, fetched_count, error_count, error_msg,
-                 skipped_count, skipped_unchanged_count, skipped_scopes,
+                 skipped_count, skipped_unchanged_count, fetch_ms_total,
+                 skipped_scopes,
                  failure_classification,
                  geography_scope, extraction_quality_summary,
                  verified_count, verified_gone_count, verification_alarm)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s)
+                    %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -1567,6 +1569,7 @@ def _record_connector_result(
                 error_msg,
                 skipped_count,
                 skipped_unchanged_count,
+                fetch_ms_total,
                 json.dumps(skipped_scopes) if skipped_scopes else None,
                 failure_classification,
                 json.dumps(geography_scope) if geography_scope else None,
@@ -2541,6 +2544,20 @@ def run_connector(
     # the pattern skimmable (e.g. "SoftBlockError=5, ConnectorError=2")
     # without a schema change.
     error_kinds: Counter[str] = Counter()
+    # Issue #700: cumulative milliseconds of REAL per-listing work this scope —
+    # fetch_detail() + normalize() + the upsert — with the rate limiter's own
+    # sleep subtracted out. Divided by `fetched_count` downstream it is the
+    # first honest "how long does one listing take on this portal" number the
+    # pipeline has ever produced.
+    #
+    # Why the subtraction is the whole point: `throttle` is `limiter.acquire`
+    # and connectors call it as fetch_detail's FIRST action, so a plain
+    # stopwatch here would bill Fotocasa ~20s/listing of deliberate pacing as
+    # if it were work. That is precisely how `extension_capture.processed_at -
+    # created_at` came to be misread for months. Counted for successful
+    # fetches only — an error path's duration is a failure characteristic, not
+    # a throughput one, and averaging the two together hides both.
+    fetch_ms_total = 0
     circuit_open = False
     # Which category tripped the breaker for this scope, if it did: 'fatal'
     # (genuine failures — worth surfacing) or 'soft' (rate-throttle — a clean
@@ -2652,10 +2669,25 @@ def run_connector(
         # ~8h for ~1,500 ids). The parameter, not the call site, is the right
         # place for this: connectors that make several requests per listing
         # need to pace each one, which only they can do (issue #99).
+        # Issue #700: bracket the real work, and sample the limiter's own
+        # sleep ledger across the same bracket so the pacing interval can be
+        # subtracted rather than counted as time-per-listing.
+        listing_started = time.monotonic()
+        slept_before = limiter.slept_seconds
         try:
             raw = connector.fetch_detail(external_id, throttle=limiter.acquire)
             canonical = connector.normalize(raw)
             _upsert_canonical_listing(conn, canonical)
+            fetch_ms_total += max(
+                0,
+                int(
+                    (
+                        (time.monotonic() - listing_started)
+                        - (limiter.slept_seconds - slept_before)
+                    )
+                    * 1000
+                ),
+            )
         except ListingUnavailableError as exc:
             # Issue #291: the source says this listing is gone (HTTP 404/410)
             # — it was removed/withdrawn between the discover() sweep that
@@ -2833,6 +2865,9 @@ def run_connector(
         "error_count": errors,
         "soft_block_error_count": soft_block_errors,
         "gone_count": gone,
+        # Issue #700: real per-listing work this scope, in ms, excluding
+        # rate-limit sleep. Pairs with `fetched_count` (its denominator).
+        "fetch_ms_total": fetch_ms_total,
         # Issue #183: discovery-time price observations written to
         # listing_price_history this scope, independent of the fetch budget.
         "discovery_price_observations": discovery_price_observations,
@@ -4269,6 +4304,9 @@ def run_all_connectors(
         # Issue #435 (D-099): list-price capture-optimization skips this
         # connector, summed across scopes (distinct from skip-if-seen skips).
         skipped_unchanged_fetch_total = 0
+        # Issue #700: real per-listing work across every scope of this
+        # connector's run, in ms, rate-limit sleep excluded.
+        fetch_ms_total = 0
         error_total = 0
         # Issue #270 (D-047): the subset of error_total that was soft-block
         # (rate-throttle), for the informational notice. error_total still
@@ -4853,6 +4891,7 @@ def run_all_connectors(
             fetched_total += result["fetched_count"]
             skipped_fetch_total += result["skipped_count"]
             skipped_unchanged_fetch_total += result["skipped_unchanged_count"]
+            fetch_ms_total += result["fetch_ms_total"]
             error_total += result["error_count"]
             soft_block_error_total += result["soft_block_error_count"]
             # Issue #270 (D-047): route a breaker trip by its cause. A fatal
@@ -5071,6 +5110,7 @@ def run_all_connectors(
             fetched_count=fetched_total,
             skipped_count=skipped_fetch_total,
             skipped_unchanged_count=skipped_unchanged_fetch_total,
+            fetch_ms_total=fetch_ms_total,
             error_count=error_total,
             error_msg="; ".join(error_msgs) or None,
             skipped_scopes=skipped_scopes,

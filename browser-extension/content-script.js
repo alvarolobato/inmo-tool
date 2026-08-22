@@ -270,7 +270,18 @@
     }
   }
 
-  function fireCapture(info) {
+  /**
+   * `renderWaitMs` (issue #700) — how long we waited, on THIS page, between
+   * starting to watch for render-readiness and actually snapshotting the DOM
+   * (poll-until-ready + the QUIESCENCE_MS settle). This is the per-listing
+   * cost the owner actually feels on a capture-only portal, and until now
+   * nothing recorded it anywhere: the server only ever saw the finished POST,
+   * so a page that took 19s to render and one that took 200ms produced
+   * byte-identical evidence. Undefined when the caller didn't time it (a
+   * manual/forced capture doesn't wait at all), which the server stores as
+   * NULL — "not measured", never 0.
+   */
+  function fireCapture(info, renderWaitMs) {
     // info.key was already claim()ed by the caller.
     let html;
     try {
@@ -282,7 +293,12 @@
     let responded = false;
     try {
       chrome.runtime.sendMessage(
-        { type: "EXTRACT", url: window.location.href, html },
+        {
+          type: "EXTRACT",
+          url: window.location.href,
+          html,
+          renderWaitMs: typeof renderWaitMs === "number" ? renderWaitMs : undefined,
+        },
         (res) => {
           responded = true;
           if (chrome.runtime.lastError || !res || !res.success) {
@@ -313,7 +329,7 @@
 
   // After the page is "ready", wait for the DOM to go quiet (no mutations for
   // QUIESCENCE_MS) so async widgets finish before we snapshot the HTML.
-  function waitForQuiescenceThenFire(info) {
+  function waitForQuiescenceThenFire(info, watchStartedAt) {
     let settleTimer = null;
     let obs = null;
 
@@ -343,7 +359,12 @@
         }
         return;
       }
-      if (guard.claim(info.key)) fireCapture(info);
+      if (guard.claim(info.key)) {
+        fireCapture(
+          info,
+          typeof watchStartedAt === "number" ? Date.now() - watchStartedAt : undefined,
+        );
+      }
     };
 
     try {
@@ -362,16 +383,27 @@
     settleTimer = setTimeout(done, QUIESCENCE_MS);
   }
 
-  function pollUntilReady(info, deadline) {
+  function pollUntilReady(info, deadline, watchStartedAt) {
     if (guard.isDone(info.key)) return;
     const now = currentDetail();
     if (!now || now.key !== info.key) return; // navigated away — stop
     if (D.isRenderReady(document, info.portal)) {
-      waitForQuiescenceThenFire(info);
+      waitForQuiescenceThenFire(info, watchStartedAt);
       return;
     }
-    if (Date.now() > deadline) return; // gave up; manual popup still works
-    setTimeout(() => pollUntilReady(info, deadline), READY_POLL_MS);
+    // Gave up after MAX_WAIT_MS; manual popup capture still works.
+    //
+    // KNOWN GAP, deliberately NOT filled here (issue #700 → #644): this is the
+    // Hipoges shape — the page never satisfied readySelectors + the body-text
+    // floor, so the owner waited the full 20s and got nothing, and because no
+    // POST is ever sent the server has NO record the listing was attempted at
+    // all. `render_wait_ms` therefore measures successful captures only, and a
+    // portal that mostly TIMES OUT looks, in the timing data, like a portal
+    // nobody visited. Reporting abandoned waits needs an event channel the
+    // capture POST can't carry; that belongs to the unified activity timeline
+    // (#644), not to a third connector-health surface bolted on here.
+    if (Date.now() > deadline) return;
+    setTimeout(() => pollUntilReady(info, deadline, watchStartedAt), READY_POLL_MS);
   }
 
   function startAutoCaptureLoop() {
@@ -389,7 +421,7 @@
     if (guard.isDone(info.key)) return; // already captured this listing
     if (loopKey === info.key) return; // already watching this page
     loopKey = info.key;
-    pollUntilReady(info, Date.now() + MAX_WAIT_MS);
+    pollUntilReady(info, Date.now() + MAX_WAIT_MS, Date.now());
   }
 
   // ── 3. Listing/search pages: in-page banner + auto-start (issue #297) ──────

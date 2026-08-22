@@ -21,6 +21,13 @@
 # from source on every build. `ps stack` calls this automatically; run it by hand
 # before a bare `docker build ./dashboard` when you want the download route live.
 #
+# Both `ps stack` and `ps prod deploy` call this automatically, from POST-pull
+# source immediately before the build (D-060, D-161); run it by hand before a
+# bare `docker build ./dashboard` when you want the download route live.
+# Paired guards, run right after this script on both paths:
+#   scripts/check-extension-zip-fresh.sh     — mtime: source edited after packaging
+#   scripts/check-extension-version-sync.sh  — content: staged version != manifest
+#
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -59,7 +66,9 @@ VERSION_FILE="${OUT_DIR}/extension-version.json"
 if [ -f "${MANIFEST}" ]; then
   # First "version": "..." line (manifest_version has no leading quote before
   # `version`, so it never matches this pattern).
-  VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${MANIFEST}" | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
+  # `|| true`: grep exits 1 on no match and `pipefail` would abort the script
+  # here, making the "could not parse" branch below unreachable.
+  VERSION="$({ grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${MANIFEST}" || true; } | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
   if [ -n "${VERSION}" ]; then
     printf '{"version":"%s"}\n' "${VERSION}" > "${VERSION_FILE}"
     echo "build-extension-zip: wrote ${VERSION_FILE} (v${VERSION})"

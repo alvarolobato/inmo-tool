@@ -31,6 +31,7 @@ const SAMPLE: DataHealthResponse = {
       prev_error_count: 0,
       notice: "nota: presupuesto agotado",
       error_msg: null,
+      ms_per_listing: 420,
     },
   ],
   portals: [
@@ -43,6 +44,9 @@ const SAMPLE: DataHealthResponse = {
       listing_7d: 3,
       avg_fields_ratio_7d: 0.8,
       avg_photo_count_7d: 5,
+      median_render_wait_ms_7d: 1800,
+      median_queue_wait_ms_7d: 5000,
+      median_processing_ms_7d: 260,
     },
   ],
   sources: [{ source: "idealista", listing_count: 100, avg_photo_count: 6 }],

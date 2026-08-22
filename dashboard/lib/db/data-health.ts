@@ -67,11 +67,16 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     query(
       `SELECT connector_name, status, started_at,
               discovered_count, fetched_count, error_count, skipped_count,
-              error_msg, prev_error_count
+              error_msg, prev_error_count, ms_per_listing
          FROM (
            SELECT c.connector_name, c.status, c.started_at,
                   c.discovered_count, c.fetched_count, c.error_count,
                   c.skipped_count, c.error_msg,
+                  -- Issue #700: real work per listing on this run. NULLIF
+                  -- guards the no-fetch run — a 0 denominator must yield NULL
+                  -- ("didn't fetch"), never 0 ("instant").
+                  ROUND(c.fetch_ms_total::numeric
+                        / NULLIF(c.fetched_count, 0)) AS ms_per_listing,
                   ROW_NUMBER() OVER w AS rn,
                   LEAD(c.error_count) OVER w AS prev_error_count
              FROM connector_run_results c
@@ -110,7 +115,28 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
                AND ec.created_at > NOW() - INTERVAL '7 days')              AS avg_fields_ratio_7d,
            AVG(COALESCE(array_length(l.photo_urls, 1), 0))
              FILTER (WHERE ec.status = 'done'
-               AND ec.created_at > NOW() - INTERVAL '7 days')              AS avg_photo_count_7d
+               AND ec.created_at > NOW() - INTERVAL '7 days')              AS avg_photo_count_7d,
+           -- Issue #700: the three legs of per-listing latency, kept apart.
+           -- percentile_cont ignores NULLs, so a portal with no measured
+           -- sample yields NULL rather than a fabricated 0. The FILTER
+           -- deliberately does NOT require status='done': a capture that
+           -- FAILED still cost the owner its render wait and its processing
+           -- time, and excluding failures would make a portal look fastest
+           -- exactly when it is breaking most.
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ec.render_wait_ms)
+             FILTER (WHERE ec.created_at > NOW() - INTERVAL '7 days')      AS median_render_wait_ms_7d,
+           -- processing_ms IS NOT NULL is required, not COALESCEd to 0:
+           -- D-162 rule 2 — a row captured before processing_ms existed has
+           -- an UNKNOWN work leg, and coercing it to 0 would silently bill
+           -- its whole created→processed delta as queue idle.
+           percentile_cont(0.5) WITHIN GROUP (
+             ORDER BY EXTRACT(EPOCH FROM (ec.processed_at - ec.created_at)) * 1000
+               - ec.processing_ms)
+             FILTER (WHERE ec.processed_at IS NOT NULL
+               AND ec.processing_ms IS NOT NULL
+               AND ec.created_at > NOW() - INTERVAL '7 days')              AS median_queue_wait_ms_7d,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY ec.processing_ms)
+             FILTER (WHERE ec.created_at > NOW() - INTERVAL '7 days')      AS median_processing_ms_7d
          FROM extension_capture ec
          LEFT JOIN listing l ON l.id = ec.listing_id
         GROUP BY host
@@ -193,6 +219,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
       // (clean budget/soft-block stop); an attention-level run's is the error.
       notice: healthy ? errorMsg : null,
       error_msg: healthy ? null : errorMsg,
+      ms_per_listing: numOrNull(row[9]),
     };
   });
 
@@ -209,6 +236,9 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     const listing = num(row[5]);
     const ratio = numOrNull(row[6]);
     const photos = numOrNull(row[7]);
+    const renderWait = numOrNull(row[8]);
+    const queueWait = numOrNull(row[9]);
+    const processing = numOrNull(row[10]);
     const existing = portalMap.get(portal);
     if (!existing) {
       portalMap.set(portal, {
@@ -220,6 +250,9 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
         listing_7d: listing,
         avg_fields_ratio_7d: ratio,
         avg_photo_count_7d: photos,
+        median_render_wait_ms_7d: renderWait,
+        median_queue_wait_ms_7d: queueWait,
+        median_processing_ms_7d: processing,
       });
     } else {
       existing.pending_count += pending;
@@ -236,6 +269,23 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
       // hosts fold into one portal. Rare in practice.
       existing.avg_fields_ratio_7d = minDefined(existing.avg_fields_ratio_7d, ratio);
       existing.avg_photo_count_7d = minDefined(existing.avg_photo_count_7d, photos);
+      // Timings fold the OTHER way from the quality ratios above: for quality
+      // the worse value is the smaller one, for latency the worse value is the
+      // LARGER one. A median of two medians isn't a median either way, but
+      // "the worst host folded into this portal" is the honest summary and the
+      // one that can't hide a problem. Rare in practice (one host per portal).
+      existing.median_render_wait_ms_7d = maxDefined(
+        existing.median_render_wait_ms_7d,
+        renderWait,
+      );
+      existing.median_queue_wait_ms_7d = maxDefined(
+        existing.median_queue_wait_ms_7d,
+        queueWait,
+      );
+      existing.median_processing_ms_7d = maxDefined(
+        existing.median_processing_ms_7d,
+        processing,
+      );
     }
   }
   const portals = [...portalMap.values()].sort((a, b) =>
