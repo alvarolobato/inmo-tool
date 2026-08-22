@@ -91,10 +91,70 @@ cmd_install() {
 
 cmd_copy_data() { exec "${REPO_ROOT}/deploy/copy-data-to-prod.sh" "$@"; }
 
+# Stage the browser extension into the dashboard build context ON THE HOST, from
+# the source that was just pulled. The dashboard image is built with context
+# ./dashboard (docker-compose.prod.yml), so `browser-extension/` — a repo-root
+# sibling — is NOT visible to the Dockerfile and the image can only ever contain
+# whatever `dashboard/public/` held at build time. The host checkout does have
+# the extension source; only the *build context* is narrowed, not the filesystem.
+#
+# This is the same post-pull/pre-build rule D-060 established for `ps stack`,
+# which was never applied here. Without it every `ps prod deploy` rebuilt the
+# image around the untracked artifacts some earlier hand-run had left on the
+# host, which is how production served extension 0.14.9 — and reported
+# servedVersion 0.14.9, so the update prompt never fired — for weeks after main
+# had moved on (#693).
+#
+# Both guards run, because they fail on different things. The mtime guard is the
+# one that would have caught #693: `git pull` rewrites the mtime of every file it
+# changes, so a manifest bump leaves the source newer than a frozen zip and
+# `find -newer` reports STALE. It was simply never invoked on this path. The
+# content guard covers the narrower residue it cannot see — bytes that predate an
+# un-versioned source edit behind a timestamp that does not.
+#
+# Failure policy, by consequence rather than by convenience:
+#   - packaging fails but nothing stale is staged -> warn and continue. The
+#     version file is simply absent, readServedExtensionVersion() yields null and
+#     the CTA shows no update prompt. An unrelated backend fix should not be
+#     blocked by a missing `zip` on the host.
+#   - packaging fails AND a disagreeing artifact is still sitting there -> abort.
+#     Building now would bake a version claim we know to be false, which is the
+#     #693 bug itself. Better a refused deploy than a silent lie.
+stage_extension_remote() {
+    echo -e "${CYAN}Staging the browser extension from post-pull source${NC}"
+    if ! on_prod "bash scripts/build-extension-zip.sh"; then
+        echo -e "${YELLOW}warning: could not package the browser extension on the host.${NC}" >&2
+    fi
+    # Freshness (mtime): did the packager actually run over the source we just
+    # pulled? This is the #693 shape — a bumped manifest sitting next to an
+    # untouched zip — and the check that was missing from this path entirely.
+    #
+    # Gated on the zip existing, so the "nothing staged -> warn and continue"
+    # policy above survives: the guard counts a MISSING zip as an error, but a
+    # host with nothing staged is the safe degrade (servedVersion null, no
+    # prompt), not a reason to refuse an unrelated backend deploy. A zip that IS
+    # present and older than the pulled source is never safe.
+    if ! on_prod "test ! -f dashboard/public/inmo-tool-extension.zip || bash scripts/check-extension-zip-fresh.sh"; then
+        echo -e "${RED}ps prod deploy: the staged extension zip is older than browser-extension/.${NC}" >&2
+        echo -e "${RED}Refusing to build — packaging did not run, or silently failed, over the pulled source.${NC}" >&2
+        exit 1
+    fi
+    # Version content: the residue mtime cannot see — a staged artifact whose
+    # bytes predate an un-versioned source edit but whose timestamp does not.
+    if ! on_prod "bash scripts/check-extension-version-sync.sh"; then
+        echo -e "${RED}ps prod deploy: the staged extension disagrees with browser-extension/manifest.json.${NC}" >&2
+        echo -e "${RED}Refusing to build — the dashboard would report a wrong servedVersion and serve a stale zip.${NC}" >&2
+        exit 1
+    fi
+}
+
 cmd_deploy() {
     require_target
     echo -e "${CYAN}Deploying to ${PROD_HOST}:${PROD_PATH}${NC}"
     on_prod "git pull --ff-only origin main"
+    # MUST come after the pull and before the build (D-060): staging pre-pull
+    # source and then building is what shipped a stale extension in #334.
+    stage_extension_remote
     # APP_GIT_DESCRIBE is computed there, on the commit just pulled: it is what
     # the dashboard reports as its version.
     on_prod "APP_GIT_DESCRIBE=\$(git describe --tags --always --dirty) ${DC_PROD} build"

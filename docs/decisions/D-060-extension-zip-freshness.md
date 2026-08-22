@@ -3,7 +3,7 @@ id: D-060
 title: Extension zip is staged from post-pull source before every build, guarded by a staleness check
 date: 2026-08-05
 group: Plumbing / process
-rule: Stage the extension zip from POST-pull source right before every `docker compose --build` (`stage_extension()` in `stack.sh`, after `git pull`) — never before. `scripts/check-extension-zip-fresh.sh` fails when the zip is missing/older than `browser-extension/`; runs as post-stage self-check + CI gate.
+rule: Stage the extension zip from POST-pull source right before every `docker compose --build` (`stage_extension()` in `stack.sh`, after `git pull`) — never before. `scripts/check-extension-zip-fresh.sh` fails when the zip is missing/older than `browser-extension/`; runs as a post-stage self-check in `stack.sh` and, since D-161, `prod.sh`. It is NOT a CI gate — no workflow invokes it.
 order: 8
 ---
 
@@ -38,8 +38,18 @@ staged at all.
    non-zero when `dashboard/public/inmo-tool-extension.zip` is missing or older
    than any file under `browser-extension/` (dotfiles excluded, matching the
    packager). It runs as a post-stage self-check inside `stage_extension()` (so a
-   silently-failing packager is loud, not silent) and is the intended CI gate for
-   the bare-`docker compose --build` bypass.
+   silently-failing packager is loud, not silent), and since
+   [D-161](D-161-prod-deploy-stages-extension.md) inside `stage_extension_remote()`
+   on the prod deploy path too.
+
+   **It is not a CI gate**, despite this decision originally calling one
+   "intended": nothing in `.github/workflows/` invokes it, and
+   `dashboard/__tests__/extension-zip-freshness.test.ts` driving it against temp
+   fixtures is a unit test of the script, not a gate on the repo's own artifacts
+   (which are git-ignored and absent in CI anyway). The bare-`docker compose
+   --build` bypass therefore remains unguarded by CI; what closed the real
+   incident was running the check on both deploy paths, not a workflow. #693 is
+   the worked example — the guard was sound and simply never invoked.
 
 **Alternatives rejected**:
 - *npm `prebuild` hook that regenerates the zip inside the Docker build*: impossible
