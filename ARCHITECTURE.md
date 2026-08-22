@@ -46,6 +46,8 @@ Listing sites → per-site connector (discover → fetch_detail → normalize) �
 ```
 Runs on `etl/orchestrator.py run_scheduler_loop`: every registered connector, immediately on container startup, then hourly. Verified live: Fotocasa discovers listings and persists real Madrid properties end-to-end. Only Fotocasa is registered today (`etl/connectors/__init__.py`); it does not claim full-inventory coverage (`discovers_full_inventory = False`, page 1 of search results only — see [docs/architecture/connectors.md](docs/architecture/connectors.md)), so its listings never auto-transition to `withdrawn` from absence alone yet. Task 2.1 (#15) adds a second connector.
 
+**Stale verification** (issue #643, [D-157](docs/decisions/D-157-evidence-not-time-for-withdrawal.md)): partial-coverage HTTP connectors can never prove absence by sweeping, so at the end of each run every opted-in connector (`fotocasa`, `milanuncios`, `milanuncios_rental`, `pisos`) re-reads a handful of its most-overdue listings on leftover budget and resolves them from the source's own answer — HTTP 404/410 or an identified retired page marks `withdrawn` with the evidence recorded on the `listing_status_event`; a live page refreshes the listing; a soft block or any indeterminate response changes nothing at all. Elapsed time only ever *nominates* a candidate: no listing anywhere changes status from a clock. Captured portals (idealista/aliseda/altamira/hipoges) are excluded entirely — their path is #645.
+
 ### Dedup — not yet built (Phase 2, #16)
 ```
 New/changed listings → dedup engine (address+coords+size → phone → photo hash → fuzzy) → property_merge_log

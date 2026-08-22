@@ -1,0 +1,28 @@
+<!doctype html>
+<!--
+  Issue #643 fixture — SYNTHETIC, not a capture (public repo, no scraped
+  listing content; same convention as pisos_sample_detail.html).
+
+  Shape confirmed against pisos.com live on 2026-08-22: a detail path that no
+  longer resolves answers HTTP **404** with a page titled "404" and, crucially
+  for this fixture's purpose, WITHOUT the characteristics-list block
+  every served listing page renders (7 of them on the
+  live listing checked, 0 here). That absence is what the verification pass
+  reads as "this is not a listing page", and it is deliberately NOT read as
+  "the listing is gone": the HTTP status is what proves removal. A 200
+  serving this shape is indeterminate, which is the safe answer for a WAF
+  interstitial or a redirect to the search page.
+-->
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>404</title>
+  </head>
+  <body>
+    <main class="error-page">
+      <h1>404</h1>
+      <p>La página que buscas no existe.</p>
+      <a href="/comprar/">Volver al buscador</a>
+    </main>
+  </body>
+</html>

@@ -186,6 +186,12 @@ def main() -> None:
                         freshness_cycle_stuck_after_hours=(
                             config.freshness_cycle_stuck_after_hours
                         ),
+                        stale_verification_budget_per_run=(
+                            config.stale_verification_budget_per_run
+                        ),
+                        stale_verification_min_age_hours=(
+                            config.stale_verification_min_age_hours
+                        ),
                     )
                 else:
                     # A named single-connector run is a deliberate,
@@ -196,6 +202,12 @@ def main() -> None:
                         trigger="cli",
                         connector_name=args.connector,
                         dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
+                        stale_verification_budget_per_run=(
+                            config.stale_verification_budget_per_run
+                        ),
+                        stale_verification_min_age_hours=(
+                            config.stale_verification_min_age_hours
+                        ),
                     )
             else:
                 logger.error(
@@ -347,6 +359,8 @@ def main() -> None:
         dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
         default_freshness_interval_hours=config.default_freshness_interval_hours,
         freshness_cycle_stuck_after_hours=config.freshness_cycle_stuck_after_hours,
+        stale_verification_budget_per_run=config.stale_verification_budget_per_run,
+        stale_verification_min_age_hours=config.stale_verification_min_age_hours,
     )
 
 

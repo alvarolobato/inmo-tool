@@ -75,6 +75,7 @@ from etl.connectors.base import (
     SearchUrlGrammar,
     SoftBlockError,
     Throttle,
+    VerificationOutcome,
 )
 from etl.connectors.extraction import (
     first_present,
@@ -609,6 +610,16 @@ class FotocasaConnector(Connector):
     # Connector.discovers_full_inventory's docstring for what this
     # disables (the orchestrator's withdrawal auto-transition).
     discovers_full_inventory = False
+
+    # Issue #643: fotocasa is the single biggest stale bucket in production
+    # (4.346 activos, 0 retirados nunca — page-1-only coverage means absence
+    # from a sweep proves nothing) and its detail path is addressable from
+    # `external_id` alone, so the stale-verification pass can ask the site
+    # directly instead of guessing from a clock. Precondition 2 holds too:
+    # a 200 without `__initial_props__` raises FotocasaSoftBlockError from
+    # `_extract_initial_props`, so a block can never be normalized as if it
+    # were a live page.
+    supports_stale_verification = True
 
     # Issue #100: the one native site filter live-verified as real for this
     # site (issue #99) — Fotocasa's `/N-habitaciones/` URL segment, an
@@ -1173,6 +1184,38 @@ class FotocasaConnector(Connector):
             # happy path where the embedded JSON has everything.
             raw={"url": response.url, "props": props, "html": response.text},
         )
+
+    # Issue #643: spiked live on 2026-08-22 against three ids taken from
+    # production's oldest-`last_seen_at` actives. A removed listing answers
+    # `HTTP 404` and REDIRECTS to the generic search page with a
+    # `?propertyNotFound` query string; a still-live one answers 200 and
+    # redirects to its own canonical slug. So the 404 (D-049) already carries
+    # the whole signal today and this hook is a second line of defence, not
+    # the primary one: if fotocasa ever serves that same not-found landing
+    # page with a 200, `_extract_initial_props` would happily parse the
+    # SEARCH page's props and `normalize()` would refresh the listing as
+    # though it were alive. Keyed on the marker the site itself puts in the
+    # URL, never on page emptiness (that is the soft-block signature).
+    _RETIRED_URL_MARKER = "propertyNotFound"
+
+    def retired_page_signature(
+        self, html: str, final_url: str | None = None
+    ) -> str | None:
+        if final_url and self._RETIRED_URL_MARKER in final_url:
+            return (
+                "fotocasa redirigió la ficha al buscador con "
+                f"'{self._RETIRED_URL_MARKER}' ({final_url}) — el portal "
+                "declara que el anuncio ya no existe"
+            )
+        return None
+
+    def verify_listing(
+        self, external_id: str, url: str | None, throttle: Throttle
+    ) -> VerificationOutcome:
+        # `url` is unused: fotocasa resolves a detail page from the trailing
+        # numeric id alone (see fetch_detail), so re-reading it is exactly the
+        # normal detail fetch and an alive listing gets fully refreshed.
+        return self.verify_via_fetch_detail(external_id, throttle)
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
         props = raw.raw["props"]

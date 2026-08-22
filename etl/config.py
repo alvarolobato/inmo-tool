@@ -363,6 +363,51 @@ def _get_freshness_cycle_stuck_after_hours() -> int:
     return parsed if parsed > 0 else 168
 
 
+def _get_stale_verification_budget_per_run() -> int:
+    """How many overdue listings each opted-in connector may re-read per run
+    (issue #643).
+
+    Same env-first-then-loader precedence as the other ETL knobs above. 0 is a
+    legitimate value here — unlike the interval knobs — and means "turn the
+    verification pass off entirely" without touching any connector's opt-in
+    flag, so an operator can stop all verification traffic instantly. Negative
+    values are meaningless and coerce back to the default.
+    """
+    value: object | None = os.environ.get("ETL_STALE_VERIFICATION_BUDGET_PER_RUN")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.stale_verification_budget_per_run", default=None)
+    if value is None:
+        value = "10"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 10
+    return parsed if parsed >= 0 else 10
+
+
+def _get_stale_verification_min_age_hours() -> int:
+    """How long a listing must go unobserved before it can be NOMINATED for
+    verification (issue #643).
+
+    A nomination filter and nothing more: crossing this threshold never
+    changes a listing's status, it only decides who gets asked about next.
+    Same env-first-then-loader precedence as the other ETL knobs. Must be
+    positive — a non-positive value would nominate freshly-seen listings and
+    waste the budget re-asking about data the fetch loop just wrote — so it is
+    coerced back to the default (168h = 7 días, matching D-039's 'stale' band).
+    """
+    value: object | None = os.environ.get("ETL_STALE_VERIFICATION_MIN_AGE_HOURS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.stale_verification_min_age_hours", default=None)
+    if value is None:
+        value = "168"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 168
+    return parsed if parsed > 0 else 168
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 
@@ -399,6 +444,12 @@ class Config:
     )
     freshness_cycle_stuck_after_hours: int = field(
         default_factory=_get_freshness_cycle_stuck_after_hours
+    )
+    stale_verification_budget_per_run: int = field(
+        default_factory=_get_stale_verification_budget_per_run
+    )
+    stale_verification_min_age_hours: int = field(
+        default_factory=_get_stale_verification_min_age_hours
     )
 
     def __post_init__(self) -> None:

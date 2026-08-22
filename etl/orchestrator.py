@@ -60,6 +60,82 @@ _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS = 7200
 _DEFAULT_FRESHNESS_INTERVAL_HOURS = 24
 _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS = 168
 
+# Issue #643 (verificación de anuncios desfasados). Defaults used when no
+# operator config is threaded in (manual/CLI paths, direct test callers); the
+# scheduler passes etl.stale_verification_budget_per_run /
+# etl.stale_verification_min_age_hours from config/schema.yaml instead.
+#
+# 10 per connector per run is deliberately small. Verification is the LAST
+# thing a connector does, on whatever request budget the real discovery/fetch
+# work left behind (D-070's posture), inside the connector's own rate limit —
+# at fotocasa's 3/min that is ~3.5 minutes of tail traffic, and at
+# milanuncios_rental's 1/min it self-limits long before it could matter. It
+# does not need to be big: an alive verification refreshes the listing and an
+# unverifiable one rotates to the back of the queue, so the backlog drains
+# steadily across runs rather than in one burst — and a burst is exactly what
+# a portal's bot mitigation reacts to.
+_DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN = 10
+
+# How long a listing must have gone UNOBSERVED before it is even eligible to
+# be nominated. This is a nomination filter and nothing else — crossing it
+# changes no status, writes no event and is not evidence of anything (that is
+# the entire point of issue #643, and `TestTimeOnlyNominates` exists to keep
+# it that way). 168h (7 días) matches the display band D-039 already calls
+# "stale" and the >7d cohort the issue was filed against (2.194 anuncios).
+_DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS = 168
+
+# Issue #643 mass-withdrawal guard, the verification-pass counterpart of
+# `_GONE_ALARM_RATIO`. A single 404 is genuine evidence about ONE listing, but
+# "every listing we asked about is 404" is not a market event — it is the
+# detail-URL shape having broken, and acting on it would withdraw a source's
+# inventory on an artefact of our own bug. So withdrawals are collected during
+# the pass and only applied at the end, and only if all three checks below
+# clear. If any of them trips: nothing is withdrawn, the run logs a structural
+# alarm, and `connector_run_results.verification_alarm` records which one.
+#
+# 1. RATIO. The gone fraction of this run's verdicts must stay strictly below
+#    this. Deliberately generous — these listings were nominated precisely
+#    BECAUSE they look abandoned, so a genuinely high gone rate is expected
+#    here in a way it never is in the fetch loop (hence 0.8 vs #291's 0.5).
+#    `>=` and not `>`: at exactly 8-of-10 the ratio is already the systemic
+#    signature, and "fewer than 80%" is what D-157 point 8 promises (PR #685
+#    review, H2 — the original `>` let exactly-80% through).
+_VERIFICATION_GONE_ALARM_RATIO = 0.8
+
+# 2. FLOOR, on WITHDRAWALS — never on verdicts. A ratio computed over one or
+#    two verdicts says nothing, so some floor is needed; the mistake the first
+#    version made was to put it on the denominator (`verified >= 5`), which
+#    switched the guard OFF for small samples and therefore switched it off in
+#    exactly the scenario it exists for: the detail path breaks, most attempts
+#    raise, the breaker opens after four verdicts, and all four gone verdicts
+#    are applied ungated (PR #685 review, M1). Moved onto the quantity being
+#    gated, where it reads as what it is — "withdrawing one or two listings on
+#    a 100% gone rate is not a mass withdrawal; withdrawing three is enough to
+#    be worth a ratio check". Applies at every sample size.
+_VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS = 3
+
+# 3. HISTORICAL BASELINE. A single-run ratio is stateless and cannot tell a
+#    60% systemic break from 60% genuine churn — that is undecidable inside
+#    one run. What IS decidable is whether this run looks like this source's
+#    own history: `connector_run_results.verified_gone_count` gives a free
+#    per-source baseline, and "a source that has withdrawn 0 in its entire
+#    history suddenly withdrawing 8" is precisely the signal a ratio cannot
+#    see. This run's gone fraction may exceed the source's historical gone
+#    fraction by at most this many percentage points.
+#
+#    Only consulted once the source has accumulated enough verdicts to have a
+#    baseline at all, otherwise the very first pass could never withdraw
+#    anything. Note the deliberate ratchet: a blocked run records
+#    `verified_gone_count = 0`, which pushes the baseline DOWN, so a source
+#    whose every run trips this stays blocked until an operator looks. That is
+#    the intended posture (D-157's asymmetry: a missed withdrawal is
+#    invisible, a false one silently removes a live candidate from every
+#    profile feed) and it self-heals for ordinary churn, where sub-threshold
+#    runs do apply and raise the baseline as they go.
+_VERIFICATION_GONE_BASELINE_MARGIN = 0.5
+_VERIFICATION_GONE_BASELINE_MIN_HISTORY = 20
+_VERIFICATION_GONE_BASELINE_RUNS = 50
+
 logger = logging.getLogger("etl.orchestrator")
 
 
@@ -555,6 +631,534 @@ def _reconcile_missed_discoveries(
     conn.commit()
 
 
+def _nominate_stale_listings(
+    conn,
+    source: str,
+    *,
+    min_age_hours: int,
+    budget: int,
+    accepted_property_ids: set[int] | None = None,
+) -> list[tuple[int, str, str | None]]:
+    """The N listings of `source` most overdue for a look — a QUESTION, not a verdict.
+
+    Issue #643. This is the only place elapsed time is allowed to matter in
+    the whole withdrawal family, and all it may do is choose who gets asked
+    about next. Nothing this function returns implies anything about whether
+    a listing is still on the market; a nominated listing whose verification
+    never produces evidence ends the run in exactly the state it started in.
+
+    Selection:
+
+    * `status = 'active'` only — a listing already withdrawn/sold has nothing
+      to verify, and re-verifying it would be the resurrection path #641 owns.
+    * unobserved for at least `min_age_hours`, measured on `last_seen_at`
+      (the presence clock — "last confirmed present in a discover() sweep"),
+      falling back to `first_seen_at` for a listing no sweep has ever
+      re-confirmed (browser-extension captures start life this way).
+    * NOT an accepted / 'en seguimiento' property (D-099, issue #436): those
+      are already force-fetched in full on every pass, so nominating them
+      would spend the verification budget re-asking a question the fetch loop
+      answered minutes ago.
+    * ordered by `COALESCE(last_verification_attempt_at, last_seen_at,
+      first_seen_at)` ascending, so the queue ROTATES: a listing we asked
+      about goes to the back whatever the answer was. Without this a handful
+      of permanently-unverifiable listings (a portal that soft-blocks exactly
+      those URLs) would occupy the whole budget forever and the backlog
+      behind them would never drain — the same starvation D-030 fixed for
+      scopes, in a different queue.
+
+    Returns `(listing_id, external_id, url)` triples, oldest first.
+    """
+    if budget <= 0:
+        return []
+    excluded = sorted(accepted_property_ids or set())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT l.id, l.external_id, l.url
+              FROM listing l
+             WHERE l.source = %(source)s
+               AND l.status = 'active'
+               AND COALESCE(l.last_seen_at, l.first_seen_at)
+                     < NOW() - make_interval(hours => %(min_age_hours)s)
+               AND (%(excluded)s::bigint[] IS NULL
+                    OR NOT (l.property_id = ANY(%(excluded)s::bigint[])))
+             ORDER BY COALESCE(l.last_verification_attempt_at,
+                               l.last_seen_at,
+                               l.first_seen_at) ASC,
+                      l.id ASC
+             LIMIT %(budget)s
+            """,
+            {
+                "source": source,
+                "min_age_hours": min_age_hours,
+                "excluded": excluded or None,
+                "budget": budget,
+            },
+        )
+        return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+
+def _record_verification_attempt(conn, listing_id: int) -> None:
+    """Stamp `listing.last_verification_attempt_at` — the rotation clock only.
+
+    Issue #643. Called for EVERY attempt, including the ones that proved
+    nothing, and deliberately touching no other column: this records that we
+    asked, never what we learned. Committed on its own so an attempt is
+    remembered even if the rest of the pass dies afterwards — otherwise a
+    crash mid-pass would let the same head-of-queue listings be re-asked
+    forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listing SET last_verification_attempt_at = NOW() WHERE id = %s",
+            (listing_id,),
+        )
+    conn.commit()
+
+
+def _refresh_verified_alive(conn, listing_id: int) -> None:
+    """The source served this listing's real page: reset its presence clocks.
+
+    Issue #643. Used for the alive verdicts that carry no canonical listing
+    (a connector that can prove the page exists but has nothing to normalize
+    from — pisos). When a canonical IS available the caller upserts it
+    instead, which sets the same columns plus the actual data.
+
+    `missed_discovery_count` is reset for the same reason
+    `_upsert_canonical_listing` resets it: we have just observed the listing
+    directly, which is strictly stronger evidence of presence than the
+    discover()-sweep misses that counter accumulates.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listing "
+            "   SET last_seen_at = NOW(), last_fetched_at = NOW(), "
+            "       missed_discovery_count = 0 "
+            " WHERE id = %s",
+            (listing_id,),
+        )
+    conn.commit()
+
+
+def _mass_withdrawal_alarm(
+    conn, source: str, gone_verdicts: int, verified: int
+) -> tuple[str, str] | None:
+    """Should this run's withdrawals be suppressed? Returns why, or None.
+
+    `(code, explanation)`: a short stable code for
+    `connector_run_results.verification_alarm` (so "the guard fired" is
+    queryable rather than only a log line — a suppressed ACTION has to be
+    visible, which a pair of zeroed counters is not), and the prose for the
+    operator-facing log.
+
+    Issue #643's mass-withdrawal guard, in one place so the rule and the
+    operator-facing explanation can't drift apart. Three checks, all of which
+    must clear before a single listing is withdrawn — see the
+    `_VERIFICATION_GONE_*` constants for the reasoning behind each number.
+
+    The floor is on WITHDRAWALS, not on verdicts: below it nothing else is
+    consulted, because withdrawing one or two listings is not a mass
+    withdrawal at any sample size and a ratio over two verdicts is noise.
+    Above it, both the single-run ratio and the source's own history apply.
+    """
+    if gone_verdicts < _VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS:
+        return None
+    if verified <= 0:  # unreachable while gone_verdicts > 0, kept total
+        return None
+
+    run_rate = gone_verdicts / verified
+    if run_rate >= _VERIFICATION_GONE_ALARM_RATIO:
+        return (
+            f"ratio {gone_verdicts}/{verified} >= {_VERIFICATION_GONE_ALARM_RATIO:.0%}",
+            (
+                f"at or above the {_VERIFICATION_GONE_ALARM_RATIO:.0%} guard. "
+                "That is the signature of the detail-URL shape (or the whole "
+                "detail path) having broken, not of a real removal wave, so"
+            ),
+        )
+
+    historical_gone, historical_verified = _historical_verified_gone_rate(conn, source)
+    if historical_verified < _VERIFICATION_GONE_BASELINE_MIN_HISTORY:
+        return None
+    historical_rate = historical_gone / historical_verified
+    if run_rate > historical_rate + _VERIFICATION_GONE_BASELINE_MARGIN:
+        return (
+            f"baseline {run_rate:.0%} vs {historical_rate:.0%} histórico",
+            (
+                f"({run_rate:.0%}) — under the "
+                f"{_VERIFICATION_GONE_ALARM_RATIO:.0%} single-run guard, but "
+                f"more than {_VERIFICATION_GONE_BASELINE_MARGIN:.0%} above this "
+                f"source's own historical rate of {historical_rate:.0%} "
+                f"({historical_gone}/{historical_verified} over its last "
+                f"{_VERIFICATION_GONE_BASELINE_RUNS} runs). A source that has "
+                "barely withdrawn anything suddenly withdrawing a batch is the "
+                "break a single-run ratio cannot see, so"
+            ),
+        )
+    return None
+
+
+def _historical_verified_gone_rate(conn, source: str) -> tuple[int, int]:
+    """`(gone, verified)` summed over this connector's PREVIOUS verification runs.
+
+    Issue #643 / PR #685 review (M1-ii). The free half of the mass-withdrawal
+    guard: `connector_run_results` already carries `verified_count` and
+    `verified_gone_count` per source per run, so the source's own historical
+    gone rate costs one indexed aggregate and no new state.
+
+    Reads the most recent `_VERIFICATION_GONE_BASELINE_RUNS` result rows so an
+    ancient baseline can't outvote current behaviour forever. The current
+    run's row does not exist yet — `_record_connector_result` is called after
+    the verification pass — so there is nothing to exclude.
+
+    Returns `(0, 0)` on any failure, which the caller reads as "no baseline,
+    don't apply this check": the baseline is a bonus signal, and a query
+    problem must never be able to withdraw listings that the ratio check
+    would have stopped, nor block ones it would have allowed.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(verified_gone_count), 0),
+                       COALESCE(SUM(verified_count), 0)
+                  FROM (SELECT verified_gone_count, verified_count
+                          FROM connector_run_results
+                         WHERE connector_name = %s
+                         ORDER BY id DESC
+                         LIMIT %s) recent
+                """,
+                (source, _VERIFICATION_GONE_BASELINE_RUNS),
+            )
+            row = cur.fetchone()
+        return (int(row[0]), int(row[1])) if row else (0, 0)
+    except Exception:  # a missing baseline is a valid answer
+        conn.rollback()
+        logger.warning(
+            "Connector %s: could not read the historical verified-gone "
+            "baseline — the mass-withdrawal guard falls back to its ratio "
+            "check alone this run",
+            source,
+            exc_info=True,
+        )
+        return (0, 0)
+
+
+def _withdraw_verified_gone(conn, source: str, gone: list[tuple[int, str, str]]) -> int:
+    """Mark verified-absent listings `withdrawn`, each citing its own evidence.
+
+    Issue #643. `gone` is `(listing_id, external_id, evidence)`; the evidence
+    string is persisted verbatim to `listing_status_event.evidence` so the
+    question "what did we actually observe?" is answerable from the database
+    forever, not just from a log line that has since rotated away.
+
+    **Mark, never delete.** Deleting the row would take
+    `listing_price_history` (D-098) and the dedup identity with it, and a
+    re-listed property would come back looking like a brand-new find. A
+    withdrawn row keeps the whole timeline and lets a resurrection be
+    recognised as one.
+
+    Applied in one transaction at the END of the pass rather than per
+    listing, which is what makes the mass-withdrawal guard in
+    `verify_stale_listings` possible: the caller can look at the whole run's
+    verdicts and decline to apply any of them.
+    """
+    if not gone:
+        return 0
+    with conn.cursor() as cur:
+        for listing_id, external_id, evidence in gone:
+            cur.execute(
+                "UPDATE listing SET status = 'withdrawn' WHERE id = %s",
+                (listing_id,),
+            )
+            cur.execute(
+                "INSERT INTO listing_status_event "
+                "(listing_id, observed_at, status, evidence) "
+                "VALUES (%s, NOW(), 'withdrawn', %s)",
+                (listing_id, evidence),
+            )
+            logger.info(
+                "Connector %s: listing external_id=%s marked withdrawn — %s",
+                source,
+                external_id,
+                evidence,
+            )
+    conn.commit()
+    return len(gone)
+
+
+def verify_stale_listings(
+    conn,
+    connector: Connector,
+    limiter: RateLimiter,
+    breaker: CircuitBreaker,
+    *,
+    budget: int = _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN,
+    min_age_hours: int = _DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS,
+    accepted_property_ids: set[int] | None = None,
+) -> dict:
+    """Resolve a few of this connector's most overdue listings BY ASKING THE SITE.
+
+    Issue #643 — "el tiempo nomina candidatos, solo la evidencia cambia el
+    estado". The two biggest sources in production prove nothing by absence:
+    fotocasa sweeps page 1 only and idealista has no sweep at all, so between
+    them 7.635 listings could sit `active` forever with 0 ever withdrawn while
+    2.194 listings across all sources have gone unseen for more than a week.
+    Elapsed time cannot fix that, because on an operator-paced ingest
+    "unseen" mostly measures OUR calendar (capture activity is bursty: 2.175
+    captures one day, near zero the next). Re-reading the listing's own detail
+    page can: it is the one signal that comes from the portal rather than from
+    our own scheduling.
+
+    **Where this runs and why.** Once per connector per run, AFTER every scope
+    finished and after withdrawal reconciliation — the same posture
+    `_record_discovery_price_observations` has (D-070): real discovery and
+    fetch work gets the budget first, verification only ever spends what is
+    left. It uses the connector's own per-run `limiter` and `breaker`, so it
+    can neither exceed the site's measured rate nor keep hammering a site
+    that is already failing; if the breaker is already open when we get here,
+    the pass does not start at all.
+
+    **Outcome mapping** (the entirety of it — there is no other branch):
+
+    | what the source did                         | what changes                     |
+    |---------------------------------------------|----------------------------------|
+    | HTTP 404/410 (`ListingUnavailableError`)    | `withdrawn` + evidence event     |
+    | connector's `retired_page_signature` matched| `withdrawn` + evidence event     |
+    | real page served and parsed                 | data + presence clocks refreshed |
+    | soft block (`SoftBlockError`, D-047)        | **nothing**                      |
+    | any other error / indeterminate 200         | **nothing**                      |
+
+    The last two rows are the ones the design is really about. A soft block
+    is never "gone" — it is the site declining to answer — and an unparseable
+    or empty 200 is never "gone" either, because that is precisely what a bot
+    wall looks like. In both cases we recorded the attempt and learned
+    nothing, which is an honest state to be in.
+
+    **Mass-withdrawal guard.** Withdrawals are buffered and applied only once
+    every verdict is in, and only if `_mass_withdrawal_alarm` stays silent:
+    fewer than `_VERIFICATION_GONE_ALARM_MIN_WITHDRAWALS` withdrawals (below
+    which nothing else is consulted), a gone fraction strictly below
+    `_VERIFICATION_GONE_ALARM_RATIO`, and — once the source has enough
+    history to have a baseline — a gone fraction no more than
+    `_VERIFICATION_GONE_BASELINE_MARGIN` above the source's own historical
+    one. "All ten 404" is far more likely to be our detail-URL construction
+    having broken than ten simultaneous removals, and the cost of being wrong
+    is asymmetric: a missed withdrawal is invisible, a false one silently
+    deletes a live candidate from every profile feed. When the guard fires
+    nothing is withdrawn and the nominated listings stay active, so they are
+    simply re-nominated on a later run.
+
+    **Budget.** `budget` is the global `etl.stale_verification_budget_per_run`;
+    a connector may lower it further via its own
+    `stale_verification_budget_per_run` class attribute (never raise it — see
+    `Connector.stale_verification_budget_per_run`). Milanuncios uses this:
+    D-017/#179 measured it serving ~5 successful detail fetches before a 60+
+    minute soft block, and a block that long outlives the run and poisons the
+    next hourly `discover()`, so verification must not append 10 more detail
+    fetches to every run there.
+
+    Returns per-source counters for Estado: `nominated`, `verified` (verdicts
+    reached), `gone` (withdrawn), `alive`, `soft_blocked`, `errors`, plus
+    `alarm`/`suppressed_withdrawals` — non-null only when the guard above
+    fired, naming which check tripped and how many withdrawals it withheld.
+    """
+    result = {
+        "nominated": 0,
+        "verified": 0,
+        "gone": 0,
+        "alive": 0,
+        "soft_blocked": 0,
+        "errors": 0,
+        # Set only when the mass-withdrawal guard fired: a short code naming
+        # which check tripped, plus how many withdrawals it suppressed. Stored
+        # on the run row so a SUPPRESSED ACTION is visible — `verified=10,
+        # gone=0` is otherwise byte-identical to "all ten came back alive".
+        "alarm": None,
+        "suppressed_withdrawals": 0,
+    }
+    if not connector.supports_stale_verification:
+        return result
+    # A connector may cap the global budget further, never raise it — so an
+    # operator setting `etl.stale_verification_budget_per_run = 0` still stops
+    # every connector dead (issue #643, PR #685 review M2).
+    connector_cap = getattr(connector, "stale_verification_budget_per_run", None)
+    if connector_cap is not None:
+        budget = min(budget, max(int(connector_cap), 0))
+    if breaker.tripped:
+        # No leftover budget: the connector already spent its error allowance
+        # on real work this run. Verification is the lowest-priority consumer
+        # by design, so it simply does not run — and, crucially, nothing about
+        # the listings it would have asked about changes.
+        logger.info(
+            "Connector %s: skipping stale verification — circuit breaker "
+            "already open after this run's discovery/fetch work",
+            connector.name,
+        )
+        return result
+
+    nominated = _nominate_stale_listings(
+        conn,
+        connector.name,
+        min_age_hours=min_age_hours,
+        budget=budget,
+        accepted_property_ids=accepted_property_ids,
+    )
+    result["nominated"] = len(nominated)
+    if not nominated:
+        return result
+
+    logger.info(
+        "Connector %s: verifying %d listing(s) unseen for >%dh (budget %d) — "
+        "time nominated them, only the source's answer can change them",
+        connector.name,
+        len(nominated),
+        min_age_hours,
+        budget,
+    )
+
+    pending_withdrawals: list[tuple[int, str, str]] = []
+    for listing_id, external_id, url in nominated:
+        if breaker.tripped:
+            logger.warning(
+                "Connector %s: stale verification stopped early — circuit "
+                "breaker opened mid-pass (%d/%d verdicts reached)",
+                connector.name,
+                result["verified"],
+                len(nominated),
+            )
+            break
+        # Recorded BEFORE the request, not after: an attempt that crashes the
+        # process still has to rotate this listing to the back of the queue,
+        # or the same head-of-queue candidates get retried forever.
+        _record_verification_attempt(conn, listing_id)
+        try:
+            outcome = connector.verify_listing(
+                external_id, url, throttle=limiter.acquire
+            )
+        except ListingUnavailableError as exc:
+            # D-049: the unambiguous HTTP-gone statuses. This is the one place
+            # in the codebase where a single 404 is allowed to withdraw a
+            # listing — legitimate here, and only here, because we asked about
+            # THIS listing specifically after it had already gone unobserved
+            # for a week, rather than meeting it in passing during a sweep.
+            conn.rollback()
+            result["verified"] += 1
+            # `record_success`, deliberately — and note this INVERTS what the
+            # fetch loop does with the same exception ~200 lines up in
+            # `run_connector`, which records a FATAL breaker error precisely
+            # so a wholesale 404 break trips the breaker. Both are right for
+            # their context: there, a 404 met in passing is a symptom; here,
+            # we asked a specific question and got a definitive answer, so the
+            # request succeeded whatever the answer was. The cost is that a
+            # fully broken detail path yields a run of "successes" and the
+            # breaker never trips during verification — which is exactly what
+            # `_mass_withdrawal_alarm` is for, and why it is not optional.
+            breaker.record_success()
+            pending_withdrawals.append((listing_id, external_id, str(exc)))
+            continue
+        except SoftBlockError as exc:
+            # D-047: the site declining to answer. Never evidence of absence,
+            # never evidence of presence — no state change of any kind.
+            conn.rollback()
+            result["soft_blocked"] += 1
+            breaker.record_error(soft_block=True)
+            logger.info(
+                "Connector %s: verification of external_id=%s soft-blocked "
+                "(%s) — no evidence, nothing changed",
+                connector.name,
+                external_id,
+                exc,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — any failure means "no evidence"
+            conn.rollback()
+            result["errors"] += 1
+            breaker.record_error(soft_block=False)
+            logger.warning(
+                "Connector %s: verification of external_id=%s failed (%s: %s) "
+                "— no evidence, nothing changed",
+                connector.name,
+                external_id,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+
+        if outcome.state == "gone":
+            result["verified"] += 1
+            breaker.record_success()
+            pending_withdrawals.append((listing_id, external_id, outcome.evidence))
+            continue
+        # Alive. When the connector already produced a canonical listing (it
+        # re-ran its own detail path), persist it in full — the verification
+        # then doubles as a real refresh, which is most of this feature's
+        # value: the backlog self-heals instead of merely being re-clocked.
+        try:
+            if outcome.canonical is not None:
+                _upsert_canonical_listing(conn, outcome.canonical)
+            else:
+                _refresh_verified_alive(conn, listing_id)
+        except Exception:  # a persist failure is not a verdict
+            # The site answered, but we could not record the answer. Counted
+            # as an error rather than a verdict, deliberately: `verified`
+            # feeds the mass-withdrawal guard's denominator, and inflating it
+            # with attempts whose alive-ness never reached the database would
+            # make that guard easier to slip past.
+            conn.rollback()
+            result["errors"] += 1
+            breaker.record_error(soft_block=False)
+            logger.warning(
+                "Connector %s: verification of external_id=%s came back alive "
+                "but persisting it failed — nothing changed",
+                connector.name,
+                external_id,
+                exc_info=True,
+            )
+            continue
+        result["verified"] += 1
+        result["alive"] += 1
+        breaker.record_success()
+
+    gone_verdicts = len(pending_withdrawals)
+    alarm = _mass_withdrawal_alarm(
+        conn, connector.name, gone_verdicts, result["verified"]
+    )
+    if alarm is not None:
+        alarm_code, alarm_prose = alarm
+        result["alarm"] = alarm_code
+        result["suppressed_withdrawals"] = gone_verdicts
+        # Structural break, not a market event. Withdraw nothing.
+        logger.error(
+            "Connector %s: %d/%d verified listings came back gone — %s NO "
+            "listing was withdrawn this run; they stay active and get "
+            "re-nominated next run. Check verify_listing/fetch_detail against "
+            "the live site.",
+            connector.name,
+            gone_verdicts,
+            result["verified"],
+            alarm_prose,
+        )
+        return result
+
+    result["gone"] = _withdraw_verified_gone(conn, connector.name, pending_withdrawals)
+    logger.info(
+        "Connector %s: stale verification finished — %d nominated, %d verified "
+        "(%d retirados con evidencia, %d vivos refrescados), %d sin evidencia "
+        "(%d bloqueos temporales, %d errores)",
+        connector.name,
+        result["nominated"],
+        result["verified"],
+        result["gone"],
+        result["alive"],
+        result["soft_blocked"] + result["errors"],
+        result["soft_blocked"],
+        result["errors"],
+    )
+    return result
+
+
 def _raw_extra_with_quality(canonical: CanonicalListingVersion) -> dict:
     """`canonical.raw_extra` with a fresh `extraction_quality` descriptor merged in.
 
@@ -871,6 +1475,9 @@ def _record_connector_result(
     skipped_scopes: list[dict[str, str]] | None = None,
     failure_classification: str | None = None,
     geography_scope: list[dict] | None = None,
+    verified_count: int = 0,
+    verified_gone_count: int = 0,
+    verification_alarm: str | None = None,
 ) -> None:
     """`failure_classification` (issue #242, D-079) is the typed, queryable
     counterpart to `error_msg`'s prose — one of the taxonomy values in
@@ -889,6 +1496,27 @@ def _record_connector_result(
     *connectors* skipped via `connector_config.enabled = false`. The two
     are skip in different senses at different granularities; see each
     column's comment in etl/schema/init.sql.
+
+    `verified_count`/`verified_gone_count` (issue #643) are the
+    stale-verification pass's outcome for this source: how many overdue
+    listings were actually re-read at the source this run, and how many of
+    those the source positively declared removed (and were therefore marked
+    withdrawn, each citing its evidence). Attempts that produced no evidence —
+    a soft block, a timeout, an indeterminate 200 — are counted in NEITHER:
+    they changed nothing, so reporting them as verifications would overstate
+    what the run actually established. Both are 0 for every connector that
+    does not opt into verification.
+
+    `verification_alarm` (issue #643, PR #685 review L2) is set only when the
+    mass-withdrawal guard SUPPRESSED this run's withdrawals — a short code
+    naming which check tripped and by how much. It exists because a fired
+    guard is otherwise invisible: `verified_count=10, verified_gone_count=0`
+    reads identically whether ten listings came back alive or ten came back
+    gone and were all withheld. Unlike the other health signals on this row it
+    describes an action NOT taken, so it cannot be inferred from the counters.
+    NULL on every run where the guard stayed quiet, keeping
+    `WHERE verification_alarm IS NOT NULL` the "show me the suppressed runs"
+    query.
 
     `skipped_unchanged_count` (issue #435, D-099) is a further, distinct sense:
     listings this run did NOT deep-capture because the connector's list page
@@ -922,8 +1550,10 @@ def _record_connector_result(
                  discovered_count, fetched_count, error_count, error_msg,
                  skipped_count, skipped_unchanged_count, skipped_scopes,
                  failure_classification,
-                 geography_scope, extraction_quality_summary)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 geography_scope, extraction_quality_summary,
+                 verified_count, verified_gone_count, verification_alarm)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s)
             """,
             (
                 run_id,
@@ -943,6 +1573,9 @@ def _record_connector_result(
                 json.dumps(extraction_quality_summary)
                 if extraction_quality_summary
                 else None,
+                verified_count,
+                verified_gone_count,
+                verification_alarm,
             ),
         )
     conn.commit()
@@ -3409,6 +4042,10 @@ def run_all_connectors(
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
     default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
     freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
+    stale_verification_budget_per_run: int = (
+        _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN
+    ),
+    stale_verification_min_age_hours: int = (_DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS),
 ) -> int:
     """Run every registered connector once, recording a connector_runs row.
 
@@ -3428,6 +4065,11 @@ def run_all_connectors(
     ValueError immediately, before creating a connector_runs row — an
     operator typo shouldn't leave a phantom "ran zero connectors" record
     behind.
+
+    `stale_verification_budget_per_run`/`stale_verification_min_age_hours`
+    (issue #643) tune the end-of-connector verification pass — see
+    `verify_stale_listings`. Setting the budget to 0 disables it entirely
+    without touching any connector's opt-in flag.
     """
     if connector_name is not None:
         matching = [c for c in CONNECTORS if c.name == connector_name]
@@ -4269,6 +4911,34 @@ def run_all_connectors(
                 connector.name,
             )
 
+        # Issue #643: the stale-verification pass. Last thing this connector
+        # does, on whatever request budget the real discovery/fetch work left
+        # behind (D-070's posture), through the same limiter/breaker — and a
+        # complete no-op for every connector that hasn't opted in, which is
+        # most of them. It is what gives partial-coverage sources (fotocasa
+        # page-1-only, milanuncios, pisos) a withdrawal path at all: they can
+        # never prove absence by sweeping, but they can ask about one listing
+        # at a time. Never raises into the run: a verification bug must not be
+        # able to fail an ingest that already committed real data.
+        verification = {"verified": 0, "gone": 0, "alarm": None}
+        try:
+            verification = verify_stale_listings(
+                conn,
+                connector,
+                limiter,
+                breaker,
+                budget=stale_verification_budget_per_run,
+                min_age_hours=stale_verification_min_age_hours,
+                accepted_property_ids=accepted_property_ids,
+            )
+        except Exception:  # never fail a run over verification
+            conn.rollback()
+            logger.exception(
+                "Connector %s: stale verification pass raised — skipped this "
+                "run, no listing changed",
+                connector.name,
+            )
+
         # connector_run_results.status CHECK only allows 'ok'/'failed'/
         # 'circuit_open' — there's no 'partial' value for "some scopes
         # failed, others didn't" without a schema migration, which is out
@@ -4406,6 +5076,9 @@ def run_all_connectors(
             skipped_scopes=skipped_scopes,
             failure_classification=failure_classification,
             geography_scope=geography_scope,
+            verified_count=verification["verified"],
+            verified_gone_count=verification["gone"],
+            verification_alarm=verification.get("alarm"),
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
         )
@@ -4732,6 +5405,10 @@ def run_all_connectors_respecting_restart_guard(
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
     default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
     freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
+    stale_verification_budget_per_run: int = (
+        _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN
+    ),
+    stale_verification_min_age_hours: int = (_DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS),
 ) -> int | None:
     """`run_all_connectors()`, unless the restart-burst guard (issue #172)
     says this sweep is too soon after the last completed one.
@@ -4772,6 +5449,8 @@ def run_all_connectors_respecting_restart_guard(
         dedup_max_runtime_seconds=dedup_max_runtime_seconds,
         default_freshness_interval_hours=default_freshness_interval_hours,
         freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
+        stale_verification_budget_per_run=stale_verification_budget_per_run,
+        stale_verification_min_age_hours=stale_verification_min_age_hours,
     )
 
 
@@ -4782,6 +5461,10 @@ def run_scheduler_loop(
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
     default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
     freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
+    stale_verification_budget_per_run: int = (
+        _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN
+    ),
+    stale_verification_min_age_hours: int = (_DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS),
 ) -> None:
     """Run all connectors on a fixed interval, forever. Long-running-container mode.
 
@@ -4850,6 +5533,8 @@ def run_scheduler_loop(
                             dedup_max_runtime_seconds=dedup_max_runtime_seconds,
                             default_freshness_interval_hours=default_freshness_interval_hours,
                             freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
+                            stale_verification_budget_per_run=stale_verification_budget_per_run,
+                            stale_verification_min_age_hours=stale_verification_min_age_hours,
                         )
                     else:
                         # Not the process' first sweep — paced by this same
@@ -4862,6 +5547,8 @@ def run_scheduler_loop(
                             dedup_max_runtime_seconds=dedup_max_runtime_seconds,
                             default_freshness_interval_hours=default_freshness_interval_hours,
                             freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
+                            stale_verification_budget_per_run=stale_verification_budget_per_run,
+                            stale_verification_min_age_hours=stale_verification_min_age_hours,
                         )
                 finally:
                     postgres.release_run_lock(conn)

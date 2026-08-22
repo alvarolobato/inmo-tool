@@ -130,6 +130,7 @@ from etl.connectors.base import (
     SearchUrlGrammar,
     SoftBlockError,
     Throttle,
+    VerificationOutcome,
 )
 from etl.connectors.extraction import first_present, text_to_int
 from etl.connectors.geography import (
@@ -484,6 +485,30 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
+    # Issue #643: opted in. `fetch_detail()` resolves the ad from the trailing
+    # numeric id alone (no discover() stash), and a 200 without
+    # `__INITIAL_PROPS__` raises MilanunciosSoftBlockError /ConnectorError
+    # from `_extract_initial_props` — so a CAPTCHA wall can never be
+    # normalized as a live ad, and can never be read as "gone" either.
+    # Verified live on 2026-08-22 against two of production's oldest-
+    # `last_seen_at` actives: one served the real ad (200, canonical slug),
+    # the other served exactly that "Pardon Our Interruption" wall — the
+    # single best argument for why a soft block must change nothing.
+    supports_stale_verification = True
+
+    # Issue #643 (PR #685 review, M2): 2, not the global 10. This is the
+    # tightest measured detail budget in the repo — D-017/#179 recorded 16 of
+    # 18 circuit-open runs at exactly `discovered=41 fetched=5`, i.e. the site
+    # serves about five successful `fetch_detail`s and then soft-blocks for
+    # 60+ minutes. At the global budget, verification would append up to ten
+    # MORE detail fetches to every hourly run against that wall. D-070's
+    # leftover-budget posture protects this run's real work, but a lockout
+    # that long outlives the run and poisons the next hour's discover(), so
+    # the failure mode here is not a false withdrawal — it is verification
+    # quietly degrading real ingestion. Two per run still drains the backlog,
+    # just slowly, which is the trade this connector has to make.
+    stale_verification_budget_per_run = 2
+
     # Issue #478: an owner-pinned milanuncios search URL is this connector's
     # recall source for a profile. Since Phase 5 (D-101) discover() consumes it
     # (`scope.override_url`) as its entry page. NOTE: this is the SALE connector
@@ -740,6 +765,35 @@ class MilanunciosConnector(Connector):
             source=self.name,
             raw={"url": response.url, "props": props},
         )
+
+    # Issue #643: NO retired-page signature, deliberately. Spiked live on
+    # 2026-08-22: a nonexistent /x/x-<id>.htm answers HTTP 404 (a tiny
+    # redirect-to-home body), which D-049 already turns into
+    # `ListingUnavailableError` — so 404/410 carries the whole signal and no
+    # extra marker is needed. What milanuncios does NOT have is a confirmed
+    # 200-served "anuncio caducado" page: docs/skills/connectors.md has
+    # tracked that gap since issue #66/#179, nobody has captured one, and the
+    # only 200-without-`__INITIAL_PROPS__` page ever captured here is the
+    # GeeTest bot wall. Inventing a signature out of "the props are missing"
+    # would therefore map a rate-throttle straight to `withdrawn`. Left at
+    # the base `None` until a real retired page is captured.
+    #
+    # CONSTRAINT if that day comes (PR #685 review, M3): `fetch_detail()` here
+    # returns `raw={"url", "props"}` and NO `html` key, so a signature added
+    # to this class could never be reached through `verify_via_fetch_detail`,
+    # which reads `raw.raw["html"]`. That helper now raises rather than
+    # silently passing an empty string, so the mistake is loud — but the
+    # actual fix is to also return the page HTML from `fetch_detail()` (or
+    # override `verify_listing()`) at the same time as the signature. Do not
+    # add one without the other.
+
+    def verify_listing(
+        self, external_id: str, url: str | None, throttle: Throttle
+    ) -> VerificationOutcome:
+        # `url` unused: the ad resolves from the numeric id alone, so this is
+        # the ordinary detail fetch and an alive ad is fully refreshed.
+        # Inherited as-is by MilanunciosRentalConnector.
+        return self.verify_via_fetch_detail(external_id, throttle)
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
         props = raw.raw["props"]

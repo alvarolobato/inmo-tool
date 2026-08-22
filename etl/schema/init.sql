@@ -252,6 +252,35 @@ CREATE INDEX IF NOT EXISTS idx_property_features ON property USING GIN (features
 -- this representation still fits before ingesting rental data.
 ALTER TABLE listing ADD COLUMN IF NOT EXISTS operation TEXT NOT NULL DEFAULT 'sale' CHECK (operation IN ('sale', 'rent'));
 
+-- Issue #643 (verificación de desfasados): when the stale-verification pass
+-- last ATTEMPTED to re-read this listing at the source — regardless of what
+-- the attempt concluded. Distinct from every other clock on this table, and
+-- deliberately so:
+--   * last_seen_at      = last confirmed present in a discover() sweep
+--   * last_fetched_at   = last successful fetch_detail()+normalize()
+--   * this column       = last time we ASKED the source about this listing
+-- Written on every attempt, including the ones that proved nothing (a
+-- soft block, a timeout, an indeterminate 200). That is exactly what makes
+-- it useful: nomination orders by COALESCE(this, last_seen_at) ascending, so
+-- a listing whose verification keeps failing rotates to the back of the queue
+-- instead of consuming the whole per-run budget forever and starving every
+-- other candidate — the same fairness argument as D-030's scope rotation.
+-- It is NOT evidence of anything about the listing itself and nothing may
+-- ever derive a status from it.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS last_verification_attempt_at TIMESTAMPTZ;
+
+-- Nomination runs once per connector per run: it filters on (source, status)
+-- plus an age predicate, orders by the rotation clock and takes the first N
+-- rows. The ORDER BY is an EXPRESSION — COALESCE(last_verification_attempt_at,
+-- last_seen_at, first_seen_at) — so the index has to carry that expression to
+-- serve the ordering; a plain trailing-column index only narrows the scan and
+-- still sorts (PR #685 review, L1: the earlier comment here claimed otherwise).
+-- Irrelevant at today's 13k rows either way, and stated so the next person
+-- reading an EXPLAIN isn't misled.
+CREATE INDEX IF NOT EXISTS idx_listing_stale_verification_queue
+    ON listing (source, status,
+                (COALESCE(last_verification_attempt_at, last_seen_at, first_seen_at)));
+
 -- ============================================================
 -- Change tracking (append-only)
 -- ============================================================
@@ -307,6 +336,18 @@ CREATE TABLE IF NOT EXISTS listing_status_event (
 
 CREATE INDEX IF NOT EXISTS idx_listing_status_event_listing_observed
     ON listing_status_event (listing_id, observed_at);
+
+-- Issue #643: WHAT we observed that justified this status transition, in
+-- prose, at the moment we observed it. The design rule the whole withdrawal
+-- family now follows is that a status only ever changes on evidence of
+-- absence — never on elapsed time — so every row that claims a listing is
+-- gone must be able to answer "evidence of what?" without anyone
+-- reconstructing it from logs that have long rotated away. Populated by the
+-- stale-verification pass (e.g. "HTTP 404 en <url>"); NULL on the rows
+-- written by the older paths (_reconcile_missed_discoveries' N-consecutive-
+-- misses reconciliation and the normalize()-reported status changes), whose
+-- evidence is implicit in the mechanism that wrote them.
+ALTER TABLE listing_status_event ADD COLUMN IF NOT EXISTS evidence TEXT;
 
 -- ============================================================
 -- Owner identity (dedup signal input + GDPR-minimized retention)
@@ -1169,6 +1210,37 @@ ALTER TABLE connector_run_results DROP CONSTRAINT IF EXISTS connector_run_result
 ALTER TABLE connector_run_results ADD CONSTRAINT connector_run_results_status_check
     CHECK (status IN ('ok', 'failed', 'circuit_open', 'skipped'));
 ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
+
+-- Issue #643: the stale-verification pass's per-source outcome, so Estado can
+-- show "cuántos anuncios desfasados hemos comprobado y cuántos resultaron
+-- retirados" per source per run without parsing error_msg.
+--   verified_count      = listings actually re-read at the source this run
+--                         (every attempt that produced a verdict, alive or
+--                         gone) — NOT the nominations, and NOT the attempts
+--                         that proved nothing.
+--   verified_gone_count = the subset of those that the source positively
+--                         declared removed and that were therefore marked
+--                         withdrawn, each with its evidence recorded in
+--                         listing_status_event.evidence.
+-- Both stay 0 for every connector that does not opt into verification, which
+-- is most of them, so a nonzero value always means real work happened.
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verified_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verified_gone_count INTEGER NOT NULL DEFAULT 0;
+
+-- Issue #643: set ONLY when the mass-withdrawal guard suppressed this run's
+-- withdrawals, naming which of its checks tripped and by how much (e.g.
+-- 'ratio 8/10 >= 80%', 'baseline 60% vs 0% histórico'). NULL whenever the
+-- guard stayed quiet, so `WHERE verification_alarm IS NOT NULL` is the
+-- "show me the suppressed runs" query.
+--
+-- It needs its own column because every other signal on this row reports an
+-- action TAKEN, and this one reports an action WITHHELD: a guarded run stores
+-- verified_count = 10, verified_gone_count = 0, which is byte-identical to a
+-- run where all ten listings genuinely came back alive. Without this, the one
+-- event an operator most needs to see — "we found ten listings gone and
+-- deliberately withdrew none of them, because it looked like our own bug" —
+-- exists only as a log line that rotates away.
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS verification_alarm TEXT;
 
 -- Issue #143: listings this connector's run left unfetched under the
 -- skip-if-seen policy ("known, still present per discover(), deliberately

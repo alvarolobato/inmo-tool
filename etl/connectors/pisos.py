@@ -87,6 +87,7 @@ from etl.connectors.base import (
     SearchPreview,
     SearchUrlGrammar,
     Throttle,
+    VerificationOutcome,
 )
 from etl.connectors.extraction import underscore_city_slug
 from etl.connectors.geography import (
@@ -240,6 +241,16 @@ class PisosConnector(Connector):
     # Connector.backfills_missing_reference_code's own docstring for what
     # this actually changes in etl.orchestrator._should_skip_fetch.
     backfills_missing_reference_code = True
+
+    # Issue #643: opted in, but ONLY through the `verify_listing()` override
+    # below — never through `verify_via_fetch_detail`. This connector's
+    # `fetch_detail()` reads the per-listing record `discover()` stashed
+    # earlier in the same run and raises `ListingUnavailableError` when the
+    # id is absent from it; during a verification pass that stash is empty,
+    # so reusing it would report every nominated listing as "gone" on no
+    # evidence at all. The override re-requests the listing's own stored URL
+    # instead, which is a real observation of the real page.
+    supports_stale_verification = True
 
     # No native site-filter is live-verified for this connector yet, so none
     # are advertised (an unverified filter that silently no-ops is worse than
@@ -602,6 +613,83 @@ class PisosConnector(Connector):
                 "reference_code": reference_code,
                 "contact_raw": agency_name,
             },
+        )
+
+    # Issue #643: a pisos.com detail page renders its characteristics list as
+    # repeated `div.features__feature` blocks — the very selector
+    # `extract_reference_code`/`extract_agency_name` already depend on
+    # (pisos_mapping.py). Live spike 2026-08-22: a served listing carries 7 of
+    # them, the site's 404 page (`<title>404</title>`) carries none, and the
+    # synthetic detail fixture carries 3. That makes it a usable POSITIVE
+    # "this is a real listing page" marker, which this connector needs and
+    # fotocasa/milanuncios do not: they prove aliveness by parsing the page
+    # into a canonical listing, whereas verification here never reaches
+    # `normalize()` (no search record to normalize from).
+    _ALIVE_MARKER = "features__feature"
+
+    def verify_listing(
+        self, external_id: str, url: str | None, throttle: Throttle
+    ) -> VerificationOutcome:
+        """Re-request this listing's own stored detail URL (issue #643).
+
+        Outcome mapping, all evidence-first:
+
+        * HTTP 404/410 -> `ListingUnavailableError` (D-049). Live-spiked:
+          pisos.com answers a real 404 for a detail path that no longer
+          resolves.
+        * any other transport/HTTP failure -> `ConnectorError`. No evidence,
+          so the orchestrator leaves the listing exactly as it was.
+        * HTTP 200 carrying `_ALIVE_MARKER` -> alive.
+        * HTTP 200 WITHOUT it -> `ConnectorError`, never "gone". A WAF
+          interstitial, a redirect to the search page, or a truncated
+          response all land here, and none of them prove absence (D-047).
+
+        No `canonical` is returned: without `discover()`'s search record
+        there is nothing to normalize, so the orchestrator refreshes the
+        presence timestamps only. That is the self-healing the issue asks
+        for; a full data refresh for this listing still comes from the
+        ordinary discover()+fetch_detail path.
+        """
+        if not url:
+            raise ConnectorError(
+                f"pisos verify_listing: external_id={external_id} has no stored "
+                "URL — cannot re-read the listing, so nothing is proven"
+            )
+        throttle()
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": _USER_AGENT},
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            gone_status = getattr(getattr(exc, "response", None), "status_code", None)
+            if gone_status in LISTING_GONE_HTTP_STATUSES:
+                raise ListingUnavailableError(
+                    f"pisos verify_listing: external_id={external_id} returned "
+                    f"HTTP {gone_status} en {url} -- el portal declara que la "
+                    "ficha ya no existe"
+                ) from exc
+            raise ConnectorError(
+                f"pisos verify_listing: request failed for external_id="
+                f"{external_id}: {exc}"
+            ) from exc
+        html = response.text
+        signature = self.retired_page_signature(html, response.url)
+        if signature is not None:
+            return VerificationOutcome("gone", signature)
+        if self._ALIVE_MARKER in html:
+            return VerificationOutcome(
+                "alive",
+                f"HTTP 200 con ficha real (marcador '{self._ALIVE_MARKER}') "
+                f"en {response.url or url}",
+            )
+        raise ConnectorError(
+            f"pisos verify_listing: external_id={external_id} returned HTTP 200 "
+            f"without the '{self._ALIVE_MARKER}' listing-page marker at "
+            f"{response.url or url} -- indeterminate (block, redirect or "
+            "truncated response), NOT evidence of removal"
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
