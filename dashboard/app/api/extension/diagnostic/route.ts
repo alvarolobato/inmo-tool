@@ -10,9 +10,21 @@
  *
  * Accepts {url, html, title?, diagnostic?, network?} from browser-extension/
  * (popup.js's "Forzar captura + diagnóstico" button, content-script.js's
- * CAPTURE_DIAGNOSTIC handler, and — when a network-capture session was armed
- * — background.js's buffered, already-redacted entries). `diagnostic` and
+ * CAPTURE_DIAGNOSTIC handler, background.js's auto-driver `spike` unit —
+ * issue #705 — and, when a network-capture session was armed,
+ * background.js's buffered, already-redacted entries). `diagnostic` and
  * `network` are stored as opaque JSONB; this route does not interpret them.
+ *
+ * Issue #705 adds ONE step after the insert: close the `capture_spike_request`
+ * row this page was queued for. Primarily BY ID — the driver echoes back the
+ * `spikeRequestId` the planner handed it, so the row closes even when the
+ * candidate site redirected the URL somewhere the canonical match key no
+ * longer recognises (review F1: `content-script.js` reports
+ * `window.location.href`, the URL AFTER redirects, and redirect-heavy servicer
+ * portals are exactly the target population). The match-key correlation
+ * remains as the fallback for the #675 manual button, which has no id to
+ * echo. Still no ingest: `capture_spike_request` is read by nothing on the
+ * listing path either.
  *
  * Admin-gated exactly like /api/extension/capture: gate-by-default in
  * middleware AND re-checked in-route (defense in depth).
@@ -26,6 +38,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripNulBytes } from "@/lib/strip-nul-bytes";
 import { insertDiagnostic } from "@/lib/db/extension-diagnostics";
+import { correlateSpikeDiagnostic, markSpikeCaptured } from "@/lib/db/spike-queue";
+import { worklistMatchKey } from "@/lib/worklist";
 import type { DiagnosticDetectionBlock, DiagnosticNetworkCapture } from "@/lib/db/extension-diagnostics";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
@@ -52,6 +66,11 @@ interface DiagnosticBody {
   title?: string;
   diagnostic?: DiagnosticDetectionBlock | null;
   network?: DiagnosticNetworkCapture | null;
+  /**
+   * The `capture_spike_request.id` the auto-planner handed this driver for
+   * this page (issue #705). Absent for every other caller of this route.
+   */
+  spikeRequestId?: number | null;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -71,6 +90,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { url, html, title, diagnostic, network } = body;
+  // A non-integer/absent id simply means "no queue row to close" — never a 400:
+  // the page is the irreplaceable part and must be stored regardless.
+  const spikeId =
+    typeof body.spikeRequestId === "number" && Number.isInteger(body.spikeRequestId) && body.spikeRequestId > 0
+      ? body.spikeRequestId
+      : null;
   if (!url || typeof url !== "string") {
     return NextResponse.json(
       formatApiError("Falta el campo 'url'.", "VALIDATION", undefined, requestId),
@@ -133,7 +158,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       detection: diagnostic ?? null,
       network: network ?? null,
     });
-    return NextResponse.json({ success: true, id }, { headers: { "Cache-Control": "no-store" } });
+    // Prospective-site queue closure (issue #705). BY ID when the driver was
+    // handed one — the only form that survives a redirect — and by match key
+    // only as the fallback for the #675 manual button, which has no id.
+    // Best-effort by contract either way: a failure here must never fail the
+    // POST, because the page is already stored and that is the part that
+    // cannot be reconstructed.
+    let spikeRequestId: number | null = null;
+    try {
+      spikeRequestId = spikeId
+        ? await markSpikeCaptured(spikeId, id)
+        : await correlateSpikeDiagnostic(worklistMatchKey(url), id);
+    } catch (err) {
+      console.error(`[${requestId}] No se pudo correlacionar el diagnóstico con la cola de evaluación:`, err);
+    }
+    return NextResponse.json(
+      { success: true, id, spikeRequestId },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (err) {
     console.error(`[${requestId}] Error al guardar el diagnóstico de la extensión:`, err);
     return NextResponse.json(

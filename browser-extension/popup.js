@@ -985,6 +985,12 @@ function renderAutoStatus(auto) {
     if (auto.status === 'harvesting' && auto.harvestTask && auto.harvestTask.portal) {
       phase = `descubriendo ${auto.harvestTask.portal}`;
     }
+    // Issue #705: a prospective-site unit preempts the listing drain, so say so
+    // — otherwise "Auto activo · N pendientes" while nothing drains reads as a
+    // stall rather than as the operator's own queued spike being served.
+    if (auto.spikeUnit === true) {
+      phase = 'sitios en evaluación';
+    }
     const batches = auto.batchesDone || 0;
     const pending =
       typeof auto.totalPending === 'number' ? auto.totalPending : '—';
@@ -1392,6 +1398,73 @@ $('#diagnostic-btn').addEventListener('click', async () => {
   }
 });
 
+/**
+ * "Sitios en evaluación" host-permission prompt (issue #705).
+ *
+ * manifest.json pre-declares only localhost + the four capture portals; a
+ * candidate site is covered exclusively by `optional_host_permissions`
+ * (http(s)://*​/*), and Chrome grants those only from a user gesture on an
+ * extension page. The service worker can therefore only report which pending
+ * origins still lack a grant (GET_SPIKE_PERMISSIONS) — the asking happens here.
+ *
+ * Until an origin is granted the auto-driver simply skips its URLs; they stay
+ * `pending` and the dashboard shows them as waiting on permission. Nothing is
+ * ever captured from a site the operator did not explicitly allow.
+ */
+async function refreshSpikePermissionButton() {
+  const btn = $('#spike-permission-btn');
+  if (!btn) return;
+  let origins = [];
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_SPIKE_PERMISSIONS' });
+    origins = (res && Array.isArray(res.origins)) ? res.origins : [];
+  } catch {
+    origins = [];
+  }
+  if (origins.length === 0) {
+    btn.classList.add('hidden');
+    btn.dataset.origins = '';
+    return;
+  }
+  btn.textContent = `Permitir sitios en evaluación (${origins.length})`;
+  btn.dataset.origins = JSON.stringify(origins);
+  btn.classList.remove('hidden');
+}
+
+const spikePermBtn = $('#spike-permission-btn');
+if (spikePermBtn) {
+  spikePermBtn.addEventListener('click', async () => {
+    let origins;
+    try {
+      origins = JSON.parse(spikePermBtn.dataset.origins || '[]');
+    } catch {
+      origins = [];
+    }
+    if (origins.length === 0) return;
+    spikePermBtn.disabled = true;
+    try {
+      // Must stay INSIDE the click handler's synchronous gesture window — an
+      // awaited round trip before this call loses user activation and Chrome
+      // rejects the request silently (the same trap armNetworkRecording
+      // documents on the worker side).
+      const granted = await chrome.permissions.request({
+        origins: origins.map((o) => o + '/*'),
+      });
+      setDiagnosticStatus(
+        granted
+          ? 'Permiso concedido — la captura automática ya puede abrir esas páginas ✓'
+          : 'Permiso denegado — esas páginas se quedan en cola',
+        granted ? 'success' : 'error',
+      );
+    } catch (err) {
+      setDiagnosticStatus(err.message || 'No se pudo pedir el permiso.', 'error');
+    } finally {
+      spikePermBtn.disabled = false;
+      await refreshSpikePermissionButton();
+    }
+  });
+}
+
 // ─── Opt-in network capture: "Grabar red y recargar" (issues #671, #684) ──
 //
 // A DOM snapshot cannot contain data that arrives by XHR after render — a
@@ -1564,6 +1637,7 @@ $('#netrec-stop-btn').addEventListener('click', async () => {
 refreshNetworkRecordingState();
 
 init();
+refreshSpikePermissionButton();
 
 // Publish for the unit tests (Node/vitest) — same pattern as
 // browser-extension/detect.js and browser-extension/batch.js. `module` is
@@ -1575,6 +1649,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     renderAutoArmedStatus,
     renderAutoStatus,
+    refreshSpikePermissionButton,
     formatClockTime,
     formatElapsed,
     blockSignatureLabelEs,

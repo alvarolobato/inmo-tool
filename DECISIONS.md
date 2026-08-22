@@ -129,6 +129,7 @@
 | [D-160](docs/decisions/D-160-challenge-page-is-a-soft-block.md) | An anti-bot challenge is a THIRD outcome ranked above withdrawal and failure: halt the batch, write nothing, leave the worklist row pending. Two accent-folded phrases from the shared table; never per-visit data. |
 | [D-164](docs/decisions/D-164-network-capture-armed-lifecycle.md) | Teardown unregisters AND messages the tab to uninstall the injected wrapper; durable state, not a Map; persistAcrossSessions:false, sweep, onRemoved, 5-min expiry. Bodies unsanitised. |
 | [D-165](docs/decisions/D-165-hipoges-render-readiness-and-cdn-harvest.md) | Hipoges detail URLs come from the photo CDN ref, never `a[href]` — its cards are not links. Listing readiness is a COMPLETE harvest, never a selector or a bare settle. |
+| [D-167](docs/decisions/D-167-prospective-site-capture-queue.md) | Prospective-site captures live in `capture_spike_request` (never `failed`), land in `extension_diagnostic`, advance server-side on delivery, refuse connector/local/private hosts. |
 
 ## Product / candidate feed
 

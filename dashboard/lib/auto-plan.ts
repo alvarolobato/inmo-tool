@@ -7,7 +7,19 @@
  * candidates from the profiles' tasks, the drain URL selection) and calls
  * {@link planAutoUnit}; the extension executes the returned unit.
  *
- * The three units, in priority order:
+ * The four units, in priority order:
+ *   0. `spike` — prospective-site pages the operator queued for a feasibility
+ *      spike (issue #705). FIRST because they are a handful of URLs added
+ *      seconds ago by hand and the operator is waiting on them. The stall it
+ *      can impose on the real listing drain is bounded and self-clearing, but
+ *      state the bound honestly: with a full queue of pages that never render,
+ *      ceil(MAX_PENDING_SPIKE_REQUESTS / SPIKE_UNIT_LIMIT) × MAX_SPIKE_ATTEMPTS
+ *      = ceil(50/5) × 3 = **30 ticks ≈ 30 minutes** of no listing drain, and
+ *      longer if the pages do render. It self-clears because the server charges
+ *      an attempt when it HANDS a row out, not when the driver reports back.
+ *      It touches no `capture_worklist` row and never passes through
+ *      `selectNextPendingUrls`, so D-156's `requeue_rank` ordering and the
+ *      due-first ranking below are unaffected.
  *   1. `harvest` — open the most-DUE (profile × connector) search task, enumerate
  *      every results page, seed the discovered detail URLs, capture them, and
  *      record the task run so the staleness ledger advances. This is how NEW
@@ -48,12 +60,31 @@ export interface HarvestCandidate {
 
 /** The single unit the extension should execute next. */
 export type AutoPlanUnit =
+  | { kind: "spike"; items: SpikeUnitItem[] }
   | {
       kind: "harvest";
       task: { profileId: number; taskId: string; portal: string; url: string };
     }
   | { kind: "drain"; urls: string[] }
   | { kind: "idle"; retryAfterSec: number };
+
+/**
+ * One prospective-site page to capture into the DIAGNOSTIC channel (#705).
+ *
+ * The `id` rides along and comes STRAIGHT BACK on the diagnostic POST. That
+ * round trip, not a URL-derived match key, is what closes the queue row: the
+ * extension reports `window.location.href`, i.e. the URL after redirects, so
+ * any locale prefix / canonical slug / consent-wall bounce would otherwise
+ * correlate to nothing and leave the row `pending` for the planner to hand out
+ * again on the next tick, forever (issue #705 review F1).
+ *
+ * Handing the item out has ALREADY charged it one of MAX_SPIKE_ATTEMPTS
+ * server-side, so the driver owes no "it didn't work" report at all.
+ */
+export interface SpikeUnitItem {
+  id: number;
+  url: string;
+}
 
 /** Timestamp for oldest-first ordering; never-run (null) is the most urgent. */
 function tsOf(lastRunAt: string | null): number {
@@ -100,16 +131,28 @@ export function selectHarvestCandidate(
 }
 
 /**
- * Build the single next auto unit: harvest a due search task if one exists,
- * else drain the already-discovered pending detail URLs, else idle. Pure — the
- * caller has already computed the candidates + the drain URL selection.
+ * Build the single next auto unit: capture any queued prospective-site pages
+ * first (#705), else harvest a due search task, else drain the
+ * already-discovered pending detail URLs, else idle. Pure — the caller has
+ * already computed the candidates, the drain URL selection and the (capped)
+ * spike slice.
+ *
+ * `spikeItems` is capped by the CALLER (`SPIKE_UNIT_LIMIT`), like `drainUrls`
+ * is capped by `DRAIN_LIMIT` — this function only orders, it never slices to a
+ * policy limit of its own. The caller has also already excluded any row the
+ * driver has no host permission for, which is why an unpermitted queue cannot
+ * hold the drain here.
  */
 export function planAutoUnit(
   candidates: readonly HarvestCandidate[],
   drainUrls: readonly string[],
   retryAfterSec: number,
   force = false,
+  spikeItems: readonly SpikeUnitItem[] = [],
 ): AutoPlanUnit {
+  if (spikeItems.length > 0) {
+    return { kind: "spike", items: spikeItems.slice() };
+  }
   const harvest = selectHarvestCandidate(candidates, force);
   if (harvest) {
     return {

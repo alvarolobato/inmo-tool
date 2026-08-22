@@ -16,16 +16,19 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/db/auto-plan-candidates", () => ({ getHarvestCandidates: vi.fn() }));
 vi.mock("@/lib/db/worklist", () => ({ listPendingWorklist: vi.fn() }));
 vi.mock("@/lib/db/worklist-priority", () => ({ getPortalDuePriority: vi.fn() }));
+vi.mock("@/lib/db/spike-queue", () => ({ claimSpikeRequestsForDelivery: vi.fn() }));
 
 import { GET } from "../route";
 import * as candidatesDb from "@/lib/db/auto-plan-candidates";
 import * as worklistDb from "@/lib/db/worklist";
 import * as priorityDb from "@/lib/db/worklist-priority";
+import * as spikeDb from "@/lib/db/spike-queue";
 import type { HarvestCandidate } from "@/lib/auto-plan";
 
 const mockCandidates = vi.mocked(candidatesDb.getHarvestCandidates);
 const mockPending = vi.mocked(worklistDb.listPendingWorklist);
 const mockPriority = vi.mocked(priorityDb.getPortalDuePriority);
+const mockClaimSpike = vi.mocked(spikeDb.claimSpikeRequestsForDelivery);
 
 function dueCandidate(over: Partial<HarvestCandidate> = {}): HarvestCandidate {
   return {
@@ -49,6 +52,7 @@ beforeEach(() => {
   mockCandidates.mockResolvedValue([]);
   mockPending.mockResolvedValue([]);
   mockPriority.mockResolvedValue({});
+  mockClaimSpike.mockResolvedValue([]);
 });
 
 describe("GET /api/etl/auto-plan", () => {
@@ -126,5 +130,43 @@ describe("GET /api/etl/auto-plan", () => {
     mockPending.mockRejectedValue(new Error("db down"));
     const res = await GET(req());
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Prospective-site unit (issue #705, review F1/F2/F5) ────────────────────
+describe("GET /api/etl/auto-plan — the spike unit is CLAIMED, not merely listed", () => {
+  it("passes the driver's granted origins through, normalised and port-stripped", async () => {
+    mockClaimSpike.mockResolvedValue([{ id: 9, url: "https://www.ejemplo.test/inmueble/7" }]);
+    const res = await GET(
+      req("?spikeOrigins=https://www.ejemplo.test:8443/,HTTPS://OTRO.test,not a url"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      kind: "spike",
+      items: [{ id: 9, url: "https://www.ejemplo.test/inmueble/7" }],
+    });
+    expect(mockClaimSpike).toHaveBeenCalledWith(5, [
+      "https://www.ejemplo.test",
+      "https://otro.test",
+    ]);
+  });
+
+  it("claims nothing when the driver reports no granted origins — an unpermitted queue cannot stall the drain", async () => {
+    // Review F2/F4: a row whose origin has no host permission must not be
+    // handed out (it would be charged an attempt for the operator's slowness),
+    // and the absence of deliverable spike work must fall straight through to
+    // the real listing drain rather than replanning an empty unit forever.
+    mockPending.mockResolvedValue([
+      {
+        url: "https://www.idealista.com/inmueble/1/",
+        portal: "idealista",
+        createdAt: "2026-08-01T00:00:00Z",
+      },
+    ] as unknown as Awaited<ReturnType<typeof worklistDb.listPendingWorklist>>);
+    mockPriority.mockResolvedValue({ idealista: 0 });
+    const res = await GET(req());
+    expect(mockClaimSpike).toHaveBeenCalledWith(5, []);
+    const body = await res.json();
+    expect(body.kind).toBe("drain");
   });
 });

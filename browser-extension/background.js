@@ -442,6 +442,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
 
+  // Issue #705: which pending prospective-site origins still lack a host
+  // permission. Only the POPUP can request one (Chrome needs a user gesture on
+  // an extension page), so the worker can only report what to ask for.
+  if (msg.type === 'GET_SPIKE_PERMISSIONS') {
+    spikeOriginsNeedingPermission()
+      .then((origins) => sendResponse({ origins }))
+      .catch(() => sendResponse({ origins: [] }));
+    return true; // async
+  }
+
   if (msg.type === 'GET_NETWORK_RECORDING_STATE') {
     const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
     getNetworkRecordingState(tabId)
@@ -2348,12 +2358,20 @@ async function isBatchActive() {
  * `force` (issue #434 "Forzar"): `force=1` ignores staleness (round-robin every
  * task; drain returns the full pending set). Returns the parsed unit; throws on
  * a transport/HTTP error so the caller can back off one timeout.
+ *
+ * `spikeOrigins` (issue #705): the origins we already hold a host permission
+ * for. The server only delivers — and only charges an attempt to — spike rows
+ * on one of them, so an origin the operator hasn't granted yet costs the
+ * listing drain nothing and keeps its grant prompt.
  */
-async function fetchAutoPlan(portal, force) {
+async function fetchAutoPlan(portal, force, spikeOrigins) {
   const { apiUrl, apiKey } = await getApiConfig();
   const params = new URLSearchParams();
   if (portal) params.set('portal', portal);
   if (force) params.set('force', '1');
+  if (Array.isArray(spikeOrigins) && spikeOrigins.length > 0) {
+    params.set('spikeOrigins', spikeOrigins.join(','));
+  }
   const qs = params.toString();
   const response = await fetch(
     `${apiUrl}/api/etl/auto-plan${qs ? `?${qs}` : ''}`,
@@ -2467,6 +2485,9 @@ async function getAutoProgress() {
     // The harvest unit in flight (issue #516) so the popup can label
     // "descubriendo <portal>" vs a plain drain batch.
     harvestTask: auto.harvestTask || null,
+    // Issue #705: a prospective-site unit in flight, so the status line can say
+    // WHY Auto isn't draining the listing queue right now.
+    spikeUnit: auto.spikeUnit === true,
     // issue #587: when the last unit ran / when the next poll is due, so the
     // popup can show "Auto: ON — próxima comprobación HH:MM" / "última tanda
     // hace X" instead of a bare toggle a dead scheduler is indistinguishable
@@ -2591,10 +2612,41 @@ async function runAutoBatch() {
 
   let plan;
   try {
-    plan = await fetchAutoPlan(auto.portal, auto.force === true);
+    plan = await fetchAutoPlan(
+      auto.portal,
+      auto.force === true,
+      // Issue #705: tell the planner which candidate-site origins this browser
+      // can actually open, so it never hands out (and charges an attempt to) a
+      // row that is only waiting on a Chrome permission the popup must ask for.
+      await grantedSpikeOrigins(),
+    );
   } catch {
     // Backend hiccup: back off one timeout and try again (Auto stays ON).
     await deferAutoTick(auto, auto.timeoutSec);
+    return;
+  }
+
+  // Prospective-site unit (issue #705) — planned FIRST by the server because
+  // the operator queued these by hand seconds ago. Capped server-side
+  // (SPIKE_UNIT_LIMIT), so it can never hold the real listing drain for more
+  // than a couple of ticks. It touches no batch state and no worklist row, so
+  // it needs none of the claim/eviction machinery the other two units carry.
+  if (plan && plan.kind === 'spike' && Array.isArray(plan.items) && plan.items.length > 0) {
+    // `totalPending` is deliberately NOT written here (issue #705 review F7):
+    // it means "listings still queued for the drain", which a spike unit does
+    // not change. Overwriting it made the popup read "Auto activo · 2
+    // pendientes" while ~1,700 listings were in fact waiting.
+    await setAutoRunState({
+      status: InmoBatch.AUTO_STATUS.RUNNING,
+      harvestTask: null,
+      spikeUnit: true,
+    });
+    try {
+      await runAutoSpike(plan.items);
+    } finally {
+      await setAutoRunState({ spikeUnit: false });
+    }
+    await onAutoBatchComplete();
     return;
   }
 
@@ -3457,18 +3509,245 @@ expireStaleNetworkRecordings().catch(() => {});
  * is null when no recording was armed for this tab's session, or
  * `{entries, droppedCount}` (already redacted/capped) otherwise.
  */
-async function sendDiagnostic({ url, html, title, diagnostic, network }) {
+async function sendDiagnostic({ url, html, title, diagnostic, network, spikeRequestId }) {
   const { apiUrl, apiKey } = await getApiConfig();
   const response = await fetch(`${apiUrl}/api/extension/diagnostic`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
-    body: JSON.stringify({ url, html, title, diagnostic, network }),
+    // `spikeRequestId` (issue #705): the queue row this page was requested for,
+    // echoed straight back so the server closes it BY ID. The URL cannot do
+    // that job — `res.url` is window.location.href, i.e. after redirects, and
+    // the server's correlation key is host+path.
+    body: JSON.stringify({ url, html, title, diagnostic, network, spikeRequestId }),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.error?.message || `API error: ${response.status}`);
   }
   return response.json();
+}
+
+// ═══ Prospective-site capture ("sitios en evaluación", issue #705) ═════════
+//
+// The queue half of the owner's ask: while Auto is already polling, hand the
+// extension pages from a site inmo-tool does NOT support yet, so a connector
+// author gets a real rendered sample. NOTHING here fetches the candidate site
+// — a tab is opened in the operator's own browser and whatever it renders is
+// read out of the DOM, exactly like the #675 "Forzar captura + diagnóstico"
+// button. That is what makes this path usable on the WAF-protected sites we
+// have deliberately refused to build against (D-026/D-027/D-033).
+//
+// The page goes to POST /api/extension/diagnostic, never
+// /api/extension/capture: there is no connector, so nothing could normalise
+// it, and it must never become a `listing` or an ingestion failure.
+
+/** Origin (scheme://host[:port]) of `url`, or null when it doesn't parse. */
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is the extension allowed to inject into `origin`?
+ *
+ * `manifest.json` pre-declares only localhost + the four capture portals, so a
+ * candidate site is covered exclusively by `optional_host_permissions`
+ * (`http(s)://*​/*`) — which Chrome grants only from a real user gesture on an
+ * extension PAGE. The service worker has no user-activation signal (the same
+ * constraint `armNetworkRecording` documents), so it can only ever CHECK here;
+ * the popup's "Permitir sitios en evaluación" button does the asking.
+ */
+async function hasSpikePermission(origin) {
+  if (!origin) return false;
+  try {
+    return await chrome.permissions.contains({ origins: [origin + '/*'] });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The concrete origins this extension already holds a host permission for,
+ * normalised to `scheme://hostname` (a Chrome match pattern carries no port).
+ *
+ * Sent to GET /api/etl/auto-plan so the SERVER only ever hands out spike rows
+ * the driver can actually open. That ordering matters (issue #705 review F2):
+ * the planner charges an attempt when it delivers a row, so a row whose origin
+ * is still ungranted must never be delivered — otherwise three 60 s ticks turn
+ * a whole batch into `unreachable` for the sole reason that the operator
+ * hadn't clicked the popup yet, and `pendingOrigins` (hence the grant button)
+ * would vanish along with it.
+ *
+ * Wildcard-host patterns (`*://*.idealista.com/*`, `https://*​/*`) are dropped:
+ * they can't be compared to a stored origin, and a host with a connector can
+ * never be in this queue anyway. Returns [] on any failure — the server then
+ * delivers no spike work at all, which is the safe direction: Auto falls
+ * straight through to the listing drain.
+ */
+async function grantedSpikeOrigins() {
+  let all;
+  try {
+    all = await chrome.permissions.getAll();
+  } catch {
+    return [];
+  }
+  const origins = [];
+  for (const pattern of (all && all.origins) || []) {
+    const m = /^([a-z]+):\/\/([^/*]+)\/?/i.exec(String(pattern));
+    if (!m) continue;
+    const scheme = m[1].toLowerCase();
+    const host = m[2].toLowerCase().replace(/:\d+$/, '');
+    if (scheme !== 'http' && scheme !== 'https') continue;
+    if (!host || host.includes('*')) continue;
+    const origin = `${scheme}://${host}`;
+    if (!origins.includes(origin)) origins.push(origin);
+  }
+  return origins;
+}
+
+/** The queue's current state, for the popup's permission prompt. */
+async function fetchSpikeQueue() {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(`${apiUrl}/api/etl/spike-queue`, {
+    headers: { 'x-admin-key': apiKey },
+  });
+  if (!response.ok) throw new Error(`spike queue: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Which pending spike origins still lack a host permission. Drives the popup's
+ * prompt: it appears only when there is something to grant, and disappears
+ * once granted, so it is never a permanent nag.
+ */
+async function spikeOriginsNeedingPermission() {
+  let data;
+  try {
+    data = await fetchSpikeQueue();
+  } catch {
+    return [];
+  }
+  const origins = Array.isArray(data.pendingOrigins) ? data.pendingOrigins : [];
+  const needed = [];
+  for (const origin of origins) {
+    if (!(await hasSpikePermission(origin))) needed.push(origin);
+  }
+  return needed;
+}
+
+/**
+ * Open ONE prospective-site URL, read the rendered page, send it to the
+ * diagnostic channel, close the tab.
+ *
+ * Returns a REASON, not a boolean (issue #705 review F2): `'sent'`,
+ * `'no-permission'` (Chrome won't let us inject into this origin) or
+ * `'no-page'` (we opened it and nothing usable came back). Collapsing the
+ * first two into one `false` is what let "the operator hasn't clicked the
+ * popup yet" be recorded as a finding about the candidate site. Nothing here
+ * writes the queue any more — the attempt was charged when the server handed
+ * the item out — but the distinction is the contract this function owes its
+ * caller and its tests.
+ *
+ * Tab lifecycle mirrors `captureOnePage`/`renderAndHarvest`: created ACTIVE so
+ * Chrome doesn't throttle the render (D-043's reasoning is unchanged by the
+ * host being unknown), closed unconditionally in the `finally`, and registered
+ * in `batchTabIds` so a worker eviction still cleans it up.
+ *
+ * Readiness is deliberately NOT `isRenderReady`: that consults the portal's
+ * `readySelectors`, and a candidate site has no portal entry, so it could only
+ * ever fall through to the generic heuristic. Waiting for the load event plus
+ * one jittered dwell is both honest about what we know and enough for the job
+ * — a half-rendered page is still a useful diagnostic, and "this site renders
+ * nothing without further interaction" is itself the answer a spike wants.
+ */
+async function captureSpikePage(url, spikeRequestId) {
+  const origin = originOf(url);
+  // Re-checked even though the server only delivers granted origins: a grant
+  // can be revoked between the plan and the open, and injecting without one
+  // would throw rather than skip.
+  if (!(await hasSpikePermission(origin))) return 'no-permission';
+
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url, active: true });
+  } catch {
+    return 'no-page';
+  }
+  batchTabIds.add(tab.id);
+  await persistBatchTabs();
+  try {
+    if (!(await waitTabComplete(tab.id, BATCH_CAPTURE_TIMEOUT_MS))) return 'no-page';
+    // One dwell for late client-side rendering, jittered like every other
+    // page-to-page pause in this file (WAF-safe pacing, D-043) even though
+    // nothing here is a request to the site.
+    const cfg = await getBatchConfig();
+    await sleep(InmoBatch.jitterDelay(cfg.paceBaseMs, cfg.paceSpreadMs));
+
+    // Same on-demand injection the popup's force-diagnostic button uses — the
+    // manifest's static content_scripts never match a candidate site's host.
+    let res;
+    try {
+      res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+    } catch {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['detect.js', 'diagnostic.js', 'content-script.js'],
+      });
+      res = await chrome.tabs.sendMessage(tab.id, { type: 'CAPTURE_DIAGNOSTIC' });
+    }
+    if (!res || !res.html) return 'no-page';
+
+    await sendDiagnostic({
+      // res.url is window.location.href — the URL AFTER any redirect. Stored
+      // as-is (that IS the page we captured); the queue row is closed by
+      // `spikeRequestId`, which no redirect can move.
+      url: res.url || url,
+      html: res.html,
+      title: res.title,
+      diagnostic: res.diagnostic,
+      network: null,
+      spikeRequestId: typeof spikeRequestId === 'number' ? spikeRequestId : null,
+    });
+    return 'sent';
+  } catch {
+    return 'no-page';
+  } finally {
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch {
+      /* tab already closed */
+    }
+    batchTabIds.delete(tab.id);
+    await persistBatchTabs();
+  }
+}
+
+/**
+ * Run one `spike` auto unit: capture each queued page in turn, paced.
+ *
+ * Strictly sequential — no concurrency knob. The unit is at most a handful of
+ * pages from a site we know nothing about; opening several of its tabs at once
+ * is neither needed nor polite.
+ *
+ * **This function writes the queue exactly once per item, and only on success**
+ * — via the `spikeRequestId` it hands to `sendDiagnostic`, which the diagnostic
+ * route turns into "row closed, by id". There is no failure report and no
+ * attempt counter here on purpose (issue #705 review F1/F5): the server already
+ * charged an attempt when it delivered the item, so a driver that crashes,
+ * loses its key or gets a 500 on every write cannot leave a row at
+ * `attempts = 0` for the planner to hand back on every tick forever while the
+ * ~1,700-row listing drain waits behind it.
+ */
+async function runAutoSpike(items) {
+  const cfg = await getBatchConfig();
+  for (const item of items) {
+    if (!item || typeof item.url !== 'string') continue;
+    await captureSpikePage(item.url, item.id);
+    await sleep(InmoBatch.jitterDelay(cfg.paceBaseMs, cfg.paceSpreadMs));
+  }
 }
 
 // ═══ CommonJS export for tests (issue #554 review N8) ══════════════════════
@@ -3526,6 +3805,12 @@ if (typeof module !== 'undefined' && module.exports) {
     isPortalBlocked,
     activeBlockSummary,
     enumerationStopped,
+    // Prospective-site capture (issue #705)
+    runAutoSpike,
+    captureSpikePage,
+    hasSpikePermission,
+    spikeOriginsNeedingPermission,
+    grantedSpikeOrigins,
     runEnumerationThenCapture,
     runBatchStateExclusive,
     // Diagnostics / network capture (issues #671, #684)

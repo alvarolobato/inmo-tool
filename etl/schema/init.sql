@@ -3532,6 +3532,113 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Prospective-site capture queue (issue #705) — "sitios en evaluación".
+--
+-- The queue half of the owner's ask: while the extension's auto-driver is
+-- already polling for work, be able to hand it a page from a site we do NOT
+-- yet support, so a connector author gets a real rendered sample without a
+-- single automated request reaching that site. The supported-portal half of
+-- the same ask is `capture_worklist` + /api/etl/auto-plan's `drain` unit and
+-- already worked; this table is the missing half.
+--
+-- WHY ITS OWN TABLE AND NOT `capture_worklist` (D-167). D-156's "never a
+-- parallel queue" rule is about RE-capture, which is the same work on the
+-- same rows to the same destination — a second queue there would be pure
+-- duplication, and it still stands. A spike request is different work: no
+-- connector claims the host, nothing can normalise the page, and the bytes
+-- land in `extension_diagnostic`, not in a `listing`. `capture_worklist` is
+-- load-bearing for the ingestion ledger (roll-ups, the auto-driver's due
+-- ranking, D-156's requeue cohorts, /etl/salud, the boot-time
+-- `source_portal NOT IN (...)` cleanup); carrying spike rows there would mean
+-- adding a `kind = 'listing'` filter to every one of those, and ONE missed
+-- filter silently corrupts the ledger or reorders the owner's real drain. A
+-- table nothing else queries cannot do that. It is also why there is no FK
+-- and no trigger from here into any ingest path.
+--
+-- WHERE THE HTML GOES: `extension_diagnostic` (issue #671/#675, D-153) —
+-- reused deliberately, never a second store of scraped third-party pages.
+-- That table already IS "an arbitrary page from a site the connectors can't
+-- read, kept whole so a human can look at it": read by nothing on the ingest
+-- path, browsable at /admin/diagnostics, downloadable only as
+-- application/octet-stream + nosniff, and bounded by
+-- purge_extension_diagnostics(). Issue #698 is the counter-example this
+-- avoids (extension_capture.html on failed rows, unbounded).
+--
+-- NO 'failed' STATUS, DELIBERATELY. A page captured from a site we do not
+-- support is a clean outcome, not an error — it must never surface as an
+-- ingestion failure. Same reasoning that gave `extension_capture` its own
+-- 'listing' (issue #292) and 'blocked' (issue #692) terminal states instead
+-- of overloading 'failed'. 'unreachable' is the give-up state: the server
+-- HANDED this row to the driver MAX_ATTEMPTS times and no page ever came
+-- back (tab never loaded, page never rendered) — a finding ABOUT the
+-- candidate site, which is exactly what a feasibility spike is for. A row
+-- whose origin has no host permission is never handed out at all, so it can
+-- never reach `unreachable` that way: "you didn't click the popup" is not a
+-- finding about the site.
+--
+-- HOW A ROW ADVANCES — a SERVER-side fact, never a client report. `attempts`
+-- is incremented by the one statement that hands the row to the driver
+-- (`claimSpikeRequestsForDelivery`, called from GET /api/etl/auto-plan), so a
+-- driver that dies, loses its admin key, or simply never reports back cannot
+-- keep the row `pending` forever and starve the real listing drain. The
+-- captured side is symmetrical: the diagnostic POST carries the request id it
+-- was handed, so the row closes even when the candidate site redirected the
+-- URL somewhere the match key no longer recognises.
+CREATE TABLE IF NOT EXISTS capture_spike_request (
+    id                    BIGSERIAL    PRIMARY KEY,
+    url                   TEXT         NOT NULL,
+    -- Same canonical correlation key as capture_worklist: hostname (lowercased,
+    -- leading www. stripped) + path (trailing slash stripped). Computed by
+    -- dashboard/lib/worklist.ts `worklistMatchKey` / etl/capture.py
+    -- `worklist_match_key` — reused rather than re-derived so the diagnostic
+    -- route can correlate an incoming page with no extra payload field.
+    match_key             TEXT         NOT NULL UNIQUE,
+    -- Hostname the URL belongs to, denormalised for grouping/browsing.
+    host                  TEXT         NOT NULL,
+    -- `scheme://hostname`, WITHOUT the port — a Chrome match pattern has no
+    -- port component, so this is exactly the string the popup turns into
+    -- `<origin>/*` for chrome.permissions.request() and the planner compares
+    -- against the origins the driver reports it already holds. Denormalised so
+    -- both are one cheap indexed predicate rather than a URL parse per row.
+    origin                TEXT         NOT NULL,
+    -- The operator's own name for the candidate site ("Servihabitat"). Required
+    -- at seed time: naming the site is the second deliberate act that keeps a
+    -- typo'd URL from quietly becoming a spike capture.
+    site_label            TEXT         NOT NULL,
+    note                  TEXT,
+    status                TEXT         NOT NULL DEFAULT 'pending'
+                                       CONSTRAINT capture_spike_request_status_check
+                                       CHECK (status IN ('pending','captured','skipped','unreachable')),
+    -- Which diagnostic satisfied this request (NULL until captured). ON DELETE
+    -- SET NULL so purge_extension_diagnostics() and the per-row delete button
+    -- both stay unblocked — the premise that nothing REFERENCES a diagnostic
+    -- row is about processing paths, and this FK adds none.
+    matched_diagnostic_id BIGINT       REFERENCES extension_diagnostic(id) ON DELETE SET NULL,
+    -- How many times this row has been HANDED to the driver (incremented by
+    -- the delivery statement itself, not by anything the driver reports back).
+    attempts              INTEGER      NOT NULL DEFAULT 0,
+    last_attempt_at       TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- The planner's hot query is "the oldest still-pending requests" (capped at a
+-- handful per auto unit); the browse surface groups by host.
+CREATE INDEX IF NOT EXISTS idx_capture_spike_request_status_created
+    ON capture_spike_request (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_capture_spike_request_host
+    ON capture_spike_request (host);
+-- The delivery claim filters pending rows by the origins the driver holds a
+-- host permission for.
+CREATE INDEX IF NOT EXISTS idx_capture_spike_request_origin
+    ON capture_spike_request (origin);
+
+DROP TRIGGER IF EXISTS trg_capture_spike_request_set_updated_at ON capture_spike_request;
+CREATE TRIGGER trg_capture_spike_request_set_updated_at
+    BEFORE UPDATE ON capture_spike_request
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)
 -- ============================================================
@@ -3570,3 +3677,4 @@ ANALYZE profile_connector_filter;
 ANALYZE property_search_doc;
 ANALYZE extension_block_episode;
 ANALYZE extension_diagnostic;
+ANALYZE capture_spike_request;

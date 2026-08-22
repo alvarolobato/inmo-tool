@@ -84,6 +84,10 @@ _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN = 10
 # "stale" and the >7d cohort the issue was filed against (2.194 anuncios).
 _DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS = 168
 
+# Issue #705: how long a stored extension diagnostic survives. Mirrors the SQL
+# function's own DEFAULT; the operator knob is `etl.diagnostic_retention_days`.
+_DEFAULT_DIAGNOSTIC_RETENTION_DAYS = 30
+
 # Issue #643 mass-withdrawal guard, the verification-pass counterpart of
 # `_GONE_ALARM_RATIO`. A single 404 is genuine evidence about ONE listing, but
 # "every listing we asked about is 404" is not a market event — it is the
@@ -5494,6 +5498,49 @@ def run_all_connectors_respecting_restart_guard(
     )
 
 
+def purge_old_diagnostics(conn, retention_days: int) -> int:
+    """Delete `extension_diagnostic` rows older than `retention_days`.
+
+    Thin wrapper over the SQL function `purge_extension_diagnostics()`, which
+    has existed since issue #675 with **no caller anywhere** — shipped as
+    "mechanism only, scheduling is the orchestrator's business". Issue #705
+    makes that unacceptable to leave: the prospective-site capture queue turns
+    the auto-driver into a writer of that table, so an unbounded store of whole
+    third-party pages (owner names, phone numbers and all) would grow on its
+    own. Issue #698 is the same failure shape one table over.
+
+    Best-effort by contract: a purge failure must never take down the sweep it
+    rides on. Returns how many rows went, or 0.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT purge_extension_diagnostics(%s)", (int(retention_days),)
+            )
+            row = cur.fetchone()
+        conn.commit()
+        purged = int(row[0]) if row and row[0] is not None else 0
+        if purged:
+            logger.info(
+                "Purged %d extension diagnostic(s) older than %d day(s)",
+                purged,
+                retention_days,
+            )
+        return purged
+    except Exception:
+        logger.exception(
+            "Failed to purge old extension diagnostics — continuing the sweep"
+        )
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001, S110 - best-effort cleanup on an
+            # already-failing connection; re-raising here would turn a
+            # housekeeping miss into the ingestion outage this whole function
+            # is written to avoid.
+            pass
+        return 0
+
+
 def run_scheduler_loop(
     conn_factory,
     interval_seconds: int = 3600,
@@ -5505,6 +5552,7 @@ def run_scheduler_loop(
         _DEFAULT_STALE_VERIFICATION_BUDGET_PER_RUN
     ),
     stale_verification_min_age_hours: int = (_DEFAULT_STALE_VERIFICATION_MIN_AGE_HOURS),
+    diagnostic_retention_days: int = _DEFAULT_DIAGNOSTIC_RETENTION_DAYS,
 ) -> None:
     """Run all connectors on a fixed interval, forever. Long-running-container mode.
 
@@ -5551,6 +5599,14 @@ def run_scheduler_loop(
     while True:
         conn = conn_factory()
         try:
+            # Bounded retention for the diagnostic channel (issue #705). Runs
+            # OUTSIDE the run lock deliberately: `extension_diagnostic` is
+            # written only by POST /api/extension/diagnostic and read by no
+            # ingest path at all, so it can never contend with a connector
+            # sweep — and it must still happen on an iteration whose sweep is
+            # skipped, or a long crash-loop would suspend retention too.
+            purge_old_diagnostics(conn, diagnostic_retention_days)
+
             # Run lock (issue #244): the ad-hoc manual-trigger poll loop
             # (etl/manual_trigger.py) runs in a separate thread and can start a
             # sweep at any moment. Both take this same advisory lock so a

@@ -197,6 +197,14 @@
       <button id="netrec-btn" class="btn btn-secondary btn-small">
         Grabar red y recargar
       </button>
+      <!-- "Sitios en evaluación" (issue #705): Chrome only grants an
+           optional host permission from a real user gesture on an extension
+           page, so the queue's pending origins can only be requested HERE,
+           never from the service worker. Hidden unless something is actually
+           waiting on a grant, so it is never a standing nag. -->
+      <button id="spike-permission-btn" class="btn btn-secondary btn-small hidden">
+        Permitir sitios en evaluación
+      </button>
     </div>
     <!-- Shown only while a recording is armed: an armed recorder must never
          be invisible (#684 exit criteria). -->

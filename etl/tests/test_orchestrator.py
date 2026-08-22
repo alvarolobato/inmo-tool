@@ -6842,3 +6842,104 @@ class TestPerListingFetchTiming:
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
+
+
+class TestDiagnosticRetentionPurge:
+    """purge_extension_diagnostics() finally has a caller (issue #705).
+
+    The function has shipped since #675 as "mechanism only — scheduling the
+    call is the orchestrator's business, and no caller is wired up yet". That
+    was tolerable while the only writer of `extension_diagnostic` was a button
+    the owner pressed by hand. #705 makes the auto-driver a writer, so an
+    unbounded store of whole third-party pages (owner names and phone numbers
+    included) would now grow on its own — the exact failure shape issue #698
+    documents one table over. These tests pin that the sweep calls it, and
+    that a failure in it can never take the sweep down with it.
+    """
+
+    def test_purge_removes_only_rows_past_the_retention_window(self, pg_conn):
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_diagnostic")
+            cur.execute(
+                "INSERT INTO extension_diagnostic (url, html, html_bytes, created_at) "
+                "VALUES ('https://old.test/1', '<html></html>', 13, "
+                "NOW() - INTERVAL '40 days')"
+            )
+            cur.execute(
+                "INSERT INTO extension_diagnostic (url, html, html_bytes, created_at) "
+                "VALUES ('https://new.test/1', '<html></html>', 13, "
+                "NOW() - INTERVAL '2 days')"
+            )
+        pg_conn.commit()
+        try:
+            purged = orchestrator.purge_old_diagnostics(pg_conn, 30)
+            assert purged == 1
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT url FROM extension_diagnostic ORDER BY url")
+                remaining = [r[0] for r in cur.fetchall()]
+            assert remaining == ["https://new.test/1"]
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_diagnostic")
+            pg_conn.commit()
+
+    def test_purge_failure_never_takes_down_the_sweep_it_rides_on(self):
+        """Retention is housekeeping — a broken purge must not stop ingestion."""
+
+        class _BoomConn:
+            def cursor(self):
+                raise RuntimeError("boom")
+
+            def rollback(self):
+                pass
+
+        assert orchestrator.purge_old_diagnostics(_BoomConn(), 30) == 0
+
+    def test_scheduler_loop_purges_once_per_iteration(self, monkeypatch):
+        """The wiring itself: every scheduler tick calls the purge, with the
+        configured retention, and does so even on an iteration whose sweep is
+        SKIPPED — otherwise a long crash-loop would suspend retention too.
+        """
+        calls: list[int] = []
+
+        monkeypatch.setattr(
+            orchestrator,
+            "purge_old_diagnostics",
+            lambda _conn, days: calls.append(days) or 0,
+        )
+        # Make the sweep itself a no-op failure so this test is about the
+        # purge wiring alone, not about running connectors.
+        monkeypatch.setattr(
+            orchestrator.postgres,
+            "try_acquire_run_lock",
+            lambda _conn: False,
+        )
+
+        class _StopLoop(Exception):
+            pass
+
+        sleeps: list[int] = []
+
+        def fake_sleep(seconds: int) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) >= 2:
+                raise _StopLoop()
+
+        monkeypatch.setattr(orchestrator.time, "sleep", fake_sleep)
+
+        class _FakeConn:
+            def close(self):
+                pass
+
+        with pytest.raises(_StopLoop):
+            orchestrator.run_scheduler_loop(
+                lambda: _FakeConn(),
+                interval_seconds=1,
+                diagnostic_retention_days=7,
+            )
+
+        assert calls == [7, 7], (
+            "the purge must run once per scheduler iteration, including on an "
+            "iteration whose connector sweep was skipped"
+        )

@@ -338,6 +338,77 @@ Never time `fetch_detail` without that subtraction — `throttle` is
 `limiter.acquire` and sleeps *inside* the call, so an unsubtracted stopwatch
 reports Fotocasa's 20s pacing interval as work (measured: 67× inflation).
 
+## Sitios en evaluación — queueing pages from a portal we don't support (#705, D-167)
+
+The other half of the queue. `capture_worklist` only accepts hosts that HAVE a
+capture connector; a candidate site you are still assessing has none, and
+`etl/capture.py` would file its page as `failed` ("no capture-capable
+connector"). So prospective-site pages get their own small queue and their own
+destination:
+
+| | Supported portal | Site under evaluation |
+|---|---|---|
+| Queue | `capture_worklist` | `capture_spike_request` |
+| Seeding | paste box on `/admin/fuentes/<portal>` | paste box on **`/admin/diagnostics`** (+ a required site name) |
+| Auto unit | `drain` (or `harvest`) | `spike`, planned FIRST, capped |
+| Lands in | `extension_capture` → `listing` | `extension_diagnostic` (D-153) |
+| Terminal states | `captured`/`failed`/`skipped`/`stale` | `captured`/`skipped`/**`unreachable`** — no `failed` |
+| Advances on | the capture POST | the DELIVERY statement (server-side), + `spikeRequestId` echoed back |
+
+**The two paste boxes are mutually exclusive by host** — the worklist one
+refuses a host without a connector, the spike one refuses a host with one — so
+a mistyped idealista link is refused by both and can never quietly become a
+spike capture. That, plus naming the site, is the "explicit choice"; don't
+replace it with a checkbox.
+
+**Nothing fetches the candidate site.** The extension opens a tab, waits for
+the load plus one jittered dwell, reads the DOM and POSTs it to
+`/api/extension/diagnostic` — the same route and payload the #675 "Forzar
+captura + diagnóstico" button uses. This is the only capture path compatible
+with the WAF-protected sites we have refused to build against (D-026/D-027/
+D-033); keep it that way.
+
+**Host permission**: a candidate site is covered only by the manifest's
+`optional_host_permissions`, and Chrome grants an origin only from a user
+gesture on an extension PAGE. So the popup's "Permitir sitios en evaluación"
+button asks; `background.js` only ever calls `permissions.contains`. An
+ungranted origin is skipped and stays `pending` — never `unreachable`, and this
+is enforced where it cannot be forgotten: the driver sends the origins it holds
+(`grantedSpikeOrigins`) on `GET /api/etl/auto-plan`, and the planner only ever
+hands out (and only ever charges) rows on one of them. The grant prompt is
+derived from `pending` **and** `unreachable` rows, so it never disappears at
+the moment it is needed.
+
+**How a row advances — server-side, always.** `attempts` is incremented by the
+statement that DELIVERS the row (`claimSpikeRequestsForDelivery`, inside the
+auto-plan GET), never by anything the extension reports back; there is no
+"I tried and it failed" verb on the API at all. A landed page closes its row by
+echoing the `spikeRequestId` it was handed on the diagnostic POST — **not** by
+match key, which is derived from `window.location.href` and therefore breaks on
+any redirect (locale prefix, canonical slug, consent-wall bounce, SPA
+`pushState`); redirect-heavy servicer portals are the target population. If you
+are tempted to add a client-side report here, read #705's review first: both
+starvation bugs it found were the same shape.
+
+**What a spike unit costs the listing drain**: it preempts harvest and drain, so
+the honest worst case is
+`ceil(MAX_PENDING_SPIKE_REQUESTS / SPIKE_UNIT_LIMIT) × MAX_SPIKE_ATTEMPTS`
+= `ceil(50/5) × 3` = **30 ticks ≈ 30 min** of zero listing drain if nothing
+renders, longer if the pages do render. Bounded and self-clearing, but not
+"a couple of ticks" — raise the cap and you raise that number linearly.
+
+**Never point it at ourselves**: `validateSpikeUrls` refuses `localhost`,
+`127.0.0.1`, private/link-local/CGNAT ranges, `.local`/`.internal`, and the
+dashboard's own host. `manifest.json` pre-declares `http://localhost/*` and
+Chrome match patterns **ignore the port**, so without that denylist
+`http://localhost:4000/admin/...` would be opened with the operator's
+`ps_admin` cookie and the rendered admin page uploaded as a "candidate sample".
+
+**Retention**: `purge_extension_diagnostics()` had no caller anywhere until
+#705; it now runs once per ETL scheduler sweep at
+`etl.diagnostic_retention_days` (default 30). Don't add another store of
+scraped third-party pages — see #698 for what that turns into.
+
 ## Loosened searches (#267 caveat)
 
 Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its
