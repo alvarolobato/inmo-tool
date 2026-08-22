@@ -3454,14 +3454,23 @@ CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
 -- fired) — read as opaque JSONB, never parsed by any Python/SQL job.
 --
 -- `network` is NULL unless the owner armed the opt-in network-capture reload
--- (issue #671 follow-up) — {entries:[{url,method,status,...}], droppedCount}
--- with credentials already stripped and bodies already size-capped in the
--- BROWSER before the request that stores this row (network-recorder.js
--- summarizeEntry) — this table is not a second place to redact.
+-- (issues #671, #684) — {entries:[{url,method,status,...}], droppedCount},
+-- shaped and redacted in the BROWSER before the request that stores this row
+-- (network-recorder.js summarizeEntry); this table is not a second place to
+-- redact. Be precise about what "redacted" covers, because D-164 records that
+-- it is narrower than PR #675's description claimed:
+--   STRIPPED — credential-shaped request/response headers; credential-shaped
+--   query params, PATH segments and FRAGMENT params; and, inside a body, a
+--   JSON value under a credential-shaped key, a `Bearer …` literal, a bare JWT.
+--   NOT STRIPPED — the response BODY itself. It is truncated at 20 KB and
+--   scrubbed of those three shapes, and that is all: whatever the portal
+--   returned, personal data included, lands here verbatim. Request bodies are
+--   never captured at all.
 --
 -- Personal data note (AGENTS.md "no scraped personal data in committed
 -- files"): `html`/`network` can carry owner names, phone numbers, and
--- contact-form markup off the captured page. That's fine IN THE PRODUCTION
+-- contact-form markup off the captured page — `network` because a portal's own
+-- API answers with exactly that. That's fine IN THE PRODUCTION
 -- DB (not public) — it must never reach a committed file (a fixture built
 -- from a row here needs its own scrubbing pass first).
 CREATE TABLE IF NOT EXISTS extension_diagnostic (

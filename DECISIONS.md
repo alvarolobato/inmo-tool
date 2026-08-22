@@ -27,6 +27,7 @@
 | [D-151](docs/decisions/D-151-config-yaml-canonical-for-etl-tunables.md) | Set `etl.*` tunables only via config.yaml (`/admin/config`); never add one to a compose `environment:` block — an etl-only env var the admin UI cannot see makes OFF a silent no-op. |
 | [D-154](docs/decisions/D-154-fuentes-merges-connector-setup.md) | /admin/fuentes (list) + /admin/fuentes/[name] (detail) merge /etl/connectors + /etl/captura (301s); Fuentes detail also absorbs per-source quality (D-084/D-086), zero-result regressions (D-092), and drift (D-090/D-093) from /etl/salud (unchanged, P2). Supersedes D-045's location clause only ('setup stays under /etl/*') — the execution (/captura) vs. setup split itself is untouched. |
 | [D-162](docs/decisions/D-162-per-listing-timing-three-legs.md) | Per-listing timing is stored as separate legs (render wait / queue idle / processing; crawl fetch_ms_total excludes rate-limit sleep) — never one total. NULL means not measured, never 0. |
+| [D-163](docs/decisions/D-163-queue-depth-and-trend-from-queue-tables.md) | Queue depth AND trend come from the queue table's own entry/exit timestamps, never a snapshot table. An unmeasured leg renders its reason, never 0. Estado links out, never copies. |
 
 ## Data / connectors
 
@@ -126,6 +127,7 @@
 | [D-157](docs/decisions/D-157-evidence-not-time-for-withdrawal.md) | Time only nominates; only source evidence (HTTP 404/410 or identified retired page) may change a listing status. Soft block or unparseable 200 changes nothing. Mark, don't delete. |
 | [D-159](docs/decisions/D-159-idealista-retired-notice-evidence.md) | Withdraw on an Idealista retired notice only if its reference equals the captured external_id and its stated size/rooms fit the stored row; date from it, not before last_seen_at. |
 | [D-160](docs/decisions/D-160-challenge-page-is-a-soft-block.md) | An anti-bot challenge is a THIRD outcome ranked above withdrawal and failure: halt the batch, write nothing, leave the worklist row pending. Two accent-folded phrases from the shared table; never per-visit data. |
+| [D-164](docs/decisions/D-164-network-capture-armed-lifecycle.md) | Teardown unregisters AND messages the tab to uninstall the injected wrapper; durable state, not a Map; persistAcrossSessions:false, sweep, onRemoved, 5-min expiry. Bodies unsanitised. |
 | [D-165](docs/decisions/D-165-hipoges-render-readiness-and-cdn-harvest.md) | Hipoges detail URLs come from the photo CDN ref, never `a[href]` — its cards are not links. Listing readiness is a COMPLETE harvest, never a selector or a bare settle. |
 
 ## Product / candidate feed

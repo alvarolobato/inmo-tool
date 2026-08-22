@@ -436,7 +436,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // dynamic content scripts once the popup confirms permission was granted.
   if (msg.type === 'ARM_NETWORK_RECORDING') {
     const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
-    armNetworkRecording(tabId, msg.origin)
+    armNetworkRecording(tabId, msg.origin, msg.grantedNow === true)
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
     return true; // async
@@ -444,8 +444,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'GET_NETWORK_RECORDING_STATE') {
     const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
-    sendResponse(getNetworkRecordingState(tabId));
-    return true;
+    getNetworkRecordingState(tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse({ armed: false, entryCount: 0, expiresAt: null }));
+    return true; // async
+  }
+
+  // The relay's document_start handshake (issue #684 B2). `registerContentScripts`
+  // has no per-tab filter, so the recorder pair is installed on EVERY tab of the
+  // armed origin. This is how a tab learns it is not the one: the worker answers
+  // from `_sender.tab.id`, which the page cannot forge, and a tab that gets
+  // `armed:false` makes the MAIN-world recorder uninstall itself.
+  if (msg.type === 'NETWORK_RECORDER_HELLO') {
+    const tabId = _sender.tab && _sender.tab.id;
+    (async () => {
+      if (tabId == null) return sendResponse({ armed: false });
+      const armed = await getArmedRecordings();
+      const session = armed[tabId];
+      if (!session) return sendResponse({ armed: false });
+      if (typeof session.expiresAt === 'number' && session.expiresAt <= Date.now()) {
+        await disarmNetworkRecording(tabId);
+        return sendResponse({ armed: false });
+      }
+      sendResponse({ armed: true, nonce: session.nonce });
+    })().catch(() => sendResponse({ armed: false }));
+    return true; // async
   }
 
   // Explicit stop without sending (owner changed their mind) — tears the
@@ -466,7 +489,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // silently (a race on disarm, or a stray postMessage from a stale page).
   if (msg.type === 'NETWORK_ENTRY') {
     const tabId = _sender.tab && _sender.tab.id;
-    recordNetworkEntry(tabId, msg.entry);
+    recordNetworkEntry(tabId, msg.entry, msg.nonce);
     return false; // fire-and-forget
   }
 });
@@ -1227,6 +1250,13 @@ async function saveValidationUrl(tabId, url) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   endValidation(tabId).catch(() => {
     /* session state cleanup is best-effort */
+  });
+  // A closed tab can't be recording either — and before #684 this was one of
+  // the three paths that left a MAIN-world fetch/XHR wrapper registered on the
+  // origin forever, because nothing else ever ran for a tab that simply went
+  // away. Unconditional by construction (see disarmNetworkRecording).
+  disarmNetworkRecording(tabId).catch(() => {
+    /* teardown is best-effort; the respawn sweep is the backstop */
   });
 });
 
@@ -2077,18 +2107,28 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     sendHeartbeat();
   }
   if (alarm.name === AUTO_ALARM) autoTick();
+  // Bounded lifetime for an armed network recording (issue #684): the owner
+  // who arms one and never sends is not a hypothetical, and nothing else in
+  // the extension would ever notice.
+  if (alarm.name === DIAG_EXPIRY_ALARM) {
+    expireStaleNetworkRecordings().catch(() => {
+      /* the next tick retries */
+    });
+  }
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
   autoTick();
   sendHeartbeat();
+  sweepStrandedNetworkRecorders().catch(() => {});
 });
 chrome.runtime.onInstalled.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
   autoTick();
   sendHeartbeat();
+  sweepStrandedNetworkRecorders().catch(() => {});
 });
 // Top-level: fires whenever the worker (re)spawns, including after an eviction
 // that no lifecycle event covers. The auto driver's top-level tick is at the end
@@ -2097,6 +2137,8 @@ ensureBatchWatchdog();
 reattachIfStranded();
 // Announce presence to the dashboard on every worker (re)spawn (#509).
 sendHeartbeat();
+// The network-capture recorder sweep is ALSO top-level, but it lives at the
+// end of its own block below — its `const`s must be initialised first.
 
 // ═══ Auto-capture continuous driver (issue #424; v2 discover→harvest #516) ═══
 //
@@ -2885,31 +2927,68 @@ async function handleCheckStatus(captureId) {
 // content-script.js's CAPTURE_DIAGNOSTIC handler degrades every field to
 // null/false for a page detect.js doesn't recognise, by construction.
 //
-// ┌───────────────────────────────────────────────────────────────────────┐
-// │ NETWORK CAPTURE IS PARKED — DO NOT WIRE A UI ENTRY POINT TO IT (#684) │
-// └───────────────────────────────────────────────────────────────────────┘
-// The functions below (armNetworkRecording / recordNetworkEntry /
-// disarmNetworkRecording) and their ARM_NETWORK_RECORDING /
-// STOP_NETWORK_RECORDING / NETWORK_ENTRY handlers are RETAINED but
-// UNREACHABLE: the popup's "Grabar red y recargar" button was removed before
-// #675 merged, so nothing in the shipped extension can arm a recording, and
-// `disarmNetworkRecording` therefore always returns null (SEND_DIAGNOSTIC
-// posts `network: null`).
+// ═══ Opt-in network capture — the armed-recorder lifecycle (issue #684) ════
 //
-// They are parked rather than deleted because the pure redaction module
-// (network-recorder.js) and its tests are sound and worth rebuilding on. The
-// LIFECYCLE is not:
-//   - `disarmNetworkRecording` bails on `!networkBuffers.has(tabId)` BEFORE
-//     unregistering, and that Map dies with the MV3 service worker (~30s
-//     idle) — so on the happy path the recorder is never torn down;
-//   - `registerContentScripts` omits `persistAcrossSessions:false` (defaults
-//     to TRUE) and no onStartup/respawn sweep clears `inmo-diag-*`;
-//   - `matches` is origin-scoped, so every tab on the origin is wrapped.
-// Full analysis, redaction audit and exit criteria: issue #684. Read it
-// before touching any of this — the existing background test currently
-// ASSERTS the broken disarm behaviour and has to be inverted first.
+// PR #675 built this, its review found the lifecycle unshippable, and the UI
+// entry point was removed before merge. #684 rebuilt it. The defect that
+// stopped it, and how each half is anchored now, because getting this wrong
+// leaves a MAIN-world `fetch`/`XHR` wrapper running on a stranger's site
+// forever:
+//
+//   WAS: `disarmNetworkRecording` bailed on `!networkBuffers.has(tabId)`
+//        BEFORE calling `unregisterContentScripts`, and `networkBuffers` is an
+//        in-memory Map in an MV3 service worker that Chrome evicts after ~30 s
+//        idle. On the DOCUMENTED HAPPY PATH — arm, reload, page settles, no
+//        more relay messages, worker dies — the Map was gone, so the send both
+//        lost the buffer (`network: null`, the feature returned nothing in
+//        normal use) AND left the recorder registered.
+//   NOW: nothing about teardown reads an in-memory Map. Disarm ALWAYS
+//        unregisters, unconditionally, before it looks at any state; the
+//        buffer itself lives in `chrome.storage.session` (survives eviction),
+//        the armed registry with it.
+//
+//   WAS: `registerContentScripts` omitted `persistAcrossSessions:false`, which
+//        DEFAULTS TO TRUE, so an armed recorder survived a browser restart —
+//        while `storage.session.diagArmed`, the only bookkeeping that could
+//        have found it again, is wiped on restart by definition.
+//   NOW: `persistAcrossSessions:false`, AND `sweepStrandedNetworkRecorders()`
+//        reconciles `chrome.scripting.getRegisteredContentScripts()` against
+//        the armed registry on every worker respawn / onStartup / onInstalled
+//        and unregisters every `inmo-diag-*` id nothing claims. Reconciling
+//        against Chrome's own registration list (rather than a mirror of our
+//        intent) is what makes the sweep correct for recorders registered by
+//        an OLDER build, which really were persistent.
+//
+//   WAS: three paths left it armed — SW eviction, an owner who never sends,
+//        and a closed tab (`tabs.onRemoved` only called `endValidation`).
+//   NOW: eviction is covered above; `tabs.onRemoved` disarms; and every armed
+//        session carries an `expiresAt` enforced by a 1-minute alarm
+//        (`DIAG_EXPIRY_ALARM`), so an armed recorder cannot outlive the
+//        owner's attention by more than a minute past its bounded lifetime.
+//
+//   WAS: `matches` is origin-scoped and `registerContentScripts` has no
+//        per-tab filter, so EVERY tab on the origin got `fetch`/`XHR`
+//        wrapped, undisclosed.
+//   NOW: the relay asks the worker `NETWORK_RECORDER_HELLO` at
+//        document_start; the worker answers from `_sender.tab.id`. A tab that
+//        is not the armed one gets `armed:false`, and the MAIN-world recorder
+//        UNINSTALLS itself (restores `fetch`/XHR) and discards what it
+//        buffered. Origin-wide interception still exists for the few ms
+//        before that round-trip completes — unavoidable without a per-tab
+//        registration API — and the popup's confirm() says so.
+//
+// Read issue #684 before touching any of this.
 
-const networkBuffers = new Map(); // tabId -> raw entry[] (pre-cap)
+/** Bounded lifetime of an armed session. Single-digit minutes on purpose: a
+ * recorder exists for ONE owner-initiated reload, and anything that outlives
+ * the owner's attention is the failure mode this whole block is about. */
+const DIAG_RECORDING_TTL_MS = 5 * 60 * 1000;
+const DIAG_EXPIRY_ALARM = 'inmo-diag-expiry';
+/** Prefix every dynamically-registered recorder script id carries, so the
+ * respawn sweep can recognise one it has never heard of. */
+const DIAG_SCRIPT_PREFIX = 'inmo-diag-';
+/** Per-tab session-storage key holding that tab's buffered entries. */
+const DIAG_BUFFER_KEY_PREFIX = 'diagNetBuf:';
 
 async function getArmedRecordings() {
   const { diagArmed } = await chrome.storage.session.get('diagArmed');
@@ -2921,20 +3000,163 @@ async function setArmedRecordings(armed) {
 }
 
 function networkScriptIds(tabId) {
-  const base = `inmo-diag-${tabId}`;
+  const base = `${DIAG_SCRIPT_PREFIX}${tabId}`;
   return [`${base}-main`, `${base}-relay`];
+}
+
+/** `inmo-diag-<tabId>-main` → 12. Null for anything that isn't ours. */
+function tabIdFromNetworkScriptId(id) {
+  const m = /^inmo-diag-(\d+)-(main|relay)$/.exec(String(id || ''));
+  return m ? Number(m[1]) : null;
+}
+
+// ── The buffer lives in chrome.storage.session, not in a Map ───────────────
+//
+// storage.session survives a service-worker eviction (it is cleared only when
+// the browser closes), which an in-memory Map does not — that difference IS
+// the B1 defect. Appends are serialised through one promise chain because
+// read-modify-write on a shared key from a burst of relay messages would
+// otherwise drop entries.
+let networkBufferWriteChain = Promise.resolve();
+
+function bufferKey(tabId) {
+  return `${DIAG_BUFFER_KEY_PREFIX}${tabId}`;
+}
+
+async function readNetworkBuffer(tabId) {
+  const key = bufferKey(tabId);
+  const got = await chrome.storage.session.get(key);
+  const list = got && got[key];
+  return Array.isArray(list) ? list : [];
+}
+
+/** Read and CLEAR a tab's buffer in one step. */
+async function takeNetworkBuffer(tabId) {
+  const entries = await readNetworkBuffer(tabId);
+  await chrome.storage.session.remove(bufferKey(tabId)).catch(() => {});
+  return entries;
+}
+
+/**
+ * Buffer one relayed entry for `tabId`. Drops it unless that tab is armed AND
+ * the envelope carries the session's nonce — a stale registration, a disarm
+ * race, or a page script that got as far as the relay all land here.
+ *
+ * Async (it writes storage), but callers fire and forget: the message handler
+ * returns false. The returned promise is the write-chain tail, which the tests
+ * await to observe the write deterministically.
+ */
+function recordNetworkEntry(tabId, entry, nonce) {
+  networkBufferWriteChain = networkBufferWriteChain
+    .then(async () => {
+      if (tabId == null || !entry) return;
+      const armed = await getArmedRecordings();
+      const session = armed[tabId];
+      if (!session) return;
+      if (session.nonce && nonce !== session.nonce) return;
+      const list = await readNetworkBuffer(tabId);
+      list.push(entry);
+      // Cap AT WRITE TIME, keeping the most recent — storage.session has a
+      // real quota (~10 MB) and a 20 KB body × an unbounded entry count would
+      // blow it, silently failing every subsequent write.
+      const NR = self.InmoNetworkRecorder;
+      const max = NR ? NR.MAX_ENTRIES : 200;
+      const dropped = list.length > max ? list.length - max : 0;
+      const kept = dropped ? list.slice(dropped) : list;
+      let droppedTotal = dropped;
+      try {
+        await chrome.storage.session.set({ [bufferKey(tabId)]: kept });
+      } catch (err) {
+        // storage.session has a hard byte quota (1 MB on older Chrome, 10 MB
+        // since 112) and MAX_ENTRIES x a 20 KB body can reach it. Losing the
+        // WRITE loses every later entry too, silently, so shed the oldest half
+        // and retry once rather than let one oversized page kill the recording.
+        const half = Math.max(1, Math.floor(kept.length / 2));
+        droppedTotal += half;
+        try {
+          await chrome.storage.session.set({ [bufferKey(tabId)]: kept.slice(half) });
+        } catch {
+          // Still failing — keep only the newest entry, which is the one the
+          // owner most likely just triggered.
+          droppedTotal = (droppedTotal - half) + (kept.length - 1);
+          await chrome.storage.session
+            .set({ [bufferKey(tabId)]: kept.slice(kept.length - 1) })
+            .catch(() => {});
+        }
+      }
+      if (droppedTotal) {
+        session.droppedCount = (session.droppedCount || 0) + droppedTotal;
+        armed[tabId] = session;
+        await setArmedRecordings(armed);
+      }
+    })
+    .catch(() => {
+      /* a lost entry must never wedge the chain for every later entry */
+    });
+  return networkBufferWriteChain;
+}
+
+/**
+ * Unregister this tab's recorder scripts. Bulk first; Chrome rejects the whole
+ * call if ANY id in `ids` is unknown, so fall back to one-at-a-time so a
+ * half-registered pair (arm crashed between the two) still gets cleaned up.
+ */
+async function unregisterNetworkScripts(tabId) {
+  const ids = networkScriptIds(tabId);
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids });
+    return;
+  } catch {
+    /* fall through to per-id */
+  }
+  for (const id of ids) {
+    try {
+      await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    } catch {
+      /* already gone — that is the desired end state */
+    }
+  }
+}
+
+/**
+ * Tell the recorder ALREADY INJECTED into `tabId` to uninstall itself.
+ *
+ * `unregisterNetworkScripts` governs FUTURE injections only — Chrome does not
+ * retract a content script from a document that already ran it. Without this
+ * message the MAIN-world wrapper stayed on `window.fetch` and the three
+ * `XMLHttpRequest.prototype` methods for the life of the document after every
+ * teardown path, still posting summarised entries (URLs, headers, up-to-20 KB
+ * response bodies) onto the page's own message bus, readable by any page
+ * script — the exact shape #684 exists to close, and a direct contradiction of
+ * what the popup's confirm() promises the owner.
+ *
+ * Best-effort by nature: the tab may be closed or navigated (the document, and
+ * with it the wrapper, is gone anyway), or never have had a relay. All of those
+ * are the desired end state, so every failure is swallowed.
+ */
+async function stopInjectedNetworkRecorder(tabId) {
+  if (tabId == null) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'NETWORK_RECORDER_DISARM' });
+  } catch {
+    /* no receiver / tab gone — the wrapper is gone with it */
+  }
 }
 
 /**
  * Register the MAIN-world fetch/XHR recorder + its ISOLATED-world relay for
- * `origin`, scoped to exactly that origin — never `<all_urls>` — so a
- * recording session only ever sees traffic for the page being diagnosed. The
- * host permission for `origin` must ALREADY be granted: `chrome.permissions
- * .request` requires a real user-activation signal, which only the popup (an
- * extension PAGE) has — a service worker does not, so requesting it here
- * would silently fail. popup.js requests it directly, then sends this.
+ * `origin`, scoped to exactly that origin — never `<all_urls>`. The host
+ * permission for `origin` must ALREADY be granted: `chrome.permissions.request`
+ * requires a real user-activation signal, which only the popup (an extension
+ * PAGE) has — a service worker does not, so requesting it here would silently
+ * fail. popup.js requests it directly, then sends this.
+ *
+ * `grantedNow` tells us the popup's request is what CREATED the host grant, so
+ * disarm can hand it back (issue #684 S7). When the owner already had the
+ * origin granted — for capture, or because it is in manifest host_permissions
+ * — we leave it exactly as we found it.
  */
-async function armNetworkRecording(tabId, origin) {
+async function armNetworkRecording(tabId, origin, grantedNow) {
   if (tabId == null || !origin) {
     return { success: false, error: { message: 'Falta la pestaña o el origen.' } };
   }
@@ -2950,10 +3172,30 @@ async function armNetworkRecording(tabId, origin) {
       error: { message: 'Falta el permiso de host para grabar red en este origen.' },
     };
   }
+
+  const nonce = newRecordingNonce();
+  const now = Date.now();
   const [mainId, relayId] = networkScriptIds(tabId);
+
+  // Register the armed session BEFORE the scripts exist. The relay's
+  // document_start HELLO can otherwise beat the registry write and get
+  // `armed:false` for the very tab that IS armed, which would make the
+  // recorder uninstall itself on the reload it was armed for.
+  const armed = await getArmedRecordings();
+  armed[tabId] = {
+    origin,
+    nonce,
+    armedAt: now,
+    expiresAt: now + DIAG_RECORDING_TTL_MS,
+    droppedCount: 0,
+    grantedNow: grantedNow === true,
+  };
+  await setArmedRecordings(armed);
+  await chrome.storage.session.remove(bufferKey(tabId)).catch(() => {});
+
   try {
     // Idempotent re-arm: clear any stale registration for this tab first.
-    await chrome.scripting.unregisterContentScripts({ ids: [mainId, relayId] }).catch(() => {});
+    await unregisterNetworkScripts(tabId);
     await chrome.scripting.registerContentScripts([
       {
         id: mainId,
@@ -2962,6 +3204,9 @@ async function armNetworkRecording(tabId, origin) {
         world: 'MAIN',
         runAt: 'document_start',
         allFrames: false,
+        // Without this Chrome DEFAULTS TO TRUE and the registration survives a
+        // browser restart — the exact leak #684 exists to close.
+        persistAcrossSessions: false,
       },
       {
         id: relayId,
@@ -2970,69 +3215,242 @@ async function armNetworkRecording(tabId, origin) {
         world: 'ISOLATED',
         runAt: 'document_start',
         allFrames: false,
+        persistAcrossSessions: false,
       },
     ]);
   } catch (err) {
+    // Registration failed — don't leave a phantom armed session behind, or the
+    // sweep would treat a never-registered tab as legitimately armed.
+    const rollback = await getArmedRecordings();
+    delete rollback[tabId];
+    await setArmedRecordings(rollback);
+    // …and don't leave HALF a pair behind either. `registerContentScripts` is
+    // not atomic across the two entries, and `unregisterNetworkScripts`'s own
+    // docstring anticipates exactly this state. The relay's fail-closed HELLO
+    // bounds it in practice, but leaving it registered contradicts this
+    // block's own unconditional-teardown principle (#684 M2).
+    await unregisterNetworkScripts(tabId);
     return { success: false, error: { message: err.message } };
   }
-  networkBuffers.set(tabId, []);
+
+  ensureDiagExpiryAlarm();
+  return { success: true, expiresAt: now + DIAG_RECORDING_TTL_MS };
+}
+
+/** Unguessable per-session token the relay must echo on every envelope. */
+function newRecordingNonce() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Current recording state for `tabId`, for the popup's status line. Reads
+ * DURABLE state, so it is still right after a service-worker eviction. */
+async function getNetworkRecordingState(tabId) {
+  if (tabId == null) return { armed: false, entryCount: 0, expiresAt: null };
   const armed = await getArmedRecordings();
-  armed[tabId] = { origin, armedAt: Date.now() };
-  await setArmedRecordings(armed);
-  return { success: true };
-}
-
-/** Current recording state for `tabId`, for the popup's status line. */
-function getNetworkRecordingState(tabId) {
-  const entries = networkBuffers.get(tabId);
-  return { armed: networkBuffers.has(tabId), entryCount: entries ? entries.length : 0 };
-}
-
-/** Buffer one relayed entry. Drops it silently if `tabId` isn't armed (a
- * disarm race, or a stray message from a stale page) — never throws. */
-function recordNetworkEntry(tabId, entry) {
-  if (tabId == null || !networkBuffers.has(tabId) || !entry) return;
-  const list = networkBuffers.get(tabId);
-  list.push(entry);
-  // Independent of the storage-time cap (NR.MAX_ENTRIES) applied at flush —
-  // just keeps this in-memory buffer itself from growing unboundedly between
-  // flushes on a very chatty page.
-  const HARD_CAP = 1000;
-  if (list.length > HARD_CAP) list.shift();
+  const session = armed[tabId];
+  if (!session) return { armed: false, entryCount: 0, expiresAt: null };
+  const entries = await readNetworkBuffer(tabId);
+  return {
+    armed: true,
+    entryCount: entries.length,
+    expiresAt: session.expiresAt || null,
+    origin: session.origin || null,
+  };
 }
 
 /**
- * Unregister the dynamic content scripts for `tabId` and return its buffered
- * entries, redaction-capped to NR.MAX_ENTRIES (keeping the MOST RECENT —
- * network-recorder.js `capEntries`). Returns null when nothing was armed for
- * this tab. ALWAYS safe to call, even with nothing armed — SEND_DIAGNOSTIC
- * calls this unconditionally so a recorder can never outlive the diagnostic
- * send it exists for.
+ * Tear down the recorder for `tabId` and return its buffered entries, capped
+ * to NR.MAX_ENTRIES (keeping the MOST RECENT — network-recorder.js
+ * `capEntries`). Returns null when there was nothing armed and nothing
+ * buffered.
+ *
+ * UNCONDITIONAL BY CONSTRUCTION. It unregisters the content scripts FIRST,
+ * before consulting any state at all, because "is there a buffer for this tab"
+ * and "is there a registration for this tab" are independent facts and PR
+ * #675's version conflated them — see this block's header. Calling this for a
+ * tab that was never armed is a cheap no-op that still guarantees no recorder
+ * survives; that is the point, and the test in
+ * extension-diagnostic-background.test.ts pins it.
  */
 async function disarmNetworkRecording(tabId) {
-  if (tabId == null || !networkBuffers.has(tabId)) return null;
-  const raw = networkBuffers.get(tabId) || [];
-  networkBuffers.delete(tabId);
-  const [mainId, relayId] = networkScriptIds(tabId);
-  try {
-    await chrome.scripting.unregisterContentScripts({ ids: [mainId, relayId] });
-  } catch {
-    /* best-effort — a stale registration only ever matches this one origin
-       and reinstalling on next arm overwrites it; must not block sending */
-  }
+  if (tabId == null) return null;
+
+  await unregisterNetworkScripts(tabId);
+  // Unregistering stops the NEXT injection; this stops the one already running
+  // in the page. Both unconditional, both before any state is consulted.
+  await stopInjectedNetworkRecorder(tabId);
+
+  let session = null;
   try {
     const armed = await getArmedRecordings();
-    if (armed[tabId]) {
+    session = armed[tabId] || null;
+    if (session) {
       delete armed[tabId];
       await setArmedRecordings(armed);
     }
   } catch {
-    /* storage.session best-effort */
+    /* storage.session best-effort — the unregister above already happened */
   }
+
+  let raw = [];
+  try {
+    raw = await takeNetworkBuffer(tabId);
+  } catch {
+    raw = [];
+  }
+
+  // Hand back a host grant the recording itself created (issue #684 S7). Only
+  // that one: an origin the owner had already granted for capture must survive
+  // a diagnostic, or arming a recorder would silently break batch capture.
+  if (session && session.grantedNow && session.origin) {
+    try {
+      await chrome.permissions.remove({ origins: [session.origin + '/*'] });
+    } catch {
+      /* a manifest host_permission can't be removed — nothing to do */
+    }
+  }
+
+  await clearDiagExpiryAlarmIfIdle();
+
+  if (!session && raw.length === 0) return null;
+
   const NR = self.InmoNetworkRecorder;
-  if (!NR) return { entries: raw, droppedCount: 0 };
-  return NR.capEntries(raw);
+  const capped = NR ? NR.capEntries(raw) : { entries: raw, droppedCount: 0 };
+  return {
+    entries: capped.entries,
+    droppedCount: capped.droppedCount + ((session && session.droppedCount) || 0),
+  };
 }
+
+/**
+ * Unregister every `inmo-diag-*` content script Chrome still has that no
+ * currently-armed session claims.
+ *
+ * This is the net under a browser restart. `storage.session` is wiped on
+ * restart, so after one the armed registry is empty and EVERY surviving
+ * `inmo-diag-*` registration is by definition stranded. That matters even with
+ * `persistAcrossSessions:false` in place today, because a recorder armed by an
+ * 0.18.0-or-earlier build was registered persistently and would otherwise wrap
+ * `fetch` on that origin forever, with nothing in the extension aware of it.
+ *
+ * Reconciles against `getRegisteredContentScripts()` — Chrome's own list —
+ * rather than against a mirror of what we believe we registered, so it also
+ * catches ids this build never wrote.
+ */
+async function sweepStrandedNetworkRecorders() {
+  let registered = [];
+  try {
+    registered = (await chrome.scripting.getRegisteredContentScripts()) || [];
+  } catch {
+    return { swept: [] };
+  }
+  const ours = registered
+    .map((script) => String((script && script.id) || ''))
+    .filter((id) => id.startsWith(DIAG_SCRIPT_PREFIX));
+  if (ours.length === 0) return { swept: [] };
+
+  let armed = {};
+  try {
+    armed = await getArmedRecordings();
+  } catch {
+    armed = {};
+  }
+
+  const stranded = ours.filter((id) => {
+    const tabId = tabIdFromNetworkScriptId(id);
+    // An id we can't parse is not one any live session can claim — sweep it.
+    if (tabId == null) return true;
+    return !armed[tabId];
+  });
+  if (stranded.length === 0) return { swept: [] };
+
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: stranded });
+  } catch {
+    for (const id of stranded) {
+      try {
+        await chrome.scripting.unregisterContentScripts({ ids: [id] });
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  // Drop any buffer left behind by a session whose registration we just swept,
+  // and tell any STILL-LIVE document from that session to uninstall its
+  // wrapper — a stranded registration whose tab the owner never closed would
+  // otherwise keep `fetch` wrapped until it navigates. Usually a no-op (after a
+  // restart the document is long gone), but it is the same defect as #684 H1.
+  const sweptTabIds = new Set();
+  for (const id of stranded) {
+    const tabId = tabIdFromNetworkScriptId(id);
+    if (tabId == null || sweptTabIds.has(tabId)) continue;
+    sweptTabIds.add(tabId);
+    await chrome.storage.session.remove(bufferKey(tabId)).catch(() => {});
+    await stopInjectedNetworkRecorder(tabId);
+  }
+  return { swept: stranded };
+}
+
+/** Arm the expiry watchdog (idempotent). 1 minute is the practical floor for
+ * a periodic MV3 alarm, and it bounds the overshoot past `expiresAt`. */
+function ensureDiagExpiryAlarm() {
+  try {
+    chrome.alarms.create(DIAG_EXPIRY_ALARM, { periodInMinutes: 1 });
+  } catch {
+    /* alarms unavailable — SEND_DIAGNOSTIC / onRemoved / the sweep still
+       tear the recorder down; only the "owner walked away" path degrades */
+  }
+}
+
+async function clearDiagExpiryAlarmIfIdle() {
+  try {
+    const armed = await getArmedRecordings();
+    if (Object.keys(armed).length === 0) await chrome.alarms.clear(DIAG_EXPIRY_ALARM);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Disarm every armed session past its `expiresAt`. An owner who arms a
+ * recording and then forgets about it is one of the three paths that left the
+ * old implementation armed forever; this is the bound on it.
+ */
+async function expireStaleNetworkRecordings(nowMs) {
+  const now = typeof nowMs === 'number' ? nowMs : Date.now();
+  let armed = {};
+  try {
+    armed = await getArmedRecordings();
+  } catch {
+    return { expired: [] };
+  }
+  const expired = Object.keys(armed).filter((tabId) => {
+    const at = armed[tabId] && armed[tabId].expiresAt;
+    return typeof at !== 'number' || at <= now;
+  });
+  for (const tabId of expired) {
+    await disarmNetworkRecording(Number(tabId));
+  }
+  await clearDiagExpiryAlarmIfIdle();
+  return { expired: expired.map(Number) };
+}
+
+// Top-level, so this runs on an eviction respawn that no lifecycle event
+// covers, and on the first spawn after a browser restart — the one that finds
+// a recorder registered by a pre-#684 build, whose registration defaulted to
+// persistAcrossSessions:true. Safe during an ACTIVE session: the armed
+// registry lives in storage.session, which survives the eviction, so a claimed
+// id is left alone. Placed HERE rather than beside ensureBatchWatchdog()'s
+// top-level call because both functions close over `const`s declared in this
+// block — calling them earlier would be a temporal-dead-zone hazard the first
+// `await` happens to hide.
+sweepStrandedNetworkRecorders().catch(() => {});
+expireStaleNetworkRecordings().catch(() => {});
 
 /**
  * POST the diagnostic payload to the dashboard's dedicated route. `network`
@@ -3110,12 +3528,14 @@ if (typeof module !== 'undefined' && module.exports) {
     enumerationStopped,
     runEnumerationThenCapture,
     runBatchStateExclusive,
-    // Diagnostics / network capture (issue #671)
+    // Diagnostics / network capture (issues #671, #684)
     armNetworkRecording,
     disarmNetworkRecording,
     recordNetworkEntry,
     getNetworkRecordingState,
+    sweepStrandedNetworkRecorders,
+    expireStaleNetworkRecordings,
+    networkScriptIds,
     sendDiagnostic,
-    networkBuffers,
   };
 }

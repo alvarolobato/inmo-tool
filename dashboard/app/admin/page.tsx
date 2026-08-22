@@ -16,6 +16,11 @@
  * lie by omission (see that module's header for the fotocasa/idealista
  * evidence). The pure status derivation is lib/source-health.ts.
  *
+ * Below the rows, the "Colas" band (issue #640, components/estado/
+ * QueueBand.tsx) answers the other half of the owner's question — what is
+ * queued right now, and is it growing? It reads its own endpoint
+ * (`/api/etl/queues`) so a slow backlog aggregation never delays these rows.
+ *
  * Each row links to `/admin/fuentes/[name]` (issue #642 P1) — a failing
  * source's detail is one tap away, satisfying #642's EC-4 ("on a phone,
  * Estado → failing source's detail in one tap"). Previously linked to the
@@ -24,6 +29,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { QueueBand } from "@/components/estado/QueueBand";
 import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
 import {
   SOURCE_STATUS_LABEL,
@@ -243,6 +249,13 @@ export default function AdminIndexPage() {
           <SourceRow key={row.source} row={row} />
         ))}
       </div>
+
+      {/* Colas (issue #640) — below the per-source rows on purpose. #638 built
+          this board so the sources answer "what is broken" without scrolling
+          on a phone; a fixed three-row tile band above them would push that
+          answer off-screen. The band fetches its own endpoint, so it can be
+          slow or fail without touching the rows above. */}
+      <QueueBand />
 
       {disabled.length > 0 && (
         <div style={{ marginTop: 20 }} data-testid="estado-disabled-section">
