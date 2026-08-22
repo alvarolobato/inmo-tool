@@ -296,6 +296,12 @@ def process_pending_captures(conn) -> int:
         # (before this is reassigned) must never leak a PRIOR url's resolved
         # connector into this one's failure record (issue #638 review S1).
         resolved = None
+        # Issue #700: a SECOND timer, for the unexpected-error path only. The
+        # normal paths are timed inside _process_one (which owns its own
+        # start); this one covers a raise from _connector_for_url/the enabled
+        # lookup, before _process_one is ever entered — otherwise the slowest
+        # possible outcome would be the one with no timing at all.
+        row_started = time.monotonic()
         try:
             resolved = _connector_for_url(url)
             if resolved is not None:
@@ -328,6 +334,7 @@ def process_pending_captures(conn) -> int:
                 url,
                 "Unexpected internal error",
                 connector_name=resolved[0].name if resolved is not None else None,
+                processing_ms=_elapsed_ms(row_started),
             )
         processed += 1
 
@@ -634,8 +641,30 @@ def _seed_derived_worklist(conn, portal: str, urls: list[str]) -> int:
     return added
 
 
+def _elapsed_ms(started: float | None) -> int | None:
+    """Milliseconds since `started` (a time.monotonic() reading), or None when
+    the caller didn't time this path. None means "not measured" and must never
+    be coerced to 0 — a 0 would claim a capture was processed instantly, which
+    is exactly the kind of plausible-looking wrong number the whole point of
+    issue #700 is to stop producing (the pre-existing `processed_at -
+    created_at` was misread as processing time for months).
+
+    Monotonic, not wall-clock: an NTP step or a DST change during a slow
+    capture must not be able to produce a negative or wildly inflated duration.
+    Clamped at 0 for the same reason."""
+    if started is None:
+        return None
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
 def _mark_listing(
-    conn, capture_id: int, url: str, portal: str, detail_links: int, sighted: int = 0
+    conn,
+    capture_id: int,
+    url: str,
+    portal: str,
+    detail_links: int,
+    sighted: int = 0,
+    processing_ms: int | None = None,
 ) -> None:
     """Record a captured SEARCH/results page as a clean 'listing' outcome
     (issue #292) — NOT a failure. `status = 'listing'` is neutral end-to-end:
@@ -655,13 +684,14 @@ def _mark_listing(
             UPDATE extension_capture
                SET status = 'listing', connector_name = %s,
                    title = %s, error_msg = NULL, fields_extracted = %s,
-                   processed_at = NOW(), html = NULL
+                   processed_at = NOW(), html = NULL, processing_ms = %s
              WHERE id = %s
             """,
             (
                 portal,
                 f"Página de resultados — {detail_links} enlaces de detalle",
                 detail_links,
+                processing_ms,
                 capture_id,
             ),
         )
@@ -691,6 +721,12 @@ def _process_one(
     processing by hours (a paused connector, an outage keep rows `pending`).
     Passed through to `_record_sightings` as the sighting's true observation
     instant rather than letting it default to "now"."""
+    # Issue #700: the clock starts HERE, not in the poll loop, so
+    # `processing_ms` measures this capture's own work and nothing else — not
+    # the U(0,10)s the row spent waiting for the next poll tick, and not the
+    # other rows in the same batch. Every terminal path below (done / listing /
+    # failed) records it, so a slow FAILURE is as visible as a slow success.
+    started = time.monotonic()
     resolved = _connector_for_url(url)
     if resolved is None:
         # Issue #292: a captured SEARCH/results page is not a broken detail
@@ -718,7 +754,15 @@ def _process_one(
             # in TypeScript against the shared Postgres `listing` table. Kept
             # here too because it's correct and covers this path for real.
             sighted = _record_sightings(conn, portal, detail_urls, created_at)
-            _mark_listing(conn, capture_id, url, portal, len(detail_urls), sighted)
+            _mark_listing(
+                conn,
+                capture_id,
+                url,
+                portal,
+                len(detail_urls),
+                sighted,
+                processing_ms=_elapsed_ms(started),
+            )
             return False
         _mark_failed(
             conn,
@@ -727,6 +771,7 @@ def _process_one(
             "No capture-capable connector recognizes this URL "
             "(supported: Idealista, issue #75; Aliseda, issue #237; "
             "Altamira, issue #271; Hipoges, issue #207)",
+            processing_ms=_elapsed_ms(started),
         )
         return False
 
@@ -760,7 +805,14 @@ def _process_one(
     # the queue, `requeue_rank` and all.
     challenge = challenge_page_signature(html)
     if challenge is not None:
-        _mark_blocked(conn, capture_id, url, challenge, connector.name)
+        _mark_blocked(
+            conn,
+            capture_id,
+            url,
+            challenge,
+            connector.name,
+            processing_ms=_elapsed_ms(started),
+        )
         return False
 
     raw = RawListing(
@@ -783,7 +835,14 @@ def _process_one(
         # it), so a capture that raised already keeps its page. The
         # field-count floor below covers the other half: a page that parses
         # "successfully" into almost nothing.
-        _mark_failed(conn, capture_id, url, str(exc), connector_name=connector.name)
+        _mark_failed(
+            conn,
+            capture_id,
+            url,
+            str(exc),
+            connector_name=connector.name,
+            processing_ms=_elapsed_ms(started),
+        )
         return False
 
     # Reuses the exact same persistence path the automated orchestrator
@@ -882,7 +941,7 @@ def _process_one(
             SET status = 'done', connector_name = %s, property_id = %s,
                 listing_id = %s, fields_extracted = %s, fields_available = %s,
                 title = %s, price_display = %s, processed_at = NOW(),
-                html = %s
+                html = %s, processing_ms = %s
             WHERE id = %s
             """,
             (
@@ -894,6 +953,7 @@ def _process_one(
                 title[:200] if title else None,
                 price_display,
                 retained_html,
+                _elapsed_ms(started),
                 capture_id,
             ),
         )
@@ -937,7 +997,12 @@ def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
 
 
 def _mark_blocked(
-    conn, capture_id: int, url: str, signature: str, connector_name: str
+    conn,
+    capture_id: int,
+    url: str,
+    signature: str,
+    connector_name: str,
+    processing_ms: int | None = None,
 ) -> None:
     """Record a capture that was an anti-bot CHALLENGE, not a listing (#692).
 
@@ -974,9 +1039,10 @@ def _mark_blocked(
         cur.execute(
             "UPDATE extension_capture "
             "SET status = 'blocked', error_msg = %s, connector_name = %s, "
-            "    fields_extracted = 0, processed_at = NOW(), html = NULL "
+            "    fields_extracted = 0, processed_at = NOW(), html = NULL, "
+            "    processing_ms = %s "
             "WHERE id = %s",
-            (signature, connector_name, capture_id),
+            (signature, connector_name, processing_ms, capture_id),
         )
     conn.commit()
     logger.warning(
@@ -990,7 +1056,12 @@ def _mark_blocked(
 
 
 def _mark_failed(
-    conn, capture_id: int, url: str, error_msg: str, connector_name: str | None = None
+    conn,
+    capture_id: int,
+    url: str,
+    error_msg: str,
+    connector_name: str | None = None,
+    processing_ms: int | None = None,
 ) -> None:
     """Record a failed capture. `connector_name` is set whenever the caller
     already knows which portal this URL resolved to (e.g. `normalize()`
@@ -1009,8 +1080,9 @@ def _mark_failed(
             # this before adding a redundant write — pinned by
             # test_failed_capture_keeps_html_for_debugging).
             "UPDATE extension_capture SET status = 'failed', error_msg = %s, "
-            "connector_name = %s, processed_at = NOW() WHERE id = %s",
-            (error_msg, connector_name, capture_id),
+            "connector_name = %s, processed_at = NOW(), processing_ms = %s "
+            "WHERE id = %s",
+            (error_msg, connector_name, processing_ms, capture_id),
         )
     conn.commit()
     # If a still-pending worklist row matches this URL, mark it 'failed' too so

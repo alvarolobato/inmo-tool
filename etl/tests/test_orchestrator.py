@@ -6693,3 +6693,152 @@ class TestActiveProfileScopesEverywhereSentinel:
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
         assert "missing/not type 'radius'" in warnings[0].message
+
+
+class TestPerListingFetchTiming:
+    """`fetch_ms_total` must measure WORK, never the rate limiter's pacing
+    sleep (issue #700).
+
+    This is the whole reason the column can be trusted. `throttle` IS
+    `limiter.acquire`, and connectors call it as fetch_detail's first action,
+    so an unsubtracted stopwatch around fetch_detail bills the pacing interval
+    as if it were work — at Fotocasa's 3/min that is ~20s per listing of pure
+    deliberate idling. Reporting that as "time per listing" would recreate,
+    on the crawl side, the exact misreading that made
+    `extension_capture.processed_at - created_at` worthless on the capture
+    side. If this test ever goes green while the subtraction is removed, the
+    metric is lying.
+    """
+
+    class _ThrottlingConnector(DummyConnector):
+        """Unlike DummyConnector, this one actually calls `throttle()` — which
+        every real connector does and which is what puts the limiter's sleep
+        INSIDE the timed region."""
+
+        def __init__(self, clock, work_seconds: float, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._clock = clock
+            self._work_seconds = work_seconds
+
+        def fetch_detail(self, external_id, throttle):
+            throttle()  # sleeps on the shared fake clock, exactly like a real one
+            self._clock.advance(self._work_seconds)  # the real work
+            return super().fetch_detail(external_id, throttle)
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+        def now_fn(self) -> float:
+            return self.now
+
+        def sleep_fn(self, seconds: float) -> None:
+            self.now += seconds
+
+    def test_fetch_ms_total_excludes_rate_limit_sleep(self, pg_conn, monkeypatch):
+        _apply_schema(pg_conn)
+        clock = self._Clock()
+        # 3 calls/minute → a 20s pacing interval, i.e. Fotocasa's real shape.
+        # Work is 0.3s per listing, ~66x smaller than the sleep around it.
+        connector = self._ThrottlingConnector(
+            clock,
+            work_seconds=0.3,
+            name="test-fetch-timing",
+            external_ids=("t-0", "t-1", "t-2"),
+            rate_limit_per_minute=3,
+            circuit_breaker_min_attempts=10,
+        )
+        limiter = orchestrator.RateLimiter(
+            connector.rate_limit_per_minute,
+            now_fn=clock.now_fn,
+            sleep_fn=clock.sleep_fn,
+        )
+        breaker = orchestrator.CircuitBreaker(
+            connector.circuit_breaker_error_rate,
+            connector.circuit_breaker_min_attempts,
+            window=connector.circuit_breaker_window,
+        )
+        # The orchestrator's own stopwatch must read the SAME clock the limiter
+        # sleeps on, or the two halves of the subtraction aren't comparable.
+        monkeypatch.setattr(orchestrator.time, "monotonic", clock.now_fn)
+
+        try:
+            result = orchestrator.run_connector(
+                pg_conn,
+                connector,
+                orchestrator.ConnectorScope(geography="x"),
+                limiter,
+                breaker,
+            )
+
+            assert result["fetched_count"] == 3
+            # 3 listings × 300ms of work = 900ms. The ~40s of pacing sleep that
+            # happened inside the same timed region is subtracted out entirely.
+            assert result["fetch_ms_total"] == pytest.approx(900, abs=5)
+            # The guard that actually matters: had the sleep been counted, this
+            # would be tens of thousands of ms.
+            assert result["fetch_ms_total"] < 5_000, (
+                "rate-limit sleep leaked into fetch_ms_total — the metric now "
+                "reports deliberate pacing as time-per-listing"
+            )
+        finally:
+            _cleanup(pg_conn, connector.name)
+
+    def test_fetch_ms_total_is_zero_when_nothing_was_fetched(self, pg_conn):
+        """No fetches → 0, and the read side must therefore divide by
+        `fetched_count` and render '—' rather than computing 0/0."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="test-fetch-timing-empty",
+            external_ids=(),
+            circuit_breaker_min_attempts=10,
+        )
+        limiter = orchestrator.RateLimiter(connector.rate_limit_per_minute)
+        breaker = orchestrator.CircuitBreaker(
+            connector.circuit_breaker_error_rate,
+            connector.circuit_breaker_min_attempts,
+            window=connector.circuit_breaker_window,
+        )
+        try:
+            result = orchestrator.run_connector(
+                pg_conn,
+                connector,
+                orchestrator.ConnectorScope(geography="x"),
+                limiter,
+                breaker,
+            )
+            assert result["fetched_count"] == 0
+            assert result["fetch_ms_total"] == 0
+        finally:
+            _cleanup(pg_conn, connector.name)
+
+    def test_fetch_ms_total_is_persisted_on_the_run_result(self, pg_conn):
+        """End-to-end: the counter survives the aggregation across scopes and
+        lands in `connector_run_results`, which is what the dashboard reads."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="test-fetch-timing-persist",
+            external_ids=("p-0", "p-1"),
+            circuit_breaker_min_attempts=10,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT fetched_count, fetch_ms_total FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                fetched_count, fetch_ms_total = cur.fetchone()
+
+            assert fetched_count == 2
+            assert fetch_ms_total is not None
+            assert fetch_ms_total >= 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
