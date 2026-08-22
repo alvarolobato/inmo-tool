@@ -17,6 +17,7 @@ import string
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -671,6 +672,59 @@ class ListingUnavailableError(ConnectorError):
 
 
 @dataclass(frozen=True)
+class RetiredNoticeFacts:
+    """Everything a portal's own "this advert is retired" notice STATES,
+    parsed out of it (issue #691's hardening of D-159).
+
+    `retired_page_signature` answers one question — "is this page the
+    portal's retired-advert notice?" — and answers it with a prose citation.
+    That is all the stale-verification pass needs, because it already knows
+    which listing it asked about: it fetched that one URL itself.
+
+    The CAPTURE path does not have that luxury. The page arrives from a
+    browser the pipeline does not control, and a portal's notice page is
+    generic chrome — near enough the same shell for every dead advert. A
+    bare "yes, some advert is gone" is therefore not enough to withdraw a
+    specific row: the notice has to be shown to be about *this* listing.
+    Real notices carry exactly what that needs — the advert's own reference
+    number, the date the advertiser took it down, and its headline
+    price/size/rooms — so this structure exposes them, and the caller (the
+    half of the system that has database access) does the corroborating.
+
+    Every field except `citation` is optional, and `None` means "the notice
+    did not state it" — never "it stated zero". A caller must treat an
+    absent field as *no information* and fall back to what it would have
+    done without it; treating absence as a mismatch would turn a reworded
+    notice into a silent, permanent loss of the only evidence channel a
+    capture-only portal has.
+
+    `stated_price` / `stated_m2` / `stated_rooms` are what the NOTICE says:
+    a plain-rendered-text parse of facts the pipeline already holds from a
+    proper structured capture. They exist to be recorded as evidence, and
+    (size/rooms only) to be corroborated against the stored row — never to
+    be written back onto it. Price is deliberately NOT corroboration
+    material: a seller can legitimately reprice before delisting, so a price
+    that disagrees is not a reason to doubt the notice. See D-159.
+    """
+
+    # Prose citation of what the page said, persisted verbatim into
+    # `listing_status_event.evidence`. Always present: a facts object exists
+    # only when the notice was positively identified.
+    citation: str
+    # The advert's own reference/id as printed on the notice ("Referencia
+    # del anuncio: 900000001"), verbatim digits.
+    reference: str | None = None
+    # The date the notice says the advertiser withdrew the advert. Already
+    # sanity-checked by the connector that parsed it — a connector leaves
+    # this None rather than hand on a date it does not believe.
+    delisted_on: date | None = None
+    # The advert's headline figures AS PRINTED ON THE NOTICE.
+    stated_price: Decimal | None = None
+    stated_m2: Decimal | None = None
+    stated_rooms: int | None = None
+
+
+@dataclass(frozen=True)
 class VerificationOutcome:
     """The result of re-reading ONE already-known listing to obtain evidence
     about whether it still exists at the source (issue #643).
@@ -976,6 +1030,34 @@ class Connector(ABC):
         """
         return None
 
+    def retired_notice_facts(
+        self, html: str, final_url: str | None = None
+    ) -> RetiredNoticeFacts | None:
+        """The STRUCTURED sibling of `retired_page_signature` — the same
+        identification, plus whatever the notice states about the advert it
+        replaced (issue #691, D-159).
+
+        Default: None, i.e. "I recognise no notice, or I parse no facts out
+        of the one I recognise". Overriding this is optional and changes
+        nothing for a connector that does not: `retired_page_signature`
+        remains the contract the stale-verification pass calls, and every
+        connector that implements only that one keeps working unchanged.
+
+        A connector that DOES override it should implement the recognition
+        here once and make `retired_page_signature` return
+        `facts.citation`, so the two can never disagree about whether a page
+        is a notice.
+
+        This exists because the capture path (`etl/capture.py`) needs to
+        corroborate a notice against the specific listing being captured
+        before it will withdraw anything, and the checks it wants split
+        across two places that know different things: the connector holds
+        the page, the caller holds the database. Returning parsed facts
+        rather than a string keeps the DB out of the connector — see
+        `RetiredNoticeFacts`.
+        """
+        return None
+
     def verify_listing(
         self, external_id: str, url: str | None, throttle: Throttle
     ) -> VerificationOutcome:
@@ -1051,8 +1133,14 @@ class Connector(ABC):
         payload = raw.raw if isinstance(raw.raw, dict) else {}
         html = payload.get("html")
         final_url = payload.get("url")
+        # Either override counts: a connector may implement the recognition
+        # in `retired_notice_facts` and let `retired_page_signature` delegate
+        # to it (idealista does), in which case the class attribute for the
+        # latter would still look inherited on a subclass that only supplied
+        # the former.
         has_own_signature = (
             type(self).retired_page_signature is not Connector.retired_page_signature
+            or type(self).retired_notice_facts is not Connector.retired_notice_facts
         )
         if has_own_signature and not isinstance(html, str):
             raise ConnectorError(

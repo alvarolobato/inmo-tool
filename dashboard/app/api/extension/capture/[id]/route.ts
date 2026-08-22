@@ -19,7 +19,7 @@ import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/e
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 interface CaptureRow {
-  status: "pending" | "done" | "failed" | "listing" | "blocked";
+  status: "pending" | "done" | "failed" | "listing" | "blocked" | "withdrawn";
   error_msg: string | null;
   property_id: number | string | null;
   fields_extracted: number | null;
@@ -96,6 +96,21 @@ export async function GET(
             row.error_msg
             ?? "El portal ha servido un reto anti-bot en lugar del anuncio.",
         },
+      });
+    }
+    // Issue #690 / D-159: the captured page was the portal's own "este
+    // anuncio ya no está publicado" notice. Like "listing", a clean and
+    // informational outcome, NOT a failure — the capture worked and produced
+    // the most valuable answer a capture-only portal can give, so the popup
+    // must say "anuncio retirado", never show a red error. `error_msg`
+    // carries the evidence citation that was written to
+    // listing_status_event.evidence.
+    if (row.status === "withdrawn") {
+      return NextResponse.json({
+        success: true,
+        status: "withdrawn",
+        title: row.title,
+        evidence: row.error_msg,
       });
     }
     if (row.status === "failed") {

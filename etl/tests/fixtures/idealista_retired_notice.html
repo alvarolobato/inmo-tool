@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture (issues #690 and #691, D-159) — hand-written, NOT a
+  captured page.
+
+  This repo is public and never commits scraped listing content, so every
+  value below is INVENTED. What is reproduced is only the STRUCTURE of an
+  Idealista "anuncio retirado" page: the shape production measurement proved
+  it has (D-159) plus the four lines the owner read off a real one by hand
+  (#691). No real street, district, city, price, area, room count,
+  reference or date appears here — the numbers were chosen to be obviously
+  fake and the address does not exist.
+
+    * the site-wide <title>/og:title, NOT a listing's own title — this is the
+      literal string all 26 affected production rows carried;
+    * the portal's notice sentence in the visible body text;
+    * the retired advert's own headline summary line, reference number and
+      the date the advertiser took it down — the three facts #691 parses,
+      corroborates against the stored listing, and records as evidence;
+    * ordinary site chrome (header nav, search box, footer) so the page is
+      NOT trivially empty — the detector must not be passing merely because
+      there is nothing else here;
+    * NONE of `.main-info__title-main`, `.info-data-price`,
+      `.adCommentsLanguage` or `.details-property_features`.
+
+  The reference (900000001) is deliberately outside Idealista's real id
+  range and is what the tests rewrite when they need it to match (or
+  deliberately mismatch) a listing's external_id. The summary line's 80 m²
+  and 3 hab. are what the capture tests seed onto the stored property, so
+  the size/rooms corroboration has something real to agree with.
+
+  It contains no photo, description or contact of any real property, because
+  a retired-notice page carries none of those — that is the entire point of
+  it.
+-->
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Viviendas venta. Viviendas alquiler. Pisos. Chalets &mdash; idealista</title>
+  <meta property="og:title" content="Viviendas venta. Viviendas alquiler. Pisos. Chalets — idealista">
+  <meta property="og:description" content="Casas y pisos, alquiler y venta, anuncios de particulares y inmobiliarias">
+  <script type="application/javascript">
+    var config = { site: "es", section: "error" };
+  </script>
+</head>
+<body>
+  <header class="main-header">
+    <nav>
+      <a href="/venta-viviendas/">Comprar</a>
+      <a href="/alquiler-viviendas/">Alquilar</a>
+      <a href="/obra-nueva/">Obra nueva</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="detail-message">
+      <h1>Lo sentimos, este anuncio ya no está publicado</h1>
+      <p class="detail-message__summary">
+        Piso en venta en Calle Sintética 42, Barrio Inventado, Ciudad Ficticia
+      </p>
+      <p class="detail-message__figures">123.000 € 80 m² 3 hab.</p>
+      <p class="detail-message__reference">Referencia del anuncio: 900000001</p>
+      <p class="detail-message__delisted">El anunciante lo dio de baja el 03/08/2026</p>
+      <p>
+        Puedes seguir buscando entre los miles de anuncios disponibles en
+        idealista.
+      </p>
+      <a class="button" href="/venta-viviendas/">Ver anuncios similares</a>
+    </div>
+  </main>
+
+  <footer>
+    <p>idealista &mdash; el portal inmobiliario</p>
+  </footer>
+</body>
+</html>

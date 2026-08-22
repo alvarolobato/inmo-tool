@@ -17,13 +17,20 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import fields
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from urllib.parse import urljoin, urlparse
 
 from etl.config import retain_capture_html_for
 from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.altamira import AltamiraConnector
-from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
+from etl.connectors.base import (
+    CanonicalListingVersion,
+    ConnectorError,
+    ListingUnavailableError,
+    RawListing,
+    RetiredNoticeFacts,
+)
 from etl.connectors.hipoges import HipogesConnector
 from etl.connectors.idealista import IdealistaConnector
 from etl.listing_detect import detail_portal_for_url, listing_portal_for_url
@@ -707,6 +714,464 @@ def _mark_listing(
     )
 
 
+# How far the size a notice PRINTS may sit from the size we STORED before
+# the two are treated as describing different properties. Rooms are compared
+# exactly: nobody rounds a bedroom.
+#
+# Two benign sources of disagreement have to be absorbed, and they have
+# different shapes:
+#
+#   1. ROUNDING. The notice renders a whole number ("80 m²") while
+#      `property.m2_built` holds NUMERIC(8,2) straight from the structured
+#      capture (79,60). One square metre covers it, whatever the flat's size.
+#   2. DEDUPLICATION. `property.m2_built` is a PROPERTY-level field, shared by
+#      every listing merged onto that property, so it is not necessarily
+#      Idealista's own figure at all. Dedup merges on `sizes_close` — a 5%
+#      band (`etl/dedup/signals/address_coords.py:_MAX_SIZE_RATIO`), exact
+#      equality being reserved for the photo-hash auto-merge path
+#      (`etl/dedup/engine.py`, D-137). A legitimately merged property can
+#      therefore sit several m² from what Idealista printed, and a flat ±1 m²
+#      rule would VETO those withdrawals silently, precisely on the merged
+#      properties (Opus review, PR #691).
+#
+# So the tolerance is the wider of the two: a 1 m² floor for small flats, and
+# otherwise dedup's own band, which is by construction as wide as the
+# disagreement dedup itself was willing to merge across. The veto still
+# catches what it exists for — a notice about someone else's flat differs by
+# far more than 5% in any realistic case.
+_NOTICE_M2_TOLERANCE_FLOOR = Decimal(1)
+_NOTICE_M2_TOLERANCE_RATIO = Decimal("0.05")
+
+
+def _notice_m2_tolerance(stated: Decimal, stored: Decimal) -> Decimal:
+    """The m² gap tolerated between a notice and the stored property row.
+
+    See the constants above. `max(stated, stored)` is the same denominator
+    `address_coords.sizes_close` uses, so the band is the identical shape to
+    the one dedup merged on.
+    """
+    return max(
+        _NOTICE_M2_TOLERANCE_FLOOR,
+        max(stated, stored) * _NOTICE_M2_TOLERANCE_RATIO,
+    )
+
+
+def _notice_contradicts_stored(
+    facts: RetiredNoticeFacts | None,
+    stored_m2: Decimal | None,
+    stored_rooms: int | None,
+) -> str | None:
+    """Does the retired notice describe a DIFFERENT property than the one we
+    stored? Returns a Spanish description of the disagreement, or None
+    (issue #691, D-159).
+
+    The second half of the corroboration chain. The first half —
+    "«Referencia del anuncio» equals the captured external_id" — is enforced
+    inside `IdealistaConnector.normalize`, because it needs only the page and
+    the id the connector was already handed. This half needs the stored
+    listing, so it lives here, where there is a database connection; the
+    connector stays a pure function of HTML and hands over parsed facts
+    instead (`RetiredNoticeFacts`).
+
+    Only fields present on BOTH sides are compared. A notice that prints no
+    size, or a listing stored without one, yields no disagreement — absence
+    is not a mismatch, and treating it as one would let a reworded notice
+    quietly disable the only evidence channel a capture-only portal has. In
+    that case the reference match stands alone, which is what the previous
+    behaviour already relied on.
+
+    PRICE IS DELIBERATELY NOT COMPARED, and this is not an oversight.
+    Repricing before delisting is ordinary seller behaviour — cutting the
+    asking price, failing to sell, and pulling the advert is close to the
+    typical story of a dead listing. A price that moved says nothing about
+    whether the notice is about our advert, and vetoing on it would reject
+    exactly the withdrawals we most want to record. The stated price is
+    still captured into the evidence, where it is the first time this
+    project has ever recorded an advert's FINAL asking price.
+    """
+    if facts is None:
+        return None
+    if (
+        facts.stated_m2 is not None
+        and stored_m2 is not None
+        and abs(Decimal(stored_m2) - facts.stated_m2)
+        > _notice_m2_tolerance(facts.stated_m2, Decimal(stored_m2))
+    ):
+        return (
+            f"el aviso describe {facts.stated_m2} m² y el anuncio "
+            f"almacenado tiene {stored_m2} m²"
+        )
+    if (
+        facts.stated_rooms is not None
+        and stored_rooms is not None
+        and int(stored_rooms) != facts.stated_rooms
+    ):
+        return (
+            f"el aviso describe {facts.stated_rooms} habitaciones y el "
+            f"anuncio almacenado tiene {stored_rooms}"
+        )
+    return None
+
+
+def _mark_withdrawn(
+    conn,
+    capture_id: int,
+    url: str,
+    connector_name: str,
+    external_id: str,
+    evidence: str,
+    facts: RetiredNoticeFacts | None = None,
+) -> None:
+    """Record a capture that positively identified the portal's own
+    "anuncio retirado" notice (issue #690, D-159).
+
+    Three writes, in one transaction, in this order:
+
+    1. `listing.status = 'withdrawn'` for the listing this URL names — if we
+       know it. MARK, NEVER DELETE (D-157): the row, its
+       `listing_price_history`, its feedback and its dedup identity all
+       survive, so a property whose adverts all vanish keeps its history and
+       a resurrection stays representable.
+    2. An append-only `listing_status_event` citing the notice in
+       `evidence`. This is what makes the transition auditable a year later
+       under D-157's "only evidence changes state" rule — the row can answer
+       "evidence of what?" on its own.
+    3. The capture row itself as `status = 'withdrawn'`.
+
+    `facts` (issue #691) is what the notice STATED, when the connector could
+    parse it — `None` for a connector that does not implement
+    `retired_notice_facts`, which reproduces the pre-#691 behaviour exactly.
+    It does three things here, and NOT a fourth:
+
+    * **it can veto the withdrawal.** If the notice describes a different
+      size or room count than the stored listing, this is not our advert's
+      notice: nothing is withdrawn, and the capture is recorded `failed`
+      exactly as an unreadable page would be. See
+      `_notice_contradicts_stored`.
+    * **it dates the transition.** `listing_status_event.observed_at` is
+      stamped with the date the notice says the ADVERTISER took the advert
+      down, not with the moment we happened to read the page. In the sample
+      that prompted this, the advert had already been down for twelve days
+      when the page was captured — twelve days of drift that `NOW()` would
+      have invented. A
+      missing or disbelieved date falls back to `NOW()`; the connector
+      never hands over a date it does not believe (see
+      `_notice_delisting_date`), and the evidence says so when it discarded
+      one.
+    * **it enriches the evidence**, which already quotes the notice
+      sentence and now also carries the reference, the stated delisting
+      date and the advert's final stated price/size/rooms. The price in
+      particular is a fact this project has never recorded before: what the
+      advert was actually asking when it died.
+
+    The fourth thing it deliberately does NOT do is touch the `listing` row's
+    own fields. Those hold values from a healthy structured capture; the
+    notice's are a weaker parse of the same facts off plain rendered text.
+    Overwriting good data on a row being marked dead is all risk and no gain.
+
+    Deliberately does NOT touch `last_seen_at` / `last_fetched_at`. Those
+    mean "last confirmed PRESENT", and this observation is the exact
+    opposite; bumping them would make a listing we just proved gone look
+    freshly confirmed alive — the very corruption this issue fixes (the
+    pre-fix path bumped both).
+
+    Deliberately does NOT create a listing when none exists. A withdrawn
+    notice for a URL we never successfully captured tells us about a
+    listing we have no data for; inventing a row for it would recreate the
+    18 empty phantom listings D-159 documents. The capture is still recorded
+    (with `listing_id` NULL) so the evidence is not lost.
+
+    Idempotent: re-capturing the same retired page appends no second event
+    and changes nothing, because the status guard already sees 'withdrawn'.
+
+    The guard is `status != 'withdrawn'`, NOT a whitelist of `active`, so a
+    listing already marked `sold`/`reserved`/`expired` is flipped to
+    `withdrawn` too. That is deliberate: the notice is first-hand, dated,
+    present-tense evidence from the portal itself, and every other status a
+    listing can hold today is inferred rather than observed. Nothing is lost
+    by the flip — `listing_status_event` is append-only, so the earlier claim
+    and this one both stay on the record with their own evidence, and a
+    reader can see which came from where. (In practice nothing in the ETL
+    writes `sold` yet; the rule is stated here so a connector that starts to
+    does not silently change what a withdrawal means.)
+    """
+    listing_id: int | None = None
+    property_id: int | None = None
+    stored_m2: Decimal | None = None
+    stored_rooms: int | None = None
+    stored_last_seen_at: datetime | None = None
+    already_withdrawn = False
+
+    # Read first, in its own statement, so the corroboration decision below
+    # is made BEFORE anything is written and a veto needs nothing rolled
+    # back. `property` carries m2_built/rooms; `listing.property_id` is NOT
+    # NULL by schema, so an inner join can never drop a row.
+    # `last_seen_at` is read for the date clamp below, NOT to be written.
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT l.id, l.property_id, l.status, p.m2_built, p.rooms, "
+                "l.last_seen_at "
+                "FROM listing l JOIN property p ON p.id = l.property_id "
+                "WHERE l.source = %s AND l.external_id = %s",
+                (connector_name, external_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "extension_capture id=%s: could not read the stored listing for "
+            "%s while recording a retired-advert notice — recording the "
+            "capture as failed rather than withdrawing on an uncorroborated "
+            "notice",
+            capture_id,
+            url,
+        )
+        _mark_failed(conn, capture_id, url, evidence, connector_name=connector_name)
+        return
+
+    if row is not None:
+        (
+            listing_id,
+            property_id,
+            prev_status,
+            stored_m2,
+            stored_rooms,
+            stored_last_seen_at,
+        ) = row
+        already_withdrawn = prev_status == "withdrawn"
+
+    contradiction = _notice_contradicts_stored(facts, stored_m2, stored_rooms)
+    if contradiction is not None:
+        # The reference matched but the property does not. Something is
+        # wrong with one side or the other and we cannot tell which, so this
+        # resolves the same way every other "I cannot read this page" does
+        # (D-157): capture recorded `failed` for the operator to look at,
+        # not one listing row touched, worklist row left `pending`.
+        refusal = (
+            f"{connector_name} {external_id}: the captured page is the "
+            "portal's 'anuncio retirado' notice and its reference matches "
+            "this listing, but the property it describes does not — "
+            f"{contradiction}. Refusing to withdraw a listing on a notice "
+            "about a different property (issue #691, D-159); nothing about "
+            f"any listing has been changed. Notice read as: {evidence}"
+        )
+        _mark_failed(conn, capture_id, url, refusal, connector_name=connector_name)
+        return
+
+    evidence = _corroborated_evidence(evidence, facts, stored_m2, stored_rooms)
+    # NULL means "the notice gave us no date we believe" and the SQL below
+    # falls back to NOW() — the capture time, which is at least honestly
+    # "when we saw this" rather than a date we made up.
+    delisted_on = facts.delisted_on if facts is not None else None
+    delisted_on, clamp_note = _clamped_delisting_date(delisted_on, stored_last_seen_at)
+    if clamp_note is not None:
+        evidence = f"{evidence}; {clamp_note}"
+
+    try:
+        with conn.cursor() as cur:
+            if row is not None and not already_withdrawn:
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn' WHERE id = %s",
+                    (listing_id,),
+                )
+                cur.execute(
+                    "INSERT INTO listing_status_event "
+                    "(listing_id, observed_at, status, evidence) "
+                    "VALUES (%s, COALESCE(%s::timestamptz, NOW()), "
+                    "'withdrawn', %s)",
+                    (listing_id, delisted_on, evidence),
+                )
+            cur.execute(
+                """
+                UPDATE extension_capture
+                   SET status = 'withdrawn', connector_name = %s,
+                       listing_id = %s, property_id = %s,
+                       title = %s, error_msg = %s, fields_extracted = 0,
+                       processed_at = NOW(), html = NULL
+                 WHERE id = %s
+                """,
+                (
+                    connector_name,
+                    listing_id,
+                    property_id,
+                    "Anuncio retirado del portal"
+                    + (
+                        f" (baja {delisted_on.strftime('%d/%m/%Y')})"
+                        if delisted_on is not None
+                        else ""
+                    ),
+                    evidence,
+                    capture_id,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "extension_capture id=%s: could not record the retired-advert "
+            "outcome for %s — falling back to 'failed' so the capture is not "
+            "left pending forever",
+            capture_id,
+            url,
+        )
+        _mark_failed(conn, capture_id, url, evidence, connector_name=connector_name)
+        return
+
+    # Retire the guided-worklist row too (issue #690). 'stale' is the status
+    # this table already defines as "vanished from the portal" (issue #273)
+    # and it is excluded from the "Abrir siguiente pendiente" pool — so the
+    # owner is never handed a URL we have just proven is gone. Best-effort
+    # and after the commit above, same posture as _correlate_worklist.
+    _retire_worklist_row(conn, url)
+
+    logger.info(
+        "extension_capture id=%s: %s %s is RETIRED at the portal (baja %s) "
+        "— %s (listing_id=%s) | %s",
+        capture_id,
+        connector_name,
+        external_id,
+        delisted_on.isoformat() if delisted_on is not None else "sin fecha",
+        "listing marked withdrawn"
+        if listing_id is not None and not already_withdrawn
+        else (
+            "listing was already withdrawn"
+            if already_withdrawn
+            else "no stored listing for this URL, nothing to withdraw"
+        ),
+        listing_id,
+        evidence,
+    )
+
+
+def _clamped_delisting_date(
+    delisted_on: date | None,
+    last_seen_at: datetime | None,
+) -> tuple[date | None, str | None]:
+    """Refuse a delisting date that precedes our own last sighting of the
+    advert alive (Opus review of PR #691).
+
+    Returns `(date_to_stamp, note_or_None)`; the note goes into the evidence
+    so the refusal is auditable, exactly as `_notice_delisting_date`'s own
+    rejections already are.
+
+    `_notice_delisting_date` in the connector already refuses dates that are
+    impossible, in the future, or older than ten years. It cannot make this
+    check: believability is relative to what WE observed, and the connector
+    is a pure function of the page. So the last gate lives here.
+
+    A notice dated before `last_seen_at` is a contradiction of the same class
+    D-157 exists to prevent — it asserts the advert was already dead on a day
+    we have a record of confirming it alive. One of the two observations is
+    wrong and nothing here can say which, so this falls back to the safe
+    default the rest of the function already uses for a disbelieved date:
+    `NOW()`, the capture time. Note the asymmetry with the veto above — a
+    contradicted SIZE kills the whole withdrawal (it means the notice is
+    about someone else's flat), whereas a contradicted DATE costs the
+    transition only its precision. The portal still positively said this
+    advert is gone; only "since when" is in doubt.
+
+    Compared at DAY granularity: the notice prints a date, not a timestamp,
+    so a notice dated the same calendar day as our last sighting is not a
+    contradiction. A listing with no `last_seen_at` at all (nullable by
+    schema) has nothing to contradict, so the stated date stands.
+    """
+    if delisted_on is None or last_seen_at is None:
+        return delisted_on, None
+    last_seen_day = last_seen_at.date()
+    if delisted_on >= last_seen_day:
+        return delisted_on, None
+    return None, (
+        f"la fecha de baja declarada ({delisted_on.strftime('%d/%m/%Y')}) es "
+        f"anterior a la última vez que vimos el anuncio activo "
+        f"({last_seen_day.strftime('%d/%m/%Y')}), así que se descarta; la "
+        "retirada se fecha en el momento de la captura"
+    )
+
+
+def _corroborated_evidence(
+    evidence: str,
+    facts: RetiredNoticeFacts | None,
+    stored_m2: Decimal | None,
+    stored_rooms: int | None,
+) -> str:
+    """Append to the connector's citation what THIS side of the check could
+    verify (issue #691).
+
+    The connector's citation says what the page stated; only the caller
+    knows what that was checked against. Recording the difference matters
+    because "reference matched, and so did size and rooms" and "reference
+    matched, and the notice stated nothing else" are very different amounts
+    of evidence, and a year later `listing_status_event.evidence` is the
+    only place anyone can tell them apart.
+    """
+    if facts is None:
+        return evidence
+    corroborated = [
+        label
+        for label, stated, stored in (
+            ("superficie", facts.stated_m2, stored_m2),
+            ("habitaciones", facts.stated_rooms, stored_rooms),
+        )
+        if stated is not None and stored is not None
+    ]
+    if corroborated:
+        return (
+            f"{evidence}; corroborado contra el anuncio almacenado: "
+            f"{' y '.join(corroborated)} coinciden"
+        )
+    return (
+        f"{evidence}; sin datos comparables con el anuncio almacenado más "
+        "allá de la referencia"
+    )
+
+
+def _retire_worklist_row(conn, url: str) -> None:
+    """Flip this URL's `capture_worklist` row to 'stale' — "vanished from the
+    portal" (issue #273's own definition of that status) — after a capture
+    positively proved the advert is retired (issue #690).
+
+    Only ever touches a row that is still 'pending'. That single-status
+    guard is doing three separate jobs:
+
+    * it never resurrects or overwrites a 'skipped' row — that status is the
+      OWNER'S choice about his own queue, and no automated inference gets to
+      overrule it;
+    * it never downgrades a 'captured' row, which already records a real
+      successful capture and its `matched_capture_id`;
+    * it never touches an already-'stale' row, keeping this idempotent.
+
+    Leaving the row 'pending' instead was the alternative, and it is wrong
+    on this evidence: 'pending' means "still to visit", and re-serving a URL
+    the portal has told us is gone spends the owner's attention — the single
+    scarcest resource in a capture-only pipeline — on a page that can never
+    produce data. 'failed' would be wrong too: nothing failed. The capture
+    worked perfectly and returned an answer.
+
+    Never raises: worklist bookkeeping must not fail the withdrawal it
+    annotates.
+    """
+    key = worklist_match_key(url)
+    if not key:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE capture_worklist SET status = 'stale', updated_at = NOW() "
+                "WHERE match_key = %s AND status = 'pending'",
+                (key,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "capture_worklist retirement failed for url=%s — the withdrawal "
+            "itself is already committed and unaffected",
+            url,
+        )
+
+
 def _process_one(
     conn, capture_id: int, url: str, html: str, created_at: datetime | None = None
 ) -> bool:
@@ -821,6 +1286,33 @@ def _process_one(
 
     try:
         canonical = connector.normalize(raw)
+    except ListingUnavailableError as exc:
+        # Issue #690 / D-159. The connector POSITIVELY identified the
+        # portal's own "this advert is retired" notice, and (issue #691) the
+        # reference printed on it matches the advert we captured. Caught
+        # BEFORE the generic ConnectorError branch below (it is a subclass,
+        # so order is load-bearing): this is not a failed capture, it is the
+        # single most valuable capture a WAF-walled, capture-only portal can
+        # produce — first-hand evidence of absence, obtained with zero
+        # automated requests because the owner was already on the page.
+        #
+        # Re-parsing the page for its facts rather than smuggling them out
+        # through the exception: the connector stays a pure function of
+        # HTML, `ListingUnavailableError` keeps the shape every other
+        # connector raises it with, and the cost lands only on the rare
+        # notice-page path — never on the real-advert path this runs
+        # thousands of times against. Returns None for a connector that does
+        # not implement it, which is the pre-#691 behaviour exactly.
+        _mark_withdrawn(
+            conn,
+            capture_id,
+            url,
+            connector.name,
+            external_id,
+            str(exc),
+            connector.retired_notice_facts(html, url),
+        )
+        return False
     except ConnectorError as exc:
         # Issue #692: retain the HTML of an ANOMALOUS capture. This branch is
         # the "I cannot tell what this page is" outcome, and it is exactly
