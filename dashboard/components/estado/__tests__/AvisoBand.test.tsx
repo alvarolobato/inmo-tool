@@ -47,6 +47,7 @@ describe("avisosFrom", () => {
             portal: "idealista",
             signature: "captcha_wall",
             detected_at: new Date(NOW - 3600_000).toISOString(),
+            resolved_at: null,
           },
         ],
         zero_result_regressions: [
@@ -150,7 +151,12 @@ describe("<AvisoBand/>", () => {
     mockFetch(
       payload({
         extension_blocks: [
-          { portal: "idealista", signature: "captcha_wall", detected_at: new Date().toISOString() },
+          {
+            portal: "idealista",
+            signature: "captcha_wall",
+            detected_at: new Date().toISOString(),
+            resolved_at: null,
+          },
         ],
       }),
     );

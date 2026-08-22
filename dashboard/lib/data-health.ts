@@ -158,6 +158,23 @@ export interface ExtensionBlockEpisode {
   portal: string;
   signature: string;
   detected_at: string;
+  /**
+   * When the portal was next observed SERVING us a page, proving the wall was
+   * gone — or null while no such evidence exists yet (issue #711, D-169).
+   *
+   * `extension_block_episode` has no resolution column and no writer that
+   * closes an episode: the owner clears the wall by hand in their browser,
+   * which is how the feature is meant to work, and nothing reports it back.
+   * So resolution is DERIVED, at read time, from the capture ledger — see
+   * `getRecentBlockEpisodes` for the SQL and D-169 for which capture outcomes
+   * count as "the portal served us the page". Deriving it means it can never
+   * drift out of step with the evidence, and it needed no schema change, no
+   * new writer and no extension change.
+   *
+   * Non-null does NOT mean "nothing is wrong with this portal" — only that
+   * THIS episode's wall is over. A later wall is a later episode.
+   */
+  resolved_at: string | null;
 }
 
 export interface DataHealthResponse {
@@ -243,8 +260,15 @@ export function captureSuccessRate(done: number, failed: number): number | null 
  * `extension_block_episode` records a detection, never a resolution — there is
  * no "cleared" row to wait for, because the block clears in the owner's
  * browser (solve the challenge, press "Reanudar" in the popup) and nothing
- * reports that back. So "active" has to be derived from recency, and the
- * window is a judgement call rather than a measurement.
+ * reports that back.
+ *
+ * This window is therefore an UPPER bound on how long an unresolved block
+ * stays interesting — never the whole answer to "is it blocked right now".
+ * That was issue #711: for three hours the board told the owner idealista was
+ * walled while the row directly below it showed idealista ingesting, because
+ * recency was the only bound there was. `resolved_at` (D-169) is the other
+ * bound, and it is the one that carries evidence; this one only expires an
+ * episode nothing has contradicted yet. Both must pass.
  *
  * 24 h, for two reasons that pull in the same direction:
  *   - Too short and a block detected overnight is already "history" by the
@@ -261,8 +285,28 @@ export function captureSuccessRate(done: number, failed: number): number | null 
 export const ACTIVE_BLOCK_WINDOW_HOURS = 24;
 
 /**
- * The most recent block episode per portal that falls inside
+ * The most recent UNRESOLVED block episode per portal that falls inside
  * {@link ACTIVE_BLOCK_WINDOW_HOURS}, keyed by portal.
+ *
+ * Two independent bounds, both required (issue #711, D-169):
+ *
+ *   1. **Not contradicted** — `resolved_at` is null. A non-null value means
+ *      the portal has since served us a page, which is first-hand evidence
+ *      the wall is down. Evidence beats the clock, always and in both
+ *      directions: D-157 says elapsed time may only NOMINATE a listing for
+ *      verification and evidence decides whether it is gone; this is the same
+ *      rule pointed the other way, where evidence CLEARS a state that elapsed
+ *      time would otherwise keep asserting forever.
+ *   2. **Not expired** — inside the recency window, for an episode nothing
+ *      has contradicted yet.
+ *
+ * Checked in that order on purpose: resolution is a fact about this episode,
+ * the window is a guess about episodes we know nothing more about.
+ *
+ * A resolved episode is not filtered out of EXISTENCE — Actividad's `bloqueo`
+ * rows (#706) render the same episode as history and must keep doing so. This
+ * function answers "is this portal walled right now", which is a different
+ * question with a different answer.
  *
  * `episodes` is expected newest-first (`getRecentBlockEpisodes` orders that
  * way) but this does not rely on it — it keeps the newest per portal
@@ -274,12 +318,34 @@ export function activeBlocksByPortal(
   now: number = Date.now(),
 ): Map<string, ExtensionBlockEpisode> {
   const cutoff = now - ACTIVE_BLOCK_WINDOW_HOURS * 3600_000;
+
+  // Pass 1 — the NEWEST episode per portal, and nothing else. Both filters are
+  // deliberately held back to pass 2: they are questions about a portal's
+  // current state, and a portal's current state is described by its newest
+  // episode, never by an older one that happens to survive the filter. Doing
+  // it in one pass looks tidier and is wrong — a portal whose newest episode
+  // is resolved, with an older unresolved one still inside the window, would
+  // fall back to the older row and pin an alarm that its own newest evidence
+  // has already retracted. (The SQL feeds one row per portal, so this cannot
+  // arise today; the contract that this function does not depend on its
+  // caller's shaping is the point, and the unit test pins it.)
   const byPortal = new Map<string, ExtensionBlockEpisode>();
   for (const ep of episodes) {
     const at = new Date(ep.detected_at).getTime();
-    if (Number.isNaN(at) || at < cutoff) continue;
+    if (Number.isNaN(at)) continue;
     const seen = byPortal.get(ep.portal);
     if (!seen || new Date(seen.detected_at).getTime() < at) byPortal.set(ep.portal, ep);
+  }
+
+  // Pass 2 — is that newest episode still a live claim? Resolved beats the
+  // clock; expiry only retires an episode nothing has contradicted.
+  for (const [portal, ep] of byPortal) {
+    // Truthiness, not `!== null`, on purpose: anything that is not a real
+    // timestamp (null, absent, empty) means NO clearing evidence, which must
+    // keep the alarm up. Every ambiguity here has to fail toward alarming.
+    if (ep.resolved_at || new Date(ep.detected_at).getTime() < cutoff) {
+      byPortal.delete(portal);
+    }
   }
   return byPortal;
 }

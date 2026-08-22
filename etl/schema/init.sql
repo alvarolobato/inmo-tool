@@ -1937,6 +1937,12 @@ CREATE TABLE IF NOT EXISTS extension_capture (
 CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
     ON extension_capture (created_at) WHERE status = 'pending';
 
+-- (This table has a second partial index, idx_extension_capture_served, and it
+-- is declared next to extension_block_episode rather than here on purpose: it
+-- exists solely to serve that table's D-169 resolution derivation, and the
+-- reasoning for which statuses it covers is only legible beside the episode
+-- table it answers for. Search for #711 if you got here first.)
+
 -- Migration (issues #292, #690 and #692): widen the status CHECK beyond the
 -- original three values. A DB created before #292 carries the three-value
 -- constraint under its default name (extension_capture_status_check); CREATE
@@ -3412,9 +3418,12 @@ CREATE INDEX IF NOT EXISTS idx_llm_quota_reading_read_at
 -- extension can't inject into the dashboard origin. `signature` is the marker
 -- id detect.js matched (e.g. 'captcha_wall', 'cloudflare_challenge') — NEVER
 -- page content or the captured URL (public repo, no scraped listing data).
--- Read by /etl/salud (via getDataHealth) as an INFORMATIONAL notice, aligned
--- with D-047's "a soft-block/challenge stop is a clean outcome, not an
--- error" vocabulary — never rendered as a red/failed badge.
+-- Read as an INFORMATIONAL notice, aligned with D-047's "a soft-block/
+-- challenge stop is a clean outcome, not an error" vocabulary — never
+-- rendered as a red/failed badge. A row here is a POINT EVENT, not a state:
+-- it says a wall existed at `detected_at`, and says nothing whatsoever about
+-- whether it still does. Any surface deriving "blocked right now" from it must
+-- also apply the D-169 resolution rule below (#711).
 CREATE TABLE IF NOT EXISTS extension_block_episode (
     id           BIGSERIAL    PRIMARY KEY,
     portal       TEXT         NOT NULL,
@@ -3427,6 +3436,28 @@ CREATE TABLE IF NOT EXISTS extension_block_episode (
 
 CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
     ON extension_block_episode (detected_at DESC);
+
+-- Issue #711 / D-169: this table records a DETECTION and never a resolution,
+-- and it never will — the wall clears in the owner's browser (solve the
+-- challenge, press "Reanudar") and nothing reports that back, so there is no
+-- writer to hang a `resolved_at` column on. Deliberately still no such column:
+-- resolution is DERIVED at read time from the capture ledger instead
+-- (lib/db/extension-blocks.ts::getRecentBlockEpisodes), because a column
+-- would need the writer that does not exist, and a stored answer can drift
+-- from the evidence while a derived one cannot.
+--
+-- The rule: an episode is over once a capture from that portal LANDS after it
+-- with an outcome proving the portal served us the page — 'done', 'withdrawn'
+-- or 'listing'. Not 'blocked' (the wall itself), not 'never_rendered' (which
+-- asserts only that we ran out of patience — see its note above — and is
+-- exactly what a slow challenge page produces), not 'failed' (bytes arrived,
+-- the parser rejected them: evidence about us, not about the portal).
+--
+-- This index is what makes that derivation cheap: one range-scan per portal
+-- instead of a scan of the whole capture table per episode.
+CREATE INDEX IF NOT EXISTS idx_extension_capture_served
+    ON extension_capture (connector_name, created_at)
+    WHERE status IN ('done', 'withdrawn', 'listing');
 
 -- "Forzar captura + diagnóstico" (issue #671) — a DIAGNOSTIC channel, NOT an
 -- ingest path. Deliberately a table of its own, not a flag/status value

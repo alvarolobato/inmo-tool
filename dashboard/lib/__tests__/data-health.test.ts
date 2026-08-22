@@ -139,6 +139,7 @@ describe("extensionBlockNoticeEs (issue #634)", () => {
       portal: "idealista",
       signature: "captcha_wall",
       detected_at: "2026-08-20T10:00:00.000Z",
+      resolved_at: null,
     });
     expect(msg).toBe("nota: captura de idealista pausada por bloqueo (muro CAPTCHA)");
   });
@@ -148,6 +149,7 @@ describe("extensionBlockNoticeEs (issue #634)", () => {
       portal: "aliseda",
       signature: "some_future_signature",
       detected_at: "2026-08-20T10:00:00.000Z",
+      resolved_at: null,
     });
     expect(msg).toContain("some_future_signature");
   });

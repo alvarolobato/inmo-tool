@@ -16,8 +16,18 @@ import type { ZeroResultRegression } from "../zero-result-regression";
 const NOW = Date.parse("2026-08-22T12:00:00Z");
 const hoursAgo = (h: number) => new Date(NOW - h * 3600_000).toISOString();
 
-function episode(portal: string, h: number, signature = "captcha_wall"): ExtensionBlockEpisode {
-  return { portal, signature, detected_at: hoursAgo(h) };
+function episode(
+  portal: string,
+  h: number,
+  signature = "captcha_wall",
+  resolvedHoursAgo: number | null = null,
+): ExtensionBlockEpisode {
+  return {
+    portal,
+    signature,
+    detected_at: hoursAgo(h),
+    resolved_at: resolvedHoursAgo === null ? null : hoursAgo(resolvedHoursAgo),
+  };
 }
 
 describe("activeBlocksByPortal", () => {
@@ -44,6 +54,7 @@ describe("activeBlocksByPortal", () => {
       portal: "x",
       signature: "s",
       detected_at: "not-a-date",
+      resolved_at: null,
     };
     expect(activeBlocksByPortal([bad], NOW).size).toBe(0);
   });
@@ -53,6 +64,56 @@ describe("activeBlocksByPortal", () => {
     // out mid-second on a value nobody can act on that precisely.
     const at = activeBlocksByPortal([episode("idealista", ACTIVE_BLOCK_WINDOW_HOURS)], NOW);
     expect(at.size).toBe(1);
+  });
+
+  // ── Resolution (issue #711, D-169) ────────────────────────────────────────
+  //
+  // The live false alarm this fixes: episode at 14:53, idealista ingesting
+  // again by 17:39, board still saying "pausada por bloqueo" at 17:45. Recency
+  // alone said active; the capture ledger said otherwise, and the ledger wins.
+
+  it("drops a RESOLVED episode even though it is well inside the window", () => {
+    // The production shape, to scale: detected 3h ago, portal serving again
+    // since 5 minutes later.
+    const resolved = episode("idealista", 3, "captcha_wall", 2.9);
+    expect(activeBlocksByPortal([resolved], NOW).size).toBe(0);
+  });
+
+  it("keeps an UNRESOLVED episode inside the window", () => {
+    // The control for the test above — same episode, no clearing evidence.
+    const active = activeBlocksByPortal([episode("idealista", 3)], NOW);
+    expect([...active.keys()]).toEqual(["idealista"]);
+  });
+
+  it("resolves per portal — one portal's recovery never clears another's", () => {
+    const active = activeBlocksByPortal(
+      [episode("idealista", 3, "captcha_wall", 2), episode("hipoges", 3)],
+      NOW,
+    );
+    expect([...active.keys()]).toEqual(["hipoges"]);
+  });
+
+  it("falls back to ALARMING when resolution is absent from the payload", () => {
+    // A field that is missing, empty, or otherwise not a real timestamp is NO
+    // clearing evidence, and must never be read as "resolved". Every ambiguity
+    // in this derivation has to fail toward keeping the alarm up: a stale chip
+    // is visibly wrong, a missing one is silent.
+    const noField = { portal: "idealista", signature: "captcha_wall", detected_at: hoursAgo(3) };
+    expect(activeBlocksByPortal([noField as ExtensionBlockEpisode], NOW).size).toBe(1);
+    const empty = { ...episode("idealista", 3), resolved_at: "" };
+    expect(activeBlocksByPortal([empty], NOW).size).toBe(1);
+  });
+
+  it("a RESOLVED newest episode does not resurrect an older unresolved one", () => {
+    // Per-portal the derivation keeps the newest; if that one is resolved the
+    // portal is clear, full stop. An older episode is older evidence about the
+    // same wall, and a wall that has since been served through is over — the
+    // alternative would pin the chip on the oldest episode in the window and
+    // never let the portal go green.
+    const older = episode("idealista", 10, "datadome");
+    const newer = episode("idealista", 2, "captcha_wall", 1);
+    expect(activeBlocksByPortal([older, newer], NOW).size).toBe(0);
+    expect(activeBlocksByPortal([newer, older], NOW).size).toBe(0);
   });
 });
 
