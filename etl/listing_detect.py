@@ -77,7 +77,31 @@ _PORTALS: list[dict[str, object]] = [
         # `/contact-received` or `/unavailable` on the SAME id — see
         # hipoges.py's module docstring. DOM extraction beyond this URL shape
         # is an unvalidated draft (D-111).
-        "detail": re.compile(r"^/[a-z]{2}/(?:[^/]+/)?detail/[^/]+", re.IGNORECASE),
+        # TWO independent narrowings (issue #701, review L2).
+        #
+        # 1. The `:investment` slot excludes `blog`. Hipoges' own home page
+        #    links six blog articles as `es/blog/detail/<slug>` (VERIFIED in
+        #    production `extension_capture` id 3577), and the wildcard was
+        #    classifying every one of them as a listing-detail page. Deny-list
+        #    rather than allow-list for the same reason the shape-based listing
+        #    regex below exists: an allow-list of asset categories we have
+        #    never confirmed would make a real URL silently vanish (D-115).
+        #
+        # 2. A deny-list closes a HOLE, not a CLASS — `/es/news/detail/…` would
+        #    still pass — so the `:id` slot must contain at least one DIGIT.
+        #    Every non-asset `detail/` link observed on this portal is a prose
+        #    slug; every asset reference observed carries digits (RARE-04347,
+        #    FRRE-20005, REGA-06247, GTRE-01142, … off the CDN paths of ids
+        #    3576/3577/3617). Deliberately NOT the harvest's stricter
+        #    `[a-z]{4}-\d{4,6}`: there a too-narrow shape merely yields no URL
+        #    and is counted, here it would make a real advert vanish silently.
+        #    See detect.js's isDetailPath for the full argument.
+        #
+        # MUST stay in lockstep with detect.js's isDetailPath (D-069).
+        "detail": re.compile(
+            r"^/[a-z]{2}/(?:(?!blog/)[^/]+/)?detail/(?=[^/?#]*\d)[^/?#]+",
+            re.IGNORECASE,
+        ),
         # Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
         # <town>[/<features>]` (5+ path segments after the domain) or the
         # `/<lang>/(area|countries|map|point)/…` variants.

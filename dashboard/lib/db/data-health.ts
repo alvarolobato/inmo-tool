@@ -157,7 +157,9 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
            -- deliberately does NOT require status='done': a capture that
            -- FAILED still cost the owner its render wait and its processing
            -- time, and excluding failures would make a portal look fastest
-           -- exactly when it is breaking most.
+           -- exactly when it is breaking most. By that same rule, issue #701's
+           -- 'never_rendered' rows are INCLUDED: they cost the portal's whole
+           -- render budget and are the clearest possible evidence it is slow.
            percentile_cont(0.5) WITHIN GROUP (ORDER BY ec.render_wait_ms)
              FILTER (WHERE ec.created_at > NOW() - INTERVAL '7 days')      AS median_render_wait_ms_7d,
            -- processing_ms IS NOT NULL is required, not COALESCEd to 0:

@@ -1392,6 +1392,9 @@ $('#diagnostic-btn').addEventListener('click', async () => {
     setDiagnosticStatus(err.message || 'No se pudo enviar el diagnóstico.', 'error');
   } finally {
     btn.disabled = false;
+    // SEND_DIAGNOSTIC disarms the recorder whether the POST succeeded or not
+    // (background.js), so the armed banner must come down either way.
+    refreshNetworkRecordingState();
   }
 });
 
@@ -1461,6 +1464,177 @@ if (spikePermBtn) {
     }
   });
 }
+
+// ─── Opt-in network capture: "Grabar red y recargar" (issues #671, #684) ──
+//
+// A DOM snapshot cannot contain data that arrives by XHR after render — a
+// Hipoges results page is an Angular shell whose listings are fetched
+// separately, and idealista's gallery lazy-loads the same way. This arms a
+// MAIN-world fetch/XHR recorder for the tab's origin and reloads, so the next
+// "Forzar captura + diagnóstico" carries the REST traffic the app actually
+// made.
+//
+// This button shipped in PR #675 and was REMOVED before merge: the recorder's
+// teardown was keyed off an in-memory Map in the MV3 service worker, so on the
+// happy path the buffer was lost AND the wrapper stayed registered, on every
+// tab of the origin, across browser restarts. #684 rebuilt that lifecycle
+// (see background.js's "armed-recorder lifecycle" block); this is the entry
+// point going back.
+
+/** Origin of `url`, or null when it has none we could scope a recording to. */
+function recordableOrigin(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl));
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function renderNetworkRecordingState(state) {
+  const banner = $('#netrec-armed');
+  const text = $('#netrec-armed-text');
+  const armBtn = $('#netrec-btn');
+  if (!state || !state.armed) {
+    banner.classList.add('hidden');
+    armBtn.classList.remove('hidden');
+    return;
+  }
+  banner.classList.remove('hidden');
+  armBtn.classList.add('hidden');
+  const count = state.entryCount || 0;
+  const mins =
+    typeof state.expiresAt === 'number'
+      ? Math.max(0, Math.round((state.expiresAt - Date.now()) / 60000))
+      : null;
+  text.textContent =
+    `● Grabando red · ${count} llamada${count === 1 ? '' : 's'}` +
+    (mins == null ? '' : ` · caduca en ~${mins} min`);
+}
+
+async function refreshNetworkRecordingState() {
+  let tab;
+  try {
+    tab = await activeTabOrNull();
+  } catch {
+    tab = null;
+  }
+  if (!tab || !tab.id) return renderNetworkRecordingState(null);
+  try {
+    const state = await chrome.runtime.sendMessage({
+      type: 'GET_NETWORK_RECORDING_STATE',
+      tabId: tab.id,
+    });
+    renderNetworkRecordingState(state);
+  } catch {
+    renderNetworkRecordingState(null);
+  }
+}
+
+$('#netrec-btn').addEventListener('click', async () => {
+  const btn = $('#netrec-btn');
+  let tab;
+  try {
+    tab = await activeTabOrNull();
+  } catch {
+    tab = null;
+  }
+  if (!tab || !tab.id) {
+    setDiagnosticStatus('No se pudo acceder a la pestaña actual.', 'error');
+    return;
+  }
+  const origin = recordableOrigin(tab.url);
+  if (!origin) {
+    setDiagnosticStatus('Esta página no tiene un origen http(s) que grabar.', 'error');
+    return;
+  }
+
+  // The confirm() has to say what this ACTUALLY does, not a flattering
+  // summary of it (#684 B2 found the original said nothing about origin-wide
+  // interception, and the redaction audit found the original PR description
+  // claimed more stripping than the code performed):
+  //   - the page reloads, losing anything typed into it;
+  //   - fetch/XHR is wrapped for the whole ORIGIN for a few ms, until each
+  //     other tab's handshake tells it to uninstall — only this tab's traffic
+  //     is ever stored;
+  //   - RESPONSE BODIES are recorded, credential-scrubbed but not otherwise
+  //     sanitised;
+  //   - the session expires on its own.
+  const confirmed = window.confirm(
+    'Se va a GRABAR el tráfico de red de esta página y recargarla:\n\n' +
+      origin +
+      '\n\n· La página se recarga (se pierde lo que hayas escrito en ella).\n' +
+      '· Se guardan URL, cabeceras y el CUERPO de las respuestas. Se quitan ' +
+      'credenciales (cookies, tokens, contraseñas), pero el resto del ' +
+      'contenido — incluidos datos personales que devuelva el portal — se ' +
+      'envía tal cual al panel de diagnóstico.\n' +
+      '· Durante unos milisegundos se intercepta también en otras pestañas de ' +
+      'este mismo sitio, hasta que cada una comprueba que no es la grabada. ' +
+      'Solo se guarda lo de ESTA pestaña.\n' +
+      '· La grabación se detiene sola a los 5 minutos, al cerrar la pestaña, ' +
+      'o cuando pulses "Detener grabación".\n\n' +
+      'Después, pulsa "Forzar captura + diagnóstico" para enviarlo.\n\n¿Continuar?',
+  );
+  if (!confirmed) return;
+
+  btn.disabled = true;
+  setDiagnosticStatus('Preparando grabación…');
+  try {
+    // chrome.permissions.request needs a real user-activation signal, which
+    // only an extension PAGE has — a service worker does not. So the popup
+    // asks, and tells the worker whether the grant is NEW, so disarm can hand
+    // back exactly the grants the recording created and no others (#684 S7).
+    const already = await chrome.permissions.contains({ origins: [origin + '/*'] });
+    let grantedNow = false;
+    if (!already) {
+      const granted = await chrome.permissions.request({ origins: [origin + '/*'] });
+      if (!granted) throw new Error('Permiso de host denegado para este origen.');
+      grantedNow = true;
+    }
+    const res = await chrome.runtime.sendMessage({
+      type: 'ARM_NETWORK_RECORDING',
+      tabId: tab.id,
+      origin,
+      grantedNow,
+    });
+    if (!res || !res.success) {
+      throw new Error((res && res.error && res.error.message) || 'No se pudo armar la grabación.');
+    }
+    setDiagnosticStatus('Grabando… recargando la página.', 'success');
+    await chrome.tabs.reload(tab.id);
+    await refreshNetworkRecordingState();
+  } catch (err) {
+    setDiagnosticStatus(err.message || 'No se pudo armar la grabación.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#netrec-stop-btn').addEventListener('click', async () => {
+  const btn = $('#netrec-stop-btn');
+  let tab;
+  try {
+    tab = await activeTabOrNull();
+  } catch {
+    tab = null;
+  }
+  if (!tab || !tab.id) return;
+  btn.disabled = true;
+  try {
+    await chrome.runtime.sendMessage({ type: 'STOP_NETWORK_RECORDING', tabId: tab.id });
+    setDiagnosticStatus('Grabación detenida (no se ha enviado nada).');
+  } catch {
+    setDiagnosticStatus('No se pudo detener la grabación.', 'error');
+  } finally {
+    btn.disabled = false;
+    await refreshNetworkRecordingState();
+  }
+});
+
+// Every popup open re-reads the DURABLE armed state (chrome.storage.session),
+// so a recording armed before the service worker was evicted is still shown.
+refreshNetworkRecordingState();
 
 init();
 refreshSpikePermissionButton();

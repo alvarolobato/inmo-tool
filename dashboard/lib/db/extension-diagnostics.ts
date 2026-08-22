@@ -39,6 +39,7 @@ export interface DiagnosticDetectionBlock {
   harvest?: {
     anchorCount?: number;
     extractDetailUrlsCount?: number;
+    pendingPlaceholders?: number;
   };
   block?: {
     blocked?: boolean;
@@ -52,6 +53,17 @@ export interface DiagnosticDetectionBlock {
   autoCaptureWouldFire?: boolean;
 }
 
+/**
+ * One captured request/response, already redacted and size-capped in the
+ * browser by network-recorder.js `summarizeEntry` (issues #671, #684).
+ *
+ * `body` is the RESPONSE body: truncated at 20 KB and scrubbed of the three
+ * unambiguous credential shapes (a JSON value under a credential-shaped key, a
+ * `Bearer …` literal, a bare JWT) — and otherwise verbatim, personal data
+ * included. Nothing downstream re-redacts it; `purge_extension_diagnostics()`
+ * is the bound — though nothing calls it yet (PR #707 wires the caller; see
+ * D-164 point 5). Request bodies are never captured.
+ */
 export interface NetworkEntry {
   url: string;
   method: string;
@@ -59,6 +71,15 @@ export interface NetworkEntry {
   type: "fetch" | "xhr";
   body: string | null;
   bodyTruncated: boolean;
+  bodyOriginalLength?: number;
+  bodyReadable?: boolean;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  redactedHeaderCount?: number;
+  /** URL parts removed — query params, path segments and fragment params. */
+  redactedUrlPartCount?: number;
+  /** Credential-shaped values removed from the response body. */
+  redactedBodyValueCount?: number;
   startedAtMs: number | null;
   finishedAtMs: number | null;
 }
@@ -100,6 +121,11 @@ export interface DiagnosticSummary {
   // (issue #671), so it belongs on the list, not behind a SQL query.
   anchorCount: number | null;
   extractDetailUrlsCount: number | null;
+  // Loading placeholders still on the page (issue #701). On a portal that
+  // paints its results progressively this is what separates "there are no
+  // adverts here" from "the adverts have not arrived yet" — the distinction
+  // both Hipoges reports turned on.
+  pendingPlaceholders: number | null;
   blocked: boolean | null;
   blockSignature: string | null;
   autoCaptureWouldFire: boolean | null;
@@ -168,6 +194,7 @@ function rowToSummary(row: unknown[]): DiagnosticSummary {
     renderReadyBodyTextLength: detection?.renderReady?.bodyTextLength ?? null,
     anchorCount: detection?.harvest?.anchorCount ?? null,
     extractDetailUrlsCount: detection?.harvest?.extractDetailUrlsCount ?? null,
+    pendingPlaceholders: detection?.harvest?.pendingPlaceholders ?? null,
     blocked: detection?.block?.blocked ?? null,
     blockSignature: detection?.block?.signature ?? null,
     autoCaptureWouldFire: detection?.autoCaptureWouldFire ?? null,

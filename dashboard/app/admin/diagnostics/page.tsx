@@ -160,6 +160,12 @@ function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
         {d.renderReadyBodyTextLength != null && (
           <Chip label={`texto: ${d.renderReadyBodyTextLength} car.`} tone="neutral" />
         )}
+        {/* Issue #701: a page mid-render is not a page with no adverts. On a
+            portal that paints results progressively, this is the number that
+            says which of the two you are looking at. */}
+        {(d.pendingPlaceholders ?? 0) > 0 && (
+          <Chip label={`${d.pendingPlaceholders} sin pintar`} tone="warn" />
+        )}
         {/* The "0 of 17": anchors present on the page vs. detail URLs the
             harvest actually got out of them. A wide gap IS the Hipoges
             empty-shell signature. */}

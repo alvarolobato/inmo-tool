@@ -190,6 +190,13 @@
       <button id="diagnostic-btn" class="btn btn-secondary btn-small">
         Forzar captura + diagnóstico
       </button>
+      <!-- Opt-in network capture (issues #671, #684). Arms a MAIN-world
+           fetch/XHR recorder and reloads the tab, so an Angular/React page's
+           REST responses ride along with the next diagnostic. Gated behind
+           its own confirm() naming what gets intercepted — see popup.js. -->
+      <button id="netrec-btn" class="btn btn-secondary btn-small">
+        Grabar red y recargar
+      </button>
       <!-- "Sitios en evaluación" (issue #705): Chrome only grants an
            optional host permission from a real user gesture on an extension
            page, so the queue's pending origins can only be requested HERE,
@@ -197,6 +204,14 @@
            waiting on a grant, so it is never a standing nag. -->
       <button id="spike-permission-btn" class="btn btn-secondary btn-small hidden">
         Permitir sitios en evaluación
+      </button>
+    </div>
+    <!-- Shown only while a recording is armed: an armed recorder must never
+         be invisible (#684 exit criteria). -->
+    <div id="netrec-armed" class="netrec-armed hidden">
+      <span id="netrec-armed-text" class="state-sub"></span>
+      <button id="netrec-stop-btn" class="btn btn-secondary btn-small">
+        Detener grabación
       </button>
     </div>
     <p id="diagnostic-status" class="state-sub diagnostic-status hidden"></p>

@@ -161,6 +161,16 @@ describe("detailPortalForUrl — only real listing-detail pages", () => {
     ["https://realestate.hipoges.com/es", null],
     ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", null],
     ["https://realestate.hipoges.com/es/detail", null],
+    // Editorial sections walking through the `:investment` slot (issue #701
+    // review L2). `blog` is denied by name; the whole CLASS is closed by
+    // requiring a digit in the `:id`, which every real asset reference has and
+    // no prose slug does. MUST stay in lockstep with etl/listing_detect.py.
+    ["https://realestate.hipoges.com/es/news/detail/nuevas-oficinas-en-madrid", null],
+    ["https://realestate.hipoges.com/es/prensa/detail/hipoges-crece-en-espana", null],
+    ["https://realestate.hipoges.com/es/detail/quienes-somos", null],
+    // The real reference shapes must survive that narrowing.
+    ["https://realestate.hipoges.com/es/detail/RARE-04347", "hipoges"],
+    ["https://realestate.hipoges.com/es/venta/detail/GTRE-01142", "hipoges"],
     // Unsupported host → null even on a detail-shaped path.
     ["https://www.fotocasa.es/inmueble/123/", null],
     ["https://example.com/inmueble/123/", null],
@@ -213,9 +223,13 @@ describe("isRenderReady — not an empty SPA shell", () => {
     expect(isRenderReady(document, "idealista")).toBe(true);
     expect(isRenderReady(document, "aliseda")).toBe(true);
     expect(isRenderReady(document, "altamira")).toBe(true);
-    // Hipoges' readySelectors are the generic h1/main fallback — no real
-    // capture exists yet to ground a portal-specific selector (D-111).
-    expect(isRenderReady(document, "hipoges")).toBe(true);
+    // Hipoges is deliberately NOT in this list any more (issue #701). It used
+    // to share the generic h1/main fallback, and that is precisely what let an
+    // un-rendered Angular shell pass as a rendered advert — rows 3614-3617
+    // were captured that way, at 3 of 26 fields. Its detail readiness is now
+    // pinned to the advert's own component elements; see
+    // extension-hipoges-render.test.ts.
+    expect(isRenderReady(document, "hipoges")).toBe(false);
   });
 
   it("uses generic h1/main fallback for an unknown portal", () => {

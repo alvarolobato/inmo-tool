@@ -50,6 +50,51 @@ interface CaptureBody {
    * ("not measured"), never 0.
    */
   renderWaitMs?: unknown;
+  /**
+   * Terminal outcome to record instead of queueing the page for parsing
+   * (issue #701). The ONLY accepted value is "never_rendered": the extension
+   * opened the page, waited out that portal's whole render budget, and the
+   * page never rendered enough to capture.
+   *
+   * A closed single-value enum rather than a free-form `status`, deliberately.
+   * This endpoint is reachable by anything holding the admin key, and letting
+   * a caller name the stored status would let it write 'done' — fabricating a
+   * successful ingestion — or 'pending' for a page it knows is junk. The wire
+   * format names an OUTCOME; the route decides what that means in the table.
+   */
+  outcome?: unknown;
+  /** Free-form context for the never_rendered case; folded into error_msg. */
+  diagnostic?: unknown;
+  portal?: unknown;
+  role?: unknown;
+}
+
+/**
+ * One short human-readable line explaining an abandoned render wait.
+ *
+ * Structured JSON was the alternative and is the wrong shape here: this lands
+ * in `error_msg`, which is rendered next to other capture outcomes in a list,
+ * and the whole value of the signal is that the owner can read what happened
+ * without opening anything. Truncated hard — `error_msg` is free text and the
+ * payload is caller-controlled.
+ */
+function describeNeverRendered(body: CaptureBody): string {
+  const d = (body.diagnostic ?? {}) as Record<string, unknown>;
+  const parts: string[] = ["La página no llegó a renderizarse dentro del presupuesto."];
+  if (typeof body.role === "string" && body.role) parts.push(`tipo=${body.role}`);
+  if (typeof d.reason === "string" && d.reason) parts.push(`motivo=${d.reason}`);
+  if (typeof d.harvested === "number") parts.push(`anuncios=${d.harvested}`);
+  if (typeof d.expected === "number") parts.push(`esperados=${d.expected}`);
+  if (typeof d.placeholders === "number") parts.push(`placeholders=${d.placeholders}`);
+  // Media on the portal's own CDN whose path the reference rule could not read
+  // (issue #701 review L1). Named separately from `anuncios=0` on purpose: the
+  // two look identical in the table and mean opposite things — "this page has
+  // no adverts" versus "the rule that finds adverts has stopped matching".
+  if (typeof d.refMisses === "number" && d.refMisses > 0) {
+    parts.push(`refs_ilegibles=${d.refMisses}`);
+  }
+  if (typeof d.bodyTextLength === "number") parts.push(`texto=${d.bodyTextLength}`);
+  return parts.join(" ").slice(0, 500);
 }
 
 /**
@@ -93,15 +138,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const { url, html } = body;
   const renderWaitMs = coerceRenderWaitMs(body.renderWaitMs);
+  // Only the one value is honoured; anything else is ignored and the capture
+  // takes the normal pending path (see CaptureBody.outcome).
+  const neverRendered = body.outcome === "never_rendered";
   if (!url || typeof url !== "string") {
     return NextResponse.json(
       formatApiError("Falta el campo 'url'.", "VALIDATION", undefined, requestId),
       { status: 400 },
     );
   }
-  if (!html || typeof html !== "string") {
+  // A never-rendered page is allowed to carry no HTML — by definition it may
+  // have produced almost none. Every other capture still must, since an empty
+  // capture is nothing but a queue entry the parser will reject.
+  if (!neverRendered && (!html || typeof html !== "string")) {
     return NextResponse.json(
       formatApiError("Falta el campo 'html'.", "VALIDATION", undefined, requestId),
+      { status: 400 },
+    );
+  }
+  if (typeof html !== "string" && html !== undefined) {
+    return NextResponse.json(
+      formatApiError("'html' debe ser texto.", "VALIDATION", undefined, requestId),
       { status: 400 },
     );
   }
@@ -125,7 +182,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  if (Buffer.byteLength(html, "utf8") > MAX_HTML_BYTES) {
+  const htmlText = typeof html === "string" ? html : "";
+  if (Buffer.byteLength(htmlText, "utf8") > MAX_HTML_BYTES) {
     return NextResponse.json(
       formatApiError("El HTML capturado supera el tamaño máximo permitido.", "VALIDATION", undefined, requestId),
       { status: 400 },
@@ -136,10 +194,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // Sanitise at the write boundary, after the size check (so the cap still
     // measures what the extension actually sent) and covering `url` too — a
     // NUL anywhere in the tuple fails the same INSERT.
-    const rows = await sql<{ id: number }>(
-      "INSERT INTO extension_capture (url, html, render_wait_ms) VALUES ($1, $2, $3) RETURNING id",
-      [stripNulBytes(url), stripNulBytes(html), renderWaitMs],
-    );
+    // A never-rendered page is TERMINAL on insert (issue #701): `processed_at`
+    // set, status already final. It must never sit in `pending`, or
+    // etl/capture.py's poll would pick it up and spend a parse on a page the
+    // extension already established has no advert on it. The HTML is still
+    // stored — retained shell HTML from two ordinary captures is what made
+    // #701 diagnosable from stored data instead of by re-fetching a
+    // capture-only portal, and the next redesign will need the same evidence.
+    const rows = neverRendered
+      ? await sql<{ id: number }>(
+          `INSERT INTO extension_capture (url, html, render_wait_ms, status, error_msg, processed_at, fields_extracted)
+           VALUES ($1, $2, $3, 'never_rendered', $4, NOW(), 0) RETURNING id`,
+          [
+            stripNulBytes(url),
+            htmlText ? stripNulBytes(htmlText) : null,
+            renderWaitMs,
+            stripNulBytes(describeNeverRendered(body)),
+          ],
+        )
+      : await sql<{ id: number }>(
+          "INSERT INTO extension_capture (url, html, render_wait_ms) VALUES ($1, $2, $3) RETURNING id",
+          [stripNulBytes(url), stripNulBytes(htmlText), renderWaitMs],
+        );
     return NextResponse.json({ success: true, capture_id: rows[0].id });
   } catch (err) {
     console.error(`[${requestId}] Error al encolar la captura de la extensión:`, err);
