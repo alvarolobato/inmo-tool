@@ -155,6 +155,7 @@
 | [D-107](docs/decisions/D-107-subscription-quota-cap.md) | `dashboard.llm_quota_stop_pct` (0 = off) stops LLM calls when the account's consumption reaches N% of ANY window the CLI reports (session or weekly), read for free from `claude -p "/usage"` by a HOST-side poller (`scripts/claude-quota-poller.sh` → `POST /api/etl/llm-quota`) because only credential-file auth can see it. An absent or stale reading is UNKNOWN: it never blocks and never counts as 0%. |
 | [D-108](docs/decisions/D-108-cli-system-prompt-stable-only.md) | A flow's `buildSystemPrompt().stable` must never interpolate per-call `vars` (only batch-scoped data, e.g. redflags' trending/dismissed, is allowed) — `claudeCliSingleShot` MUST receive only `req.systemPrompt.stable`, never `volatile`, as its domain system-prompt content, appended with the protocol shim as a SUFFIX. |
 | [D-149](docs/decisions/D-149-assessment-batch-concurrency.md) | AI-assessment batch gets bounded per-flow concurrency (8), its own advisory-lock pool, a parked-flow-aware selection query, and a scheduler that drains fast only on real progress. |
+| [D-158](docs/decisions/D-158-photos-never-in-shared-assessment-hash.md) | Never add `photo_urls`/photo count to `computeAssessmentContentHash`'s shared material — it re-bills all six flows. A flow that starts reading photos gets its own `extraHashInput`. |
 
 ## Product
 
