@@ -362,3 +362,21 @@ body::-webkit-scrollbar-thumb {
 .diagnostic-status {
   text-align: center;
 }
+
+/* Armed-recording banner (issue #684): an armed MAIN-world fetch/XHR recorder
+   must be visible in the popup, with a stop that doesn't need a send. */
+.netrec-armed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.netrec-armed .state-sub {
+  color: #b91c1c;
+}
