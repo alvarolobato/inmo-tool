@@ -203,7 +203,8 @@ before any field is trusted, with deliberately different outcomes.
      means "when did this happen", not "when should you be told" — but if
      withdrawals start going unnoticed, this is why, and the fix belongs in
      the digest query (filter tracked withdrawals on the event's insertion
-     time, not on `observed_at`), not in reverting to `NOW()`.
+     time, not on `observed_at`), not in reverting to `NOW()`. Filed as
+     issue #699.
    * `dashboard/lib/candidates.ts` computes `days_on_market` as
      `MIN(observed_at) - first_seen_at` with **no `GREATEST(0, …)` clamp**
      (`dashboard/lib/analytics/market-signals.ts` does clamp). A stated date
@@ -211,7 +212,7 @@ before any field is trusted, with deliberately different outcomes.
      card. The `last_seen_at` clamp above makes that much harder to reach —
      `last_seen_at >= first_seen_at` for any listing we have actually
      captured — but it is not a proof, and the clamp belongs in the query
-     either way. Filed as a follow-up rather than fixed here.
+     either way. Filed as issue #699 rather than fixed here.
 
    **Everything the notice states goes into the evidence**: the sentence, the
    reference, the stated delisting date, and the advert's final stated
@@ -362,7 +363,8 @@ notice, every dead URL in the queue burns itself as `failed` while nothing is
 learned. So, during a drain, **a spike in `failed_7d` for idealista means
 "the corroboration parse broke", not "the pages are broken"** — the response
 is to look at a retained page (D-160's retention floor keeps unexplained ones)
-and repair the parse, not to requeue.
+and repair the parse, not to requeue. (Retained pages have no TTL or cap
+today — filed as issue #698.)
 
 **Not covered here**: the already-corrupted production rows are left alone by
 this PR. Retro-classifying them would mean inferring *withdrawal* from the
@@ -377,11 +379,15 @@ already flipped their `capture_worklist` rows out of `pending`, and the
 "Abrir siguiente pendiente" pool selects `status = 'pending'`. Nothing will
 ever hand the owner those URLs again. They sit as `active` phantoms with
 wiped galleries indefinitely. Repairing them means **requeueing the
-`fields_extracted = 3` idealista cohort** with the #683 / D-156 machinery
-once these PRs have landed — filed as a follow-up, deliberately after the
-fix, so a requeued page meets a connector that can classify it.
+`fields_extracted = 3` idealista cohort** with the #683 /
+[D-156](D-156-recapture-requeues-worklist-rows.md) machinery once these PRs
+have landed — filed as issue #697, deliberately after the fix, so a requeued
+page meets a connector that can classify it.
 
-**See**: issues #690 and #691 (the corroboration/date hardening);
+**See**: issues #690 and #691 (the corroboration/date hardening); #697
+(requeue the corrupted cohort — it will not self-correct), #698 (no retention
+TTL on retained `failed` HTML), #699 (the two backdated-`observed_at`
+consequences downstream);
 [D-157](D-157-evidence-not-time-for-withdrawal.md) — time nominates, evidence
 decides, and "mark, don't delete";
 [D-049](D-049-listing-gone-clean-skip.md) — `ListingUnavailableError` as the
