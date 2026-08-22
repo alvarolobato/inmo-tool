@@ -34,8 +34,31 @@ from etl.connectors.base import (
 from etl.connectors.hipoges import HipogesConnector
 from etl.connectors.idealista import IdealistaConnector
 from etl.listing_detect import detail_portal_for_url, listing_portal_for_url
+from etl.soft_block import challenge_page_signature
 
 logger = logging.getLogger("etl.capture")
+
+# At or below this many extracted fields, a capture is ANOMALOUS and its HTML
+# is retained as evidence regardless of the retention config (issue #692).
+#
+# PER-PORTAL and MEASURED — never a global guess. The floor has to sit inside
+# each portal's own gap between "non-advert page" and "thinnest real advert",
+# and that gap is a property of the portal's markup, not of this pipeline.
+# Claiming one portal's measured number for another would either miss its
+# anomalies or start hoarding its thin-but-real adverts.
+#
+#   idealista: 3. Across 3.797 production captures `fields_extracted` is
+#     cleanly bimodal — exactly 3 for every non-advert page (33 rows) and
+#     9-15 for every real advert (3.764 rows), nothing in between. The 3 are
+#     all structural, none extracted: `url` is handed in, `operation` is
+#     hardcoded, and `property_type` is fabricated from the site-wide
+#     <title>.
+#
+# Everything else defaults to 0 — a page that yielded literally nothing is
+# anomalous on any portal, and that claim needs no per-portal measurement.
+# Add a portal here only with the same kind of measurement behind it.
+_ANOMALY_FIELD_FLOOR = {"idealista": 3}
+_DEFAULT_ANOMALY_FIELD_FLOOR = 0
 
 # hostname suffix -> (Connector instance, connector class). A capture-supported
 # site adds ONE entry here, not a new processing mechanism (issue #75). Aliseda
@@ -1173,6 +1196,38 @@ def _process_one(
         return False
 
     connector, external_id = resolved
+
+    # ── Outcome 1 of 3: the portal served an anti-bot CHALLENGE (issue #692)
+    #
+    # Ranked ABOVE both the retirement check and the zero-fields check, and
+    # evaluated before `normalize()` is even called, because a challenge page
+    # is indistinguishable from a retired-advert page BY FIELD COUNT — both
+    # carry nothing a parser recognises — and the two outcomes could not be
+    # further apart:
+    #
+    #   challenge  → "come back later"  → change NOTHING, keep the queue slot
+    #   retirement → "this advert is gone" → mark the listing `withdrawn`
+    #
+    # Getting that backwards writes `withdrawn` onto a live listing on the
+    # strength of a rate-limit wall. D-047/D-157 already forbid it, and
+    # `milanuncios.py` ships no retirement signature at all precisely to
+    # avoid this trap; idealista now has both page kinds in circulation, so
+    # the challenge has to be excluded POSITIVELY and FIRST rather than
+    # hoped away.
+    #
+    # Deliberately NOT `_mark_failed`. `failed` writes nothing to the listing
+    # (so it is safe) but it is still the wrong answer: it consumes the
+    # attempt, and `_correlate_worklist(..., "failed", ...)` flips the
+    # `capture_worklist` row out of `pending`, which drops it from the drain
+    # pool entirely — the extension filters `status === 'pending'` client-side
+    # (see the requeue-metadata note in init.sql, issue #683). A page the
+    # portal refused to serve us was never seen; it must keep its place in
+    # the queue, `requeue_rank` and all.
+    challenge = challenge_page_signature(html)
+    if challenge is not None:
+        _mark_blocked(conn, capture_id, url, challenge, connector.name)
+        return False
+
     raw = RawListing(
         external_id=external_id, source=connector.name, raw={"url": url, "html": html}
     )
@@ -1207,6 +1262,19 @@ def _process_one(
         )
         return False
     except ConnectorError as exc:
+        # Issue #692: retain the HTML of an ANOMALOUS capture. This branch is
+        # the "I cannot tell what this page is" outcome, and it is exactly
+        # the case where, months later, nobody can say whether the page was a
+        # withdrawal notice, a reworded challenge or a half-rendered capture
+        # — which is precisely what happened to the 33 field-less idealista
+        # rows this work started from: HTML retention was off, so the
+        # decisive artefact was thrown away and the rows are now
+        # unclassifiable from stored data.
+        #
+        # `_mark_failed` leaves `html` alone (only the success path nulls
+        # it), so a capture that raised already keeps its page. The
+        # field-count floor below covers the other half: a page that parses
+        # "successfully" into almost nothing.
         _mark_failed(conn, capture_id, url, str(exc), connector_name=connector.name)
         return False
 
@@ -1262,9 +1330,40 @@ def _process_one(
     # default; read fresh on every capture so flipping the config takes
     # effect on the operator's next processed capture, no code change either
     # direction. See D-150 for exactly how to turn it on/off.
+    #
+    # Issue #692: a THIRD retention path — retain the pages the system COULD
+    # NOT ACCOUNT FOR, and only those.
+    #
+    # Not "retain whatever parsed to nothing": a *classified* field-less page
+    # is not an anomaly. A recognised retirement notice (#691) and a
+    # recognised challenge both take their own outcome paths above and both
+    # drop their HTML, because we already know what they were and the
+    # evidence is recorded. The retained set should read as "pages we cannot
+    # explain" — if it ever fills up with pages we DO have a classifier for,
+    # that means the classifier should be handling them, not that storage
+    # should grow. Blanket retention is unaffordable (D-150: ~290 MB of pages
+    # against a 204 MB database), which is why it is off for idealista. But
+    # that is exactly why the 33 field-less idealista rows this work started
+    # from are now permanently unclassifiable: a confirmed withdrawal notice
+    # and a suspected anti-bot challenge left byte-identical database
+    # footprints (`fields_extracted = 3`, zero photos, the site-wide homepage
+    # <title>), and the one artefact that could have separated them was
+    # thrown away.
+    #
+    # Retaining only the anomalies inverts the cost: at the ~1 % observed
+    # anomaly rate a full 2.586-page drain keeps ~26 pages, single-digit MB,
+    # and every future ambiguous page arrives with its own evidence.
+    #
+    # The floor is MEASURED and PER-PORTAL (see _ANOMALY_FIELD_FLOOR), so it
+    # cannot encroach on a thin-but-real advert on any portal. It is a
+    # RETENTION trigger only: it never decides an outcome, never withdraws
+    # anything, and a page it fires on is still persisted exactly as it was
+    # before.
     retain_html = (
         canonical.raw_extra.get("selectors_calibrated") is False
         or connector.name in retain_capture_html_for()
+        or fields_extracted
+        <= _ANOMALY_FIELD_FLOOR.get(connector.name, _DEFAULT_ANOMALY_FIELD_FLOOR)
     )
     retained_html = html if retain_html else None
 
@@ -1329,6 +1428,59 @@ def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
         time.sleep(interval_seconds)
 
 
+def _mark_blocked(
+    conn, capture_id: int, url: str, signature: str, connector_name: str
+) -> None:
+    """Record a capture that was an anti-bot CHALLENGE, not a listing (#692).
+
+    This is the "nothing happened" outcome, and the list of things it
+    deliberately does NOT do is the whole point:
+
+    * **No listing write of any kind.** Not `photo_urls`, not `last_seen_at`,
+      not `status`, not `current_price`. The portal never showed us the
+      advert, so we learned nothing about it — including whether it is still
+      alive. Bumping `last_seen_at` off a challenge page would be the exact
+      inversion D-157 exists to prevent.
+    * **No `_correlate_worklist` call.** The `capture_worklist` row keeps
+      `status = 'pending'` and its `requeue_rank`, so the page stays in the
+      drain pool in its original position and gets served again once the
+      owner has cleared the wall. This is the single most important line of
+      this function — and it is the line that is *absent*, so a reviewer
+      should check for it deliberately: `_mark_failed` DOES correlate, and
+      inheriting that behaviour here would silently consume the queue.
+    * **No `listing_status_event`.** Nothing about the advert's status was
+      observed.
+
+    The HTML is **dropped**, like any other classified outcome. Retention is
+    reserved for pages the system could not account for, and this one is
+    accounted for: `error_msg` records exactly which phrases matched. Keeping
+    the page would add nothing we do not already know.
+
+    This is self-correcting in the direction that matters. If the portal ever
+    REWORDS its wall, the phrase table stops matching, the page stops being
+    classified — and it lands in the unexplained bucket, which *is* retained.
+    The sample needed to repair the phrase table therefore appears exactly
+    when the phrase table is broken, and never while it is working.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE extension_capture "
+            "SET status = 'blocked', error_msg = %s, connector_name = %s, "
+            "    fields_extracted = 0, processed_at = NOW(), html = NULL "
+            "WHERE id = %s",
+            (signature, connector_name, capture_id),
+        )
+    conn.commit()
+    logger.warning(
+        "extension_capture id=%s: %s served an anti-bot CHALLENGE for %s — "
+        "nothing written to any listing, worklist row left pending. %s",
+        capture_id,
+        connector_name,
+        url,
+        signature,
+    )
+
+
 def _mark_failed(
     conn, capture_id: int, url: str, error_msg: str, connector_name: str | None = None
 ) -> None:
@@ -1343,6 +1495,11 @@ def _mark_failed(
     genuinely unresolvable URL (no connector recognises it at all)."""
     with conn.cursor() as cur:
         cur.execute(
+            # `html` is deliberately NOT touched: the row was inserted with
+            # the captured page and only the SUCCESS path nulls it, so a
+            # failed capture already keeps its evidence (issue #692 checked
+            # this before adding a redundant write — pinned by
+            # test_failed_capture_keeps_html_for_debugging).
             "UPDATE extension_capture SET status = 'failed', error_msg = %s, "
             "connector_name = %s, processed_at = NOW() WHERE id = %s",
             (error_msg, connector_name, capture_id),

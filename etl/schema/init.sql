@@ -1884,11 +1884,16 @@ CREATE TABLE IF NOT EXISTS extension_capture (
     -- page, not a detail page — a clean, informational outcome (its detail
     -- links are harvested into capture_worklist), NOT a failure. 'failed' is
     -- reserved for genuinely broken DETAIL captures.
+    -- 'blocked' (issue #692): the portal served an anti-bot CHALLENGE at the
+    -- listing URL instead of the advert. Distinct from BOTH 'failed' (the
+    -- capture is broken) and any retirement outcome (the advert is gone) —
+    -- it means "the page was never served to us", so nothing was written to
+    -- any listing and the capture_worklist row is left pending on purpose.
     -- 'withdrawn' (issue #690, D-159): the portal's own "anuncio retirado"
     -- notice, positively identified and corroborated against the stored
     -- listing. Neither 'failed' (nothing failed) nor 'done' (nothing was
     -- ingested) — see the ALTER pair below for the full reasoning.
-    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing','withdrawn')),
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn')),
     error_msg        TEXT,
     property_id      BIGINT       REFERENCES property(id),
     listing_id       BIGINT       REFERENCES listing(id),
@@ -1906,7 +1911,7 @@ CREATE TABLE IF NOT EXISTS extension_capture (
 CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
     ON extension_capture (created_at) WHERE status = 'pending';
 
--- Migration (issues #292 and #690): widen the status CHECK beyond the
+-- Migration (issues #292, #690 and #692): widen the status CHECK beyond the
 -- original three values. A DB created before #292 carries the three-value
 -- constraint under its default name (extension_capture_status_check); CREATE
 -- TABLE IF NOT EXISTS above never alters an existing table, so drop-and-re-add
@@ -1914,16 +1919,24 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 -- DROP IF EXISTS then ADD is a no-op-safe pair. No data rewrite — each added
 -- value only widens the allowed set.
 --
--- ONE drop/add pair, listing every value, deliberately. Writing this as a
+-- ONE drop/add pair, listing EVERY value, deliberately. Writing this as a
 -- chain of per-issue pairs (add 'listing', then drop and add 'listing' +
--- 'withdrawn') looks like tidier history but is a real bug: the intermediate
--- ADD applies the NARROWER constraint to a table that may already hold rows
--- with the newer value, so re-applying init.sql against a live DB fails with
--- a CheckViolation. Caught by etl/tests/test_capture.py, which re-applies the
--- schema per test. Add future statuses to this list; never append a new pair.
+-- 'blocked', then again with 'withdrawn') looks like tidier history but is a
+-- real bug: the intermediate ADD applies the NARROWER constraint to a table
+-- that may already hold rows with a newer value, so re-applying init.sql
+-- against a live DB fails with a CheckViolation. init.sql re-applies on every
+-- ETL boot and etl/tests/test_capture.py re-applies the schema per test, so
+-- that is not hypothetical. Add future statuses to this list; never append a
+-- new pair.
 --
 --   'listing'   (issue #292): the captured page was a SEARCH/results page,
 --               not a detail page. Its detail links were harvested.
+--   'blocked'   (issue #692): the portal served an anti-bot CHALLENGE at the
+--               listing URL instead of the advert. Distinct from BOTH
+--               'failed' (the capture is broken) and any retirement outcome
+--               (the advert is gone) — it means "the page was never served
+--               to us", so nothing was written to any listing and the
+--               capture_worklist row is left pending on purpose.
 --   'withdrawn' (issue #690, D-159): the captured page was POSITIVELY
 --               identified as the portal's own "este anuncio ya no está
 --               publicado" notice. Its own status rather than a reuse,
@@ -1936,17 +1949,9 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 --               capture-only portal can give), would inflate failed_7d on the
 --               data-health page, and via _correlate_worklist would mark the
 --               worklist row 'failed' instead of 'stale'.
---
--- MERGE NOTE for whoever lands this alongside PR #692, which adds 'blocked'
--- in this same spot (and to the CREATE TABLE list above): the resolution is
--- ONE pair carrying BOTH new values —
---   CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn'))
--- — never two consecutive pairs, for exactly the reason above: the second,
--- narrower pair would CheckViolation against a live DB already holding the
--- other value. The CREATE TABLE list above must end carrying both too.
 ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status_check;
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
-    CHECK (status IN ('pending','done','failed','listing','withdrawn'));
+    CHECK (status IN ('pending','done','failed','listing','blocked','withdrawn'));
 
 -- Browser-extension presence heartbeat (issue #509). The dashboard origin can
 -- NOT be injected into by the extension (its manifest host_permissions cover

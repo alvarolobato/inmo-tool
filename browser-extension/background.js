@@ -744,7 +744,12 @@ async function handleBlockDetected(portal, signature) {
   if (batchLooping) {
     const current = await getBatchState();
     if (!current || !current.portal || current.portal === portal) {
-      await mutateBatch(InmoBatch.pause);
+      // pauseForBlock, not pause (issue #692): also returns every in-flight
+      // slot to `pending`. Those tabs are all staring at the same wall, and
+      // leaving them inflight lets their capture-signal timeout mark them
+      // `failed` — silently consuming pages the owner never saw. See
+      // InmoBatch.pauseForBlock for the full argument.
+      await mutateBatch(InmoBatch.pauseForBlock);
     }
   }
 

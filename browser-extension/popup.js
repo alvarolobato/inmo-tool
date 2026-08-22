@@ -897,11 +897,24 @@ const BLOCK_SIGNATURE_LABELS_ES = {
   geetest_challenge: 'reto GeeTest',
   incapsula_challenge: 'reto Incapsula',
   akamai_deny: 'bloqueo Akamai',
+  // issue #692 — the idealista "muchas peticiones / desliza hacia la derecha"
+  // slider wall. Worded as an instruction because this is the one signature
+  // the owner can actually clear himself, by hand, in the browser.
+  rate_limit_challenge: 'reto anti-bot por exceso de peticiones',
 };
 
 function blockSignatureLabelEs(signature) {
   return BLOCK_SIGNATURE_LABELS_ES[signature] || signature || 'bloqueo';
 }
+
+// The active block episode as of the most recent renderAutoArmedStatus call,
+// or null (issue #692). renderBatchProgress needs it so the PAUSED panel can
+// say WHY the run stopped: 'En pausa.' alone is indistinguishable from a
+// pause the owner asked for himself, and this is the one pause that needs him
+// to go and do something before Reanudar will achieve anything. Both
+// renderers run on the same 1 Hz poll tick, armed-status first (see
+// startBatchPolling), so this is populated before the paused branch reads it.
+let activeBlockInfo = null;
 
 /**
  * Render the armed/disarmed line (issue #587), scoped to the batch/auto panel
@@ -925,6 +938,7 @@ function renderAutoArmedStatus(auto) {
   const el = $('#auto-armed-status');
   if (!el) return;
   el.classList.remove('blocked');
+  activeBlockInfo = (auto && auto.blocked) || null;
   if (auto && auto.blocked) {
     const label = blockSignatureLabelEs(auto.blocked.signature);
     el.textContent = `Auto: BLOQUEADO — ${auto.blocked.portal} (${label}) — resuélvelo y pulsa Reanudar`;
@@ -1204,14 +1218,32 @@ function renderBatchProgress(prog) {
 
   startBtn.classList.add('hidden');
   stopBtn.classList.remove('hidden');
+  const sub = $('#batch-sub');
   if (prog.status === 'paused') {
     pauseBtn.classList.add('hidden');
     resumeBtn.classList.remove('hidden');
-    $('#batch-sub').textContent = 'En pausa.';
+    // Issue #692: a pause caused by a challenge is NOT the same event as a
+    // pause the owner clicked, and conflating them is what leaves him staring
+    // at 'En pausa.' with no idea the portal is waiting on him. Name the
+    // portal, name the wall, and say exactly what to do — the run will
+    // re-pause immediately if he presses Reanudar without clearing it.
+    if (activeBlockInfo) {
+      const label = blockSignatureLabelEs(activeBlockInfo.signature);
+      sub.textContent =
+        `En pausa: ${activeBlockInfo.portal} ha mostrado un ${label}. ` +
+        'Resuélvelo a mano en una pestaña del navegador y pulsa Reanudar. ' +
+        'No se ha perdido ninguna página: las que estaban en curso vuelven a ' +
+        'la cola.';
+      sub.classList.add('blocked');
+    } else {
+      sub.textContent = 'En pausa.';
+      sub.classList.remove('blocked');
+    }
   } else {
     resumeBtn.classList.add('hidden');
     pauseBtn.classList.remove('hidden');
-    $('#batch-sub').textContent = 'Capturando anuncios en varias pestañas…';
+    sub.textContent = 'Capturando anuncios en varias pestañas…';
+    sub.classList.remove('blocked');
   }
 }
 

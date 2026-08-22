@@ -93,6 +93,63 @@ The same spike is the best available argument for why a soft block must change
 nothing: of two stale milanuncios ads checked, one served the real page and the
 other served the "Pardon Our Interruption" GeeTest wall with HTTP 200.
 
+### The capture path has a THIRD outcome above both of these: `blocked` (issue #692, D-160)
+
+Everything above is about the *crawl* path. On the **capture** path (the
+browser extension POSTing a page a human's browser fetched), the portal can
+serve an anti-bot **challenge at the listing URL itself** — so a batch capture
+of `/inmueble/<id>/` captures the wall, not the advert. Idealista did exactly
+this during the #683 re-capture drain.
+
+A challenge page and a retired-advert notice are **both field-less**, so the
+ordering is load-bearing and is evaluated *before* `normalize()`:
+
+| rank | condition | outcome | listing | worklist row |
+|---|---|---|---|---|
+| 1 | `challenge_page_signature()` matched | `blocked` | untouched | **stays `pending`** |
+| 2 | `retired_page_signature()` matched | `withdrawn` | marked withdrawn | retired to `stale` |
+| 3 | zero substantive fields | `failed` | untouched | consumed → `failed` |
+
+Rank 3 is *safe* for a challenge (it writes nothing to the listing) but wrong,
+and **not inert**: `_mark_failed` calls `_correlate_worklist(..., "failed",
+...)`, which flips the `capture_worklist` row out of `pending` and drops the
+page from the drain pool. A page the portal refused to serve us must keep its
+place in the queue, `requeue_rank` and all.
+
+**To add a portal's challenge wording**, edit `CHALLENGE_PHRASES` in
+`etl/soft_block.py` **and** the identical table in
+`browser-extension/detect.js` — a test pins the two byte-comparable, so
+editing one fails the build until you edit the other. Rules for an entry:
+
+- It must be the **portal's own voice about the visitor's request behaviour**,
+  accent-folded and lowercased. Two distinct phrases must co-occur before the
+  page counts as a challenge; one alone is quotable by a seller's description.
+- **Never anything per-visit** — not the visitor's IP, not the challenge UUID.
+  Both are personal data and this is a public repo; tests enforce it.
+
+**Gotcha that cost this project a whole drain**: `detect.js`'s
+`detectBlockSignals` corroborates every signature with
+`!isRenderReady(doc, portal)`. A *text-rich* challenge page (~490 chars of
+prose under a `<main>`) clears `isRenderReady`, so the corroboration threw
+away a correctly-matched DataDome marker and the batch never halted. A
+signature for a wordy interstitial must set `selfCorroborated: true` and carry
+its own, narrower corroboration instead.
+
+**Diagnosability — retain what you cannot explain**: a capture at or below
+its portal's measured field-count floor (`_ANOMALY_FIELD_FLOOR`, per-portal,
+default 0) keeps its HTML regardless of the retention config (D-150). Without
+this, a field-less page is unclassifiable forever after — which is how 33
+production Idealista rows ended up byte-identical in the database, one of them
+a confirmed withdrawal and the rest unknowable.
+
+The rule is *unexplained*, not *empty*. A **classified** outcome — a
+recognised retirement notice, a recognised challenge — **drops** its HTML: we
+know what it was and the evidence is already recorded. Only pages nothing
+could account for are kept. Get this backwards and retention fills with pages
+you already understand; and note it is self-correcting the right way round —
+a reworded wall stops being classified, so the sample you need to fix the
+phrase table shows up exactly when the table is broken.
+
 ### The capture path can carry a signature too (issues #690 and #691, D-159)
 
 `retired_page_signature` was built for the stale-verification pass, which
