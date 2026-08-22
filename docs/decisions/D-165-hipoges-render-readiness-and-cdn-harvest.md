@@ -1,12 +1,12 @@
 ---
-id: D-164
+id: D-165
 title: Hipoges result cards carry no anchors — harvest the asset reference from the photo CDN path, and judge listing readiness by the harvest itself
 date: 2026-08-22
 group: Data / connectors
 rule: 'Hipoges detail URLs come from the photo CDN path (`/imageshams/<bucket>/<lot>/<ref>/`), never from `a[href]` — its cards are not links. Listing readiness is a settled non-zero harvest, never a selector.'
 ---
 
-# D-164: Hipoges result cards carry no anchors — harvest the asset reference from the photo CDN path, and judge listing readiness by the harvest itself
+# D-165: Hipoges result cards carry no anchors — harvest the asset reference from the photo CDN path, and judge listing readiness by the harvest itself
 
 *Decided: 2026-08-22*
 

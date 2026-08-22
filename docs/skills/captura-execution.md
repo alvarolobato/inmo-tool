@@ -289,10 +289,10 @@ higher served version, so shipping a new field without a bump leaves every
 operator on the old build: the server-side column exists, nothing ever
 populates it, and the column reads `—` forever with no error anywhere. That is
 the #693 failure shape, and `render_wait_ms` (0.17.0 → 0.18.0) is the second
-time it nearly landed. Hipoges render readiness (0.18.0 → 0.19.0, #701/D-164)
+time it nearly landed. Hipoges render readiness (0.18.0 → 0.19.0, #701/D-165)
 is the third.
 
-**Abandoned render waits (issue #701, D-164 — the gap #700 recorded).** A page
+**Abandoned render waits (issue #701, D-165 — the gap #700 recorded).** A page
 that never renders used to give up *without POSTing*, so it left no row
 anywhere: timing covered successful captures only, and a portal that mostly
 timed out looked, in this data, exactly like a portal nobody visited. It now
@@ -313,7 +313,7 @@ the harvest itself to return something and hold steady. If you are tempted to
 add a card selector for a portal whose rendered results list has never been
 captured, don't — that is exactly how Hipoges shipped `["main","h1"]` as
 though it were calibrated, and it cost two owner reports and a production total
-of two listings. See D-164.
+of two listings. See D-165.
 
 The crawl-side counterpart is **Tiempo por anuncio (rastreo)**:
 `connector_run_results.fetch_ms_total / fetched_count`, with the rate limiter's
