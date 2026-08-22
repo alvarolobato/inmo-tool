@@ -21,6 +21,13 @@
 # from source on every build. `ps stack` calls this automatically; run it by hand
 # before a bare `docker build ./dashboard` when you want the download route live.
 #
+# Both `ps stack` and `ps prod deploy` call this automatically, from POST-pull
+# source immediately before the build (D-060, D-161); run it by hand before a
+# bare `docker build ./dashboard` when you want the download route live.
+# Paired guards, run right after this script on both paths:
+#   scripts/check-extension-zip-fresh.sh     — mtime: source edited after packaging
+#   scripts/check-extension-version-sync.sh  — content: staged version != manifest
+#
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

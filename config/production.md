@@ -73,12 +73,21 @@ ps prod install --check-only   # verify the host before changing anything
 ps prod install                # clone, create data dirs and .env
 ps prod copy-data              # operator config + secrets + local database
 ps prod status                 # containers, deployed commit, health
-ps prod deploy                 # git pull + rebuild + up -d
+ps prod deploy                 # git pull + stage extension + rebuild + up -d
 ps prod logs dashboard
 ps prod backup
 ```
 
 `install` deliberately starts nothing: the data goes in first.
+
+`deploy` repackages the browser extension on the host between the pull and
+the build. The dashboard image is built with context `./dashboard`, so
+`browser-extension/` is outside it and the image can only ever contain the
+artifacts staged into `dashboard/public/` beforehand. Skipping that step is
+how production served — and reported — extension 0.14.9 for weeks after main
+had moved to 0.16.0 (#693). A staged artifact that disagrees with the source
+manifest aborts the deploy; see
+[D-161](../docs/decisions/D-161-prod-deploy-stages-extension.md).
 
 ## Exposure
 
