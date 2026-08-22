@@ -100,3 +100,38 @@ describe("planAutoUnit — harvest > drain > idle", () => {
     if (unit.kind === "harvest") expect(unit.task.taskId).toBe("f");
   });
 });
+
+describe("planAutoUnit — spike beats everything (issue #705)", () => {
+  const spike = [{ id: 7, url: "https://www.servihabitat.com/inmueble/1" }];
+
+  it("returns the spike unit ahead of a due harvest task", () => {
+    const unit = planAutoUnit([cand({ taskId: "h" })], ["https://x/1"], 300, false, spike);
+    expect(unit.kind).toBe("spike");
+    if (unit.kind === "spike") expect(unit.items).toEqual(spike);
+  });
+
+  it("returns the spike unit ahead of a drain, and under force too", () => {
+    const notDue = [cand({ due: false, connectorRank: HARVEST_RANK_NOT_DUE })];
+    expect(planAutoUnit(notDue, ["https://x/1"], 300, false, spike).kind).toBe("spike");
+    expect(planAutoUnit(notDue, ["https://x/1"], 300, true, spike).kind).toBe("spike");
+  });
+
+  it("falls straight through to the existing three units when the queue is empty", () => {
+    expect(planAutoUnit([cand({})], [], 300, false, []).kind).toBe("harvest");
+    expect(planAutoUnit([], ["https://x/1"], 300, false, []).kind).toBe("drain");
+    expect(planAutoUnit([], [], 300, false, []).kind).toBe("idle");
+  });
+
+  it("defaults to no spike work when the argument is omitted (existing callers unchanged)", () => {
+    expect(planAutoUnit([], ["https://x/1"], 300, false).kind).toBe("drain");
+  });
+
+  it("copies the items array rather than aliasing the caller's", () => {
+    const src = [{ id: 1, url: "https://a.example.es/1" }];
+    const unit = planAutoUnit([], [], 300, false, src);
+    if (unit.kind === "spike") {
+      expect(unit.items).not.toBe(src);
+      expect(unit.items).toEqual(src);
+    }
+  });
+});

@@ -385,6 +385,33 @@ def _get_stale_verification_budget_per_run() -> int:
     return parsed if parsed >= 0 else 10
 
 
+def _get_diagnostic_retention_days() -> int:
+    """How long a stored extension diagnostic survives (issue #705).
+
+    `extension_diagnostic` holds whole third-party pages (~350 KB each, and a
+    rendered listing page routinely carries owner names and phone numbers), and
+    `purge_extension_diagnostics()` has shipped since #675 with NO caller
+    anywhere — "mechanism only". That was tolerable while the only writer was a
+    button the owner pressed by hand; issue #705 makes the auto-driver a writer,
+    so the purge is now wired into the scheduler and this is its knob.
+
+    0 is NOT accepted as "keep forever" — the opposite of the retention posture
+    the same schema takes for owner_identity, and the failure mode issue #698
+    documents. A non-positive or unparseable value coerces back to 30, matching
+    the SQL function's own DEFAULT.
+    """
+    value: object | None = os.environ.get("ETL_DIAGNOSTIC_RETENTION_DAYS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.diagnostic_retention_days", default=None)
+    if value is None:
+        value = "30"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 30
+    return parsed if parsed > 0 else 30
+
+
 def _get_stale_verification_min_age_hours() -> int:
     """How long a listing must go unobserved before it can be NOMINATED for
     verification (issue #643).
@@ -450,6 +477,9 @@ class Config:
     )
     stale_verification_min_age_hours: int = field(
         default_factory=_get_stale_verification_min_age_hours
+    )
+    diagnostic_retention_days: int = field(
+        default_factory=_get_diagnostic_retention_days
     )
 
     def __post_init__(self) -> None:

@@ -190,6 +190,14 @@
       <button id="diagnostic-btn" class="btn btn-secondary btn-small">
         Forzar captura + diagnóstico
       </button>
+      <!-- "Sitios en evaluación" (issue #705): Chrome only grants an
+           optional host permission from a real user gesture on an extension
+           page, so the queue's pending origins can only be requested HERE,
+           never from the service worker. Hidden unless something is actually
+           waiting on a grant, so it is never a standing nag. -->
+      <button id="spike-permission-btn" class="btn btn-secondary btn-small hidden">
+        Permitir sitios en evaluación
+      </button>
     </div>
     <p id="diagnostic-status" class="state-sub diagnostic-status hidden"></p>
   </footer>

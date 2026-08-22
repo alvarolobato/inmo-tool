@@ -329,6 +329,20 @@
   requires_restart: [etl]
   components: [etl]
 
+# Bounded retention for the extension diagnostic channel (issue #705).
+# purge_extension_diagnostics() has existed since #675 with no caller at all;
+# #705 makes the auto-driver a writer of that table, so the purge is now called
+# once per ETL scheduler iteration and this is its knob.
+- key: etl.diagnostic_retention_days
+  env: ETL_DIAGNOSTIC_RETENTION_DAYS
+  type: int
+  sensitive: false
+  default: 30
+  section: "ETL"
+  description: "Días que se conserva cada diagnóstico de la extensión (tabla extension_diagnostic: el HTML completo de una página de terceros, ~350 KB, que puede incluir nombres y teléfonos del anunciante). El barrido horario del ETL borra lo más antiguo. 30 por defecto, igual que el DEFAULT de la propia función SQL purge_extension_diagnostics(): un diagnóstico existe para desbloquear UNA investigación en curso; lo que merezca conservarse más va a un fixture depurado, no a esta tabla. Un valor <= 0 no significa 'conservar siempre' — se corrige a 30."
+  requires_restart: [etl]
+  components: [etl]
+
 - key: openrouter.api_key
   env: OPENROUTER_API_KEY
   type: string

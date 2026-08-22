@@ -6,6 +6,11 @@
  * @/lib/db/extension-diagnostics so no real DB connection is required (see
  * diagnostic-no-ingest.integration.test.ts for the real-DB proof that this
  * route never touches `listing`/`capture_worklist`).
+ *
+ * Issue #705 added one post-insert step — correlating the stored page with a
+ * pending prospective-site request — so @/lib/db/spike-queue is mocked here
+ * too, and the "a correlation failure must not fail the POST" contract is
+ * pinned below.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -15,10 +20,16 @@ vi.mock("@/lib/db/extension-diagnostics", () => ({
   insertDiagnostic: vi.fn(),
 }));
 
+vi.mock("@/lib/db/spike-queue", () => ({
+  correlateSpikeDiagnostic: vi.fn(),
+}));
+
 import { POST } from "../diagnostic/route";
 import * as db from "@/lib/db/extension-diagnostics";
+import * as spikeDb from "@/lib/db/spike-queue";
 
 const mockInsert = vi.mocked(db.insertDiagnostic);
+const mockCorrelate = vi.mocked(spikeDb.correlateSpikeDiagnostic);
 
 const ADMIN_KEY = "test-admin-key";
 
@@ -39,6 +50,7 @@ describe("POST /api/extension/diagnostic", () => {
   beforeEach(() => {
     vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
     vi.clearAllMocks();
+    mockCorrelate.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -115,7 +127,9 @@ describe("POST /api/extension/diagnostic", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ success: true, id: 42 });
+    // `spikeRequestId` is null for the overwhelmingly common caller — the
+    // #675 manual button on a page nobody queued (issue #705).
+    expect(body).toEqual({ success: true, id: 42, spikeRequestId: null });
     expect(mockInsert).toHaveBeenCalledTimes(1);
     const call = mockInsert.mock.calls[0][0];
     expect(call.url).toBe("https://www.some-unsupported-portal.example/anuncio/1");
@@ -134,5 +148,39 @@ describe("POST /api/extension/diagnostic", () => {
     expect(mockInsert).toHaveBeenCalledTimes(1);
     expect(mockInsert.mock.calls[0][0].detection).toBeNull();
     expect(mockInsert.mock.calls[0][0].network).toBeNull();
+  });
+
+  // ── Prospective-site correlation (issue #705) ──────────────────────────
+  it("correlates the stored page with a pending spike request by canonical match key", async () => {
+    mockInsert.mockResolvedValue(99);
+    mockCorrelate.mockResolvedValue(12);
+    const res = await POST(
+      makeRequest(
+        {
+          // Trailing slash + query: correlation must be tolerant of cosmetic
+          // URL differences, or a real capture silently fails to close its own
+          // queue row.
+          url: "https://www.ejemplo-portal.test/inmueble/7/?utm_source=x",
+          html: "<html><body>x</body></html>",
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, id: 99, spikeRequestId: 12 });
+    expect(mockCorrelate).toHaveBeenCalledWith("ejemplo-portal.test/inmueble/7", 99);
+  });
+
+  it("still returns 200 when correlation throws — the page is already stored, which is the irreplaceable part", async () => {
+    mockInsert.mockResolvedValue(100);
+    mockCorrelate.mockRejectedValue(new Error("boom"));
+    const res = await POST(
+      makeRequest(
+        { url: "https://www.ejemplo-portal.test/inmueble/8", html: "<html></html>" },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, id: 100, spikeRequestId: null });
   });
 });

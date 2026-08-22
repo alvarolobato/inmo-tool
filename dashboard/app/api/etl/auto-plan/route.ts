@@ -3,6 +3,7 @@
  *
  * GET /api/etl/auto-plan[?portal=idealista][&force=1]
  *   → ONE next unit for the extension's auto driver:
+ *       { kind: 'spike',   items: [{ id, url }] }
  *       { kind: 'harvest', task: { profileId, taskId, portal, url } }
  *       { kind: 'drain',   urls: string[] }
  *       { kind: 'idle',    retryAfterSec: number }
@@ -27,6 +28,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { listPendingWorklist } from "@/lib/db/worklist";
+import { listPendingSpikeRequests } from "@/lib/db/spike-queue";
+import { SPIKE_UNIT_LIMIT } from "@/lib/spike-queue";
 import { getPortalDuePriority } from "@/lib/db/worklist-priority";
 import { getHarvestCandidates } from "@/lib/db/auto-plan-candidates";
 import { selectNextPendingUrls } from "@/lib/worklist";
@@ -51,15 +54,27 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     // Harvest candidates (best-effort — never throws) and the leftover pending
     // detail URLs, ranked with the SAME due-first logic the worklist uses.
-    const [candidates, pendingItems, duePriority] = await Promise.all([
+    const [candidates, pendingItems, duePriority, spikeItems] = await Promise.all([
       getHarvestCandidates(portal),
       listPendingWorklist(portal),
       getPortalDuePriority(),
+      // Prospective-site captures (issue #705). Deliberately UNSCOPED by
+      // `portal`: a spike request has no portal by definition (that is what
+      // makes it a spike), so a portal-restricted Auto session would otherwise
+      // never drain the queue at all. Bounded by SPIKE_UNIT_LIMIT — it
+      // preempts harvest/drain, so it must stay a couple of pages, not a pass.
+      listPendingSpikeRequests(SPIKE_UNIT_LIMIT),
     ]);
     // Drain respects staleness unless forcing (mirrors v1 dueOnly semantics).
     const drainUrls = selectNextPendingUrls(pendingItems, duePriority, DRAIN_LIMIT, !force);
 
-    const unit = planAutoUnit(candidates, drainUrls, IDLE_RETRY_AFTER_SEC, force);
+    const unit = planAutoUnit(
+      candidates,
+      drainUrls,
+      IDLE_RETRY_AFTER_SEC,
+      force,
+      spikeItems,
+    );
     return NextResponse.json(unit);
   } catch (err) {
     console.error(`[${requestId}] Error al planificar el siguiente paso de auto:`, err);

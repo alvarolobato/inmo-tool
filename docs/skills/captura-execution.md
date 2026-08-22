@@ -304,6 +304,46 @@ Never time `fetch_detail` without that subtraction — `throttle` is
 `limiter.acquire` and sleeps *inside* the call, so an unsubtracted stopwatch
 reports Fotocasa's 20s pacing interval as work (measured: 67× inflation).
 
+## Sitios en evaluación — queueing pages from a portal we don't support (#705, D-167)
+
+The other half of the queue. `capture_worklist` only accepts hosts that HAVE a
+capture connector; a candidate site you are still assessing has none, and
+`etl/capture.py` would file its page as `failed` ("no capture-capable
+connector"). So prospective-site pages get their own small queue and their own
+destination:
+
+| | Supported portal | Site under evaluation |
+|---|---|---|
+| Queue | `capture_worklist` | `capture_spike_request` |
+| Seeding | paste box on `/admin/fuentes/<portal>` | paste box on **`/admin/diagnostics`** (+ a required site name) |
+| Auto unit | `drain` (or `harvest`) | `spike`, planned FIRST, capped |
+| Lands in | `extension_capture` → `listing` | `extension_diagnostic` (D-153) |
+| Terminal states | `captured`/`failed`/`skipped`/`stale` | `captured`/`skipped`/**`unreachable`** — no `failed` |
+
+**The two paste boxes are mutually exclusive by host** — the worklist one
+refuses a host without a connector, the spike one refuses a host with one — so
+a mistyped idealista link is refused by both and can never quietly become a
+spike capture. That, plus naming the site, is the "explicit choice"; don't
+replace it with a checkbox.
+
+**Nothing fetches the candidate site.** The extension opens a tab, waits for
+the load plus one jittered dwell, reads the DOM and POSTs it to
+`/api/extension/diagnostic` — the same route and payload the #675 "Forzar
+captura + diagnóstico" button uses. This is the only capture path compatible
+with the WAF-protected sites we have refused to build against (D-026/D-027/
+D-033); keep it that way.
+
+**Host permission**: a candidate site is covered only by the manifest's
+`optional_host_permissions`, and Chrome grants an origin only from a user
+gesture on an extension PAGE. So the popup's "Permitir sitios en evaluación"
+button asks; `background.js` only ever calls `permissions.contains`. An
+ungranted origin is skipped and stays `pending` — never `unreachable`.
+
+**Retention**: `purge_extension_diagnostics()` had no caller anywhere until
+#705; it now runs once per ETL scheduler sweep at
+`etl.diagnostic_retention_days` (default 30). Don't add another store of
+scraped third-party pages — see #698 for what that turns into.
+
 ## Loosened searches (#267 caveat)
 
 Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its

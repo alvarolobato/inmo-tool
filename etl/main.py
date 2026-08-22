@@ -361,6 +361,7 @@ def main() -> None:
         freshness_cycle_stuck_after_hours=config.freshness_cycle_stuck_after_hours,
         stale_verification_budget_per_run=config.stale_verification_budget_per_run,
         stale_verification_min_age_hours=config.stale_verification_min_age_hours,
+        diagnostic_retention_days=config.diagnostic_retention_days,
     )
 
 

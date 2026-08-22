@@ -4,6 +4,9 @@ import {
   type DiagnosticSummary,
 } from "@/lib/db/extension-diagnostics";
 import { DeleteDiagnosticButton } from "./DeleteDiagnosticButton";
+import { listSpikeRequests } from "@/lib/db/spike-queue";
+import { pendingSpikeOrigins, summarizeSpikeRequests } from "@/lib/spike-queue";
+import { SpikeQueuePanel } from "./SpikeQueuePanel";
 
 export const metadata = {
   title: "Diagnósticos de extensión — inmo-tool",
@@ -187,9 +190,14 @@ function DiagnosticRow({ d }: { d: DiagnosticSummary }) {
 }
 
 export default async function DiagnosticsAdminPage() {
-  const [diagnostics, storage] = await Promise.all([
+  const [diagnostics, storage, spikeRows] = await Promise.all([
     listDiagnostics(),
     getDiagnosticsStorageSummary(),
+    // Prospective-site capture queue (issue #705). It lives on THIS page
+    // because its output is the diagnostic list below it — queue a page, see
+    // the captured page in the same place — and because a nav tab of its own
+    // would be a fifth admin surface for what is one panel of work.
+    listSpikeRequests(),
   ]);
 
   return (
@@ -205,6 +213,12 @@ export default async function DiagnosticsAdminPage() {
           total.
         </p>
       </div>
+
+      <SpikeQueuePanel
+        rows={spikeRows}
+        summaries={summarizeSpikeRequests(spikeRows)}
+        pendingOrigins={pendingSpikeOrigins(spikeRows)}
+      />
 
       {diagnostics.length === 0 ? (
         <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>

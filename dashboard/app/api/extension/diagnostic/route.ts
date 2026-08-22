@@ -10,9 +10,16 @@
  *
  * Accepts {url, html, title?, diagnostic?, network?} from browser-extension/
  * (popup.js's "Forzar captura + diagnóstico" button, content-script.js's
- * CAPTURE_DIAGNOSTIC handler, and — when a network-capture session was armed
- * — background.js's buffered, already-redacted entries). `diagnostic` and
+ * CAPTURE_DIAGNOSTIC handler, background.js's auto-driver `spike` unit —
+ * issue #705 — and, when a network-capture session was armed,
+ * background.js's buffered, already-redacted entries). `diagnostic` and
  * `network` are stored as opaque JSONB; this route does not interpret them.
+ *
+ * Issue #705 adds ONE step after the insert: correlate the stored page with a
+ * pending `capture_spike_request` by the canonical match key. That is why the
+ * spike driver needs no extra payload field — the same key
+ * `etl/capture.py:_correlate_worklist` uses does the join. Still no ingest:
+ * `capture_spike_request` is read by nothing on the listing path either.
  *
  * Admin-gated exactly like /api/extension/capture: gate-by-default in
  * middleware AND re-checked in-route (defense in depth).
@@ -26,6 +33,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripNulBytes } from "@/lib/strip-nul-bytes";
 import { insertDiagnostic } from "@/lib/db/extension-diagnostics";
+import { correlateSpikeDiagnostic } from "@/lib/db/spike-queue";
+import { worklistMatchKey } from "@/lib/worklist";
 import type { DiagnosticDetectionBlock, DiagnosticNetworkCapture } from "@/lib/db/extension-diagnostics";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
@@ -133,7 +142,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       detection: diagnostic ?? null,
       network: network ?? null,
     });
-    return NextResponse.json({ success: true, id }, { headers: { "Cache-Control": "no-store" } });
+    // Prospective-site queue correlation (issue #705). Best-effort by
+    // contract: the overwhelmingly common caller is the #675 manual button,
+    // which matches nothing and is a no-op, and a failure here must never fail
+    // the POST — the page is already stored, which is the part that cannot be
+    // reconstructed.
+    let spikeRequestId: number | null = null;
+    try {
+      spikeRequestId = await correlateSpikeDiagnostic(worklistMatchKey(url), id);
+    } catch (err) {
+      console.error(`[${requestId}] No se pudo correlacionar el diagnóstico con la cola de evaluación:`, err);
+    }
+    return NextResponse.json(
+      { success: true, id, spikeRequestId },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (err) {
     console.error(`[${requestId}] Error al guardar el diagnóstico de la extensión:`, err);
     return NextResponse.json(
