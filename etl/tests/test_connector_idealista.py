@@ -12,6 +12,7 @@ docstring for why this connector never fetches Idealista directly).
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -704,13 +705,32 @@ class TestGalleryTruncationFlag:
 _RETIRED_FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "idealista_retired_notice.html"
 )
+# The obviously-fake reference and delisting date the synthetic fixture
+# prints. Tests rewrite them to make the notice agree (or deliberately
+# disagree) with the listing being captured.
+_FIXTURE_REFERENCE = "900000001"
+_FIXTURE_DELISTED = "03/08/2026"
+# Substituted in by default so no test depends on wall-clock drift: the
+# fixture's hardcoded date would eventually fall outside
+# `_NOTICE_MAX_DELISTING_AGE_DAYS` and be (correctly) disbelieved.
+_RECENT_DELISTED = (datetime.now(timezone.utc).date() - timedelta(days=12)).strftime(
+    "%d/%m/%Y"
+)
 
 
-def _read_retired_fixture() -> str:
-    return _RETIRED_FIXTURE_PATH.read_text(encoding="utf-8")
+def _read_retired_fixture(
+    reference: str = _FIXTURE_REFERENCE, delisted: str | None = _RECENT_DELISTED
+) -> str:
+    """The synthetic retired-notice page, with its reference and delisting
+    date rewritten to whatever this test needs (issue #691)."""
+    html = _RETIRED_FIXTURE_PATH.read_text(encoding="utf-8")
+    html = html.replace(_FIXTURE_REFERENCE, reference)
+    if delisted is not None:
+        html = html.replace(_FIXTURE_DELISTED, delisted)
+    return html
 
 
-def _raw(html: str, external_id: str = "112270916") -> RawListing:
+def _raw(html: str, external_id: str = _FIXTURE_REFERENCE) -> RawListing:
     return RawListing(
         external_id=external_id,
         source="idealista",
@@ -866,3 +886,203 @@ class TestNormalizeRefusesNonAdvertPages:
         )
         canonical = IdealistaConnector().normalize(_raw(thin))
         assert canonical.current_price == Decimal(125000)
+
+
+class TestRetiredNoticeFacts:
+    """Issue #691. The notice does not just say an advert is gone — it prints
+    which advert, when the advertiser pulled it, and what it was asking. All
+    three are parsed; two of them decide whether a row may be changed."""
+
+    def test_reference_date_and_stated_figures_are_all_parsed(self):
+        facts = IdealistaConnector().retired_notice_facts(
+            _read_retired_fixture(delisted="03/08/2026")
+        )
+        assert facts is not None
+        assert facts.reference == _FIXTURE_REFERENCE
+        assert facts.delisted_on == date(2026, 8, 3)
+        assert facts.stated_price == Decimal(123000)
+        assert facts.stated_m2 == Decimal(80)
+        assert facts.stated_rooms == 3
+
+    def test_the_citation_carries_the_parsed_facts(self):
+        """`listing_status_event.evidence` is the only place anyone will ever
+        be able to reconstruct this withdrawal from, so the numbers the page
+        showed have to survive into it — including the final asking price,
+        which nothing else in this project records."""
+        facts = IdealistaConnector().retired_notice_facts(
+            _read_retired_fixture(delisted="03/08/2026")
+        )
+        assert facts is not None
+        citation = facts.citation
+        assert "ya no esta publicado" in citation.lower()
+        assert _FIXTURE_REFERENCE in citation
+        assert "03/08/2026" in citation
+        assert "123000 €" in citation
+        assert "80 m²" in citation
+        assert "3 hab." in citation
+
+    def test_a_notice_without_the_extra_lines_is_still_a_notice(self):
+        """A reworded notice that drops the reference/date/summary must still
+        be RECOGNISED — the sentence is what identifies the page. It simply
+        carries less evidence, and it is the caller that decides whether
+        that is enough (here: it is not, see the normalize tests)."""
+        bare = (
+            "<html><head><title>Viviendas venta. Pisos. Chalets — idealista"
+            "</title></head><body><h1>Lo sentimos, este anuncio ya no está "
+            "publicado</h1></body></html>"
+        )
+        facts = IdealistaConnector().retired_notice_facts(bare)
+        assert facts is not None
+        assert facts.reference is None
+        assert facts.delisted_on is None
+        assert facts.stated_price is None
+        assert "no imprime" in facts.citation
+
+    def test_prices_and_areas_parse_under_both_locales(self):
+        """idealista.com serves both "123.000 €" (es-ES) and "123,000 €"
+        (en) — see `_strip_thousands_separators`. Both mean the same number
+        and both must read as it, because a size misread by a factor of a
+        thousand would veto every withdrawal it touched."""
+        connector = IdealistaConnector()
+        for figures in ("1.234.000 € 1.250 m² 5 hab.", "1,234,000 € 1,250 m² 5 hab."):
+            html = _read_retired_fixture().replace("123.000 € 80 m² 3 hab.", figures)
+            facts = connector.retired_notice_facts(html)
+            assert facts is not None
+            assert facts.stated_price == Decimal(1234000)
+            assert facts.stated_m2 == Decimal(1250)
+            assert facts.stated_rooms == 5
+
+    def test_a_decimal_area_truncates_rather_than_inflating(self):
+        """ "79,6 m²" must read as 79, never as 796. Truncation can only make
+        the corroboration check stricter by a fraction of a metre, which the
+        tolerance absorbs; reading it as 796 would veto a real withdrawal."""
+        html = _read_retired_fixture().replace(
+            "123.000 € 80 m² 3 hab.", "123.000 € 79,6 m² 3 hab."
+        )
+        facts = IdealistaConnector().retired_notice_facts(html)
+        assert facts is not None
+        assert facts.stated_m2 == Decimal(79)
+
+    def test_figures_from_elsewhere_on_the_page_are_not_attributed(self):
+        """The stated figures come from a bounded window right after the
+        notice sentence. A price in the footer, a size in a promo strip or
+        anything past the reference line belongs to some other advert and
+        must never be recorded as this one's."""
+        html = _read_retired_fixture().replace(
+            "<footer>",
+            '<div class="promo">Chalets desde 999.000 € y 500 m² en tu zona</div>'
+            "<footer>",
+        )
+        facts = IdealistaConnector().retired_notice_facts(html)
+        assert facts is not None
+        assert facts.stated_price == Decimal(123000)
+        assert facts.stated_m2 == Decimal(80)
+
+    @pytest.mark.parametrize(
+        "stated",
+        [
+            "31/02/2026",  # not a real date
+            "01/01/1970",  # absurdly old
+        ],
+    )
+    def test_an_unbelievable_date_is_discarded_and_said_so(self, stated):
+        facts = IdealistaConnector().retired_notice_facts(
+            _read_retired_fixture(delisted=stated)
+        )
+        assert facts is not None
+        assert facts.delisted_on is None
+        assert "no es verosímil" in facts.citation
+        assert stated in facts.citation
+
+    def test_a_future_date_is_discarded(self):
+        """A page cannot report a withdrawal that has not happened yet, so a
+        future date means the parse (or the locale's field order) is wrong."""
+        future = (datetime.now(timezone.utc).date() + timedelta(days=30)).strftime(
+            "%d/%m/%Y"
+        )
+        facts = IdealistaConnector().retired_notice_facts(
+            _read_retired_fixture(delisted=future)
+        )
+        assert facts is not None
+        assert facts.delisted_on is None
+
+    def test_signature_and_facts_never_disagree(self):
+        """`retired_page_signature` is a wrapper, and must stay one — two
+        independent recognitions would eventually drift apart."""
+        connector = IdealistaConnector()
+        for html in (_read_retired_fixture(), _read_fixture(), ""):
+            facts = connector.retired_notice_facts(html)
+            signature = connector.retired_page_signature(html)
+            assert signature == (facts.citation if facts is not None else None)
+
+    def test_other_connectors_keep_the_unstructured_contract(self):
+        """The base class gained an OPTIONAL structured hook. A connector
+        that implements only `retired_page_signature` — fotocasa, pisos —
+        must be completely unaffected."""
+        from etl.connectors.fotocasa import FotocasaConnector
+
+        connector = FotocasaConnector()
+        assert connector.retired_notice_facts("<html></html>") is None
+        assert (
+            connector.retired_page_signature(
+                "<html></html>", "https://www.fotocasa.es/es/?propertyNotFound"
+            )
+            is not None
+        )
+
+
+class TestRetiredNoticeReferenceCorroboration:
+    """Issue #691. The notice page is generic chrome — the same shell for
+    every dead advert — so the sentence alone only supports "SOME advert is
+    gone". Only the printed reference ties it to the listing being captured,
+    and without that tie nothing may be withdrawn."""
+
+    def test_a_matching_reference_withdraws(self):
+        with pytest.raises(ListingUnavailableError) as excinfo:
+            IdealistaConnector().normalize(
+                _raw(_read_retired_fixture(), _FIXTURE_REFERENCE)
+            )
+        assert "retirado" in str(excinfo.value).lower()
+        assert _FIXTURE_REFERENCE in str(excinfo.value)
+
+    def test_a_mismatched_reference_withdraws_nothing(self):
+        """THE test this hardening exists for. A notice shell served at the
+        wrong URL — a redirect, a stale tab, a mis-typed capture, a portal
+        bug — would otherwise withdraw a listing the page was never about.
+        ConnectorError, NOT ListingUnavailableError: same safe outcome as a
+        bot wall, capture recorded failed, no listing touched."""
+        with pytest.raises(ConnectorError) as excinfo:
+            IdealistaConnector().normalize(
+                _raw(_read_retired_fixture(reference="900000002"), "900000001")
+            )
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "DIFFERENT advert" in str(excinfo.value)
+        assert "900000002" in str(excinfo.value)
+
+    def test_a_notice_without_a_reference_withdraws_nothing(self):
+        """Required, not preferred. An uncorroborated notice is still only
+        "some advert is gone", and D-157 does not let that change a row."""
+        html = _read_retired_fixture().replace(
+            f"Referencia del anuncio: {_FIXTURE_REFERENCE}", "&nbsp;"
+        )
+        with pytest.raises(ConnectorError) as excinfo:
+            IdealistaConnector().normalize(_raw(html, _FIXTURE_REFERENCE))
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "no «Referencia del anuncio»" in str(excinfo.value)
+
+    def test_a_missing_date_does_not_block_the_withdrawal(self):
+        """The date is precision, not proof. Losing it costs the transition
+        its true timestamp (it falls back to the capture time), never the
+        transition itself."""
+        html = _read_retired_fixture().replace(
+            "El anunciante lo dio de baja el 03/08/2026", "&nbsp;"
+        )
+        with pytest.raises(ListingUnavailableError):
+            IdealistaConnector().normalize(_raw(html, _FIXTURE_REFERENCE))
+
+    def test_a_notice_with_no_stated_figures_still_withdraws(self):
+        """Size/rooms corroborate when present; absent, the reference match
+        stands alone. Absence is not a mismatch."""
+        html = _read_retired_fixture().replace("123.000 € 80 m² 3 hab.", "&nbsp;")
+        with pytest.raises(ListingUnavailableError):
+            IdealistaConnector().normalize(_raw(html, _FIXTURE_REFERENCE))

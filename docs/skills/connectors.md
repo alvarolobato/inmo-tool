@@ -87,13 +87,13 @@ against ids taken from production's oldest-`last_seen_at` actives:
 | fotocasa | HTTP **404**, redirecting to the search page with `?propertyNotFound` | not observed | `retired_page_signature` on the `propertyNotFound` URL marker — a second line of defence in case that landing page is ever served with a 200, since its own `__initial_props__` would otherwise normalize as if it were the listing |
 | milanuncios | HTTP **404** (tiny redirect-to-home body) | not observed | **none, deliberately** — see the Milanuncios section below |
 | pisos | HTTP **404** (`<title>404</title>`) | not observed | no retired signature; instead a positive ALIVE marker (`features__feature`, 7 on a served listing, 0 on the 404 page), because pisos verification never reaches `normalize()` |
-| idealista | n/a — capture-only, never fetched (D-081) | **yes**, the notice the owner reads as "lo sentimos, este anuncio ya no está publicado" | `retired_page_signature` on the notice SENTENCE in the page's visible text, guarded by the absence of the advert's own markup (D-159) — the only capture-path signature so far |
+| idealista | n/a — capture-only, never fetched (D-081) | **yes**, the notice the owner reads as "lo sentimos, este anuncio ya no está publicado" | the notice SENTENCE in the page's visible text, guarded by the absence of the advert's own markup AND by the reference/size/rooms the notice itself prints matching the listing being captured (D-159) — the only capture-path signature so far |
 
 The same spike is the best available argument for why a soft block must change
 nothing: of two stale milanuncios ads checked, one served the real page and the
 other served the "Pardon Our Interruption" GeeTest wall with HTTP 200.
 
-### The capture path can carry a signature too (issue #690, D-159)
+### The capture path can carry a signature too (issues #690 and #691, D-159)
 
 `retired_page_signature` was built for the stale-verification pass, which
 fetches. Idealista never fetches — but the owner's browser does, and
@@ -104,11 +104,11 @@ checks the signature first and raises `ListingUnavailableError`, which
 a subclass, so the ordering is load-bearing) and turns into `withdrawn` +
 `listing_status_event.evidence`.
 
-Two lessons from that work worth carrying to the next capture-only portal:
+Four lessons from that work worth carrying to the next capture-only portal:
 
 1. **A capture-only connector's `normalize()` must be able to refuse.** Before
-   #690, Idealista's could not: every field is optional, so a bot wall or a
-   retired notice parsed "successfully" into an all-`None` listing that the
+   #690, Idealista's could not: every field is optional, so a non-advert page
+   of any kind parsed "successfully" into an all-`None` listing that the
    capture pipeline dutifully persisted — creating 18 phantom listings, erasing
    8 real photo galleries (`_update_existing_listing` COALESCEs scalars but
    assigns `photo_urls` unconditionally), and pushing `last_seen_at` forward on
@@ -116,11 +116,47 @@ Two lessons from that work worth carrying to the next capture-only portal:
    return "this is not an advert", it will eventually persist something that
    isn't one. Add a zero-substantive-fields guard that raises a plain
    `ConnectorError`.
+
+   (The 26 production rows that exposed this are "non-advert pages" and no
+   more: they share one byte-identical stored footprint — `fields_extracted =
+   3`, no photos, the site-wide `<title>` — one is a confirmed withdrawal and
+   others may be anti-bot challenge pages, and the retained data cannot
+   separate the two, because the HTML is discarded once a capture is
+   processed.)
 2. **Keep the two outcomes strictly separate.** The recognised notice →
    `ListingUnavailableError` → status change. Anything else unreadable →
    `ConnectorError` → no write at all. Never let the second collapse into the
    first: "I can't parse this" is not "it's gone" (D-157), and a portal behind
    a WAF serves plenty of pages you can't parse.
+3. **Recognising the notice is not the same as identifying the listing.** A
+   portal's notice page is generic chrome: near enough the same shell for every
+   dead advert. On the *fetch* path that gap does not exist — the verifier
+   asked for one URL and got one answer — but on the capture path the page
+   arrives from a browser nobody controls, so "this page says an advert is
+   gone" has to be upgraded to "this page says *your* advert is gone" before it
+   may change a row. Look for what the notice prints about the advert it
+   replaced: Idealista's carries «Referencia del anuncio», which is the same id
+   the URL carries, plus the headline size/rooms. Require the reference; treat
+   a *stated* figure that disagrees as a veto, but a *missing* one as no
+   information — absence is not a mismatch, or the first reworded notice
+   silently kills the channel.
+4. **Read the date off the page, not off the clock.** Idealista prints "El
+   anunciante lo dio de baja el DD/MM/YYYY". Stamping
+   `listing_status_event.observed_at` with `NOW()` instead invents however many
+   days sat between the advert dying and the owner happening to open it
+   (twelve, in the page that prompted #691). Sanity-check what you parse — nonexistent
+   dates, future dates, absurdly old ones — and fall back to the capture time,
+   which is at least honestly "when we saw this". A wrong date is worse than no
+   date, because afterwards it looks exactly like a right one.
+
+Two mechanics for lessons 3 and 4: the comparison against stored data needs the
+database, and connectors do not get one. Return the parsed notice values from
+the optional `Connector.retired_notice_facts()` hook (a `RetiredNoticeFacts`,
+which `retired_page_signature` should then delegate to so the two can never
+disagree about whether a page is a notice) and let `etl/capture.py` do the
+comparing. And record everything the notice stated into
+`listing_status_event.evidence`, including the final asking price — no other
+part of this project captures what an advert wanted when it died.
 
 Two things to get right when opting a connector in:
 

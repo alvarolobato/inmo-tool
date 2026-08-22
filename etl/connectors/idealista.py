@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -59,6 +60,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    RetiredNoticeFacts,
     Throttle,
 )
 from etl.connectors.extraction import first_present
@@ -150,6 +152,156 @@ _LISTING_DETAIL_SELECTORS = (
 def _has_listing_detail_markup(soup: BeautifulSoup) -> bool:
     """Does this page render ANY of a real advert's own detail blocks?"""
     return any(soup.select_one(sel) is not None for sel in _LISTING_DETAIL_SELECTORS)
+
+
+# --- What the notice page STATES about the advert it replaced --------------
+#
+# Issue #691's hardening of D-159. D-159 shipped on the notice SENTENCE
+# alone, which was all the page shape measured from production
+# (`fields_extracted = 3`, no photos, site-wide <title>) appeared to offer.
+# Reading a real notice page by hand afterwards showed it offers far more.
+# Rendered, the owner's sample reads:
+#
+#     Lo sentimos, este anuncio ya no está publicado
+#     Piso en venta en <calle>, <barrio>, <ciudad>
+#     123.000 € 80 m² 3 hab.
+#
+#     Referencia del anuncio: 900000001
+#
+#     El anunciante lo dio de baja el 03/08/2026
+#
+# Three of those lines change what this connector can honestly claim:
+#
+#  * The REFERENCE is the advert's own id — the very digits the URL carries
+#    in `/inmueble/<digits>/`. Without it, the sentence only supports "SOME
+#    Idealista advert is gone"; a generic notice shell served at the wrong
+#    URL (a mis-typed capture, a redirect, a stale tab, a portal bug) would
+#    withdraw a listing the notice was never about. Requiring the printed
+#    reference to equal the captured `external_id` turns the claim into
+#    "Idealista says THIS advert is gone", which is the only claim strong
+#    enough to change a row. It is REQUIRED, not a bonus: no reference, no
+#    withdrawal (see `IdealistaConnector.normalize`).
+#  * The DATE is when the advertiser actually pulled it. In the owner's
+#    sample the advert had already been down for twelve days when the
+#    page was captured — twelve days that stamping the transition `NOW()`
+#    would invent
+#    out of nothing, and that every "how long do adverts survive?" question
+#    downstream would then get wrong.
+#  * The PRICE/SIZE/ROOMS line is the advert's headline summary. Size and
+#    rooms are structural facts that do not change while an advert is
+#    live, so they corroborate: if the notice describes a 40 m² studio and
+#    we stored a 120 m² four-bed, this notice is not about our listing and
+#    nothing may be withdrawn. Price deliberately does NOT corroborate — a
+#    seller repricing before delisting is ordinary behaviour, and a price
+#    that moved is no reason at all to doubt a reference that matched.
+#
+# None of these values is ever written onto the `listing` row. They come
+# from a weaker parse (plain rendered text) of facts the row already holds
+# from a proper structured capture; overwriting good data on a row being
+# marked dead would be all risk and no gain. They are recorded as EVIDENCE
+# and, for size/rooms, used as a veto. See D-159.
+
+# Both distinctive enough to match anywhere in the page's visible text.
+_NOTICE_REFERENCE_RE = re.compile(r"referencia\s+del\s+anuncio\s*:?\s*(\d{3,})")
+_NOTICE_DELISTED_RE = re.compile(
+    r"\bdio\s+de\s+baja\s+el\s+(\d{1,2})/(\d{1,2})/(\d{4})\b"
+)
+
+# A whole number as either locale renders it — "123.000" (es-ES) and
+# "123,000" (en, which idealista.com does serve; see
+# `_strip_thousands_separators`) both mean the same thing. Written as
+# "groups of exactly three" precisely so it can never swallow a DECIMAL
+# comma/dot: "83,5 m²" matches "83", not "835". Truncating a fraction is
+# safe here (it can only make a corroboration check stricter); reading
+# 83,5 as 835 would silently veto a genuine withdrawal.
+_NOTICE_INT = r"\d{1,3}(?:[.,]\d{3})+|\d+"
+# ...followed by an OPTIONAL fraction that is matched and then thrown away.
+# Without it the patterns would skip past the whole number and latch onto
+# the fraction alone — "79,6 m²" read as 6 m², which would veto a perfectly
+# good withdrawal. Capped at two digits so it can never eat a thousands
+# group (which is always exactly three).
+_NOTICE_FRACTION = r"(?:[.,]\d{1,2})?"
+_NOTICE_PRICE_RE = re.compile(rf"({_NOTICE_INT}){_NOTICE_FRACTION}\s*€")
+# `m²`, `m2` and `m 2` all appear across renderings; the lookahead stops
+# "m2" from matching the start of a longer token.
+_NOTICE_M2_RE = re.compile(rf"({_NOTICE_INT}){_NOTICE_FRACTION}\s*m\s*[²2](?![\w])")
+_NOTICE_ROOMS_RE = re.compile(r"(\d{1,2})\s*hab\b")
+
+# How far past the notice sentence the advert's headline summary can sit.
+# The summary window is bounded — rather than searching the whole page — so
+# a price or an "m²" from an unrelated block (the "anuncios similares"
+# strip, a footer, a cookie banner) can never be recorded as this advert's
+# stated figures. In the owner's sample the summary is ~80 characters long.
+_NOTICE_SUMMARY_WINDOW = 250
+
+# A delisting date this far in the past is not believed. Idealista does not
+# keep serving a notice for an advert taken down a decade ago, so a date
+# that old means the parse went wrong (a birthday in a cookie banner, a
+# copyright line, a reworded page) — and a wrong date written into
+# `listing_status_event.observed_at` is worse than no date, because it is
+# indistinguishable from a real one afterwards. Falls back to the capture
+# time, which is at least honestly "when we saw this".
+_NOTICE_MAX_DELISTING_AGE_DAYS = 3650
+
+
+def _notice_int(pattern: re.Pattern[str], text: str) -> Decimal | None:
+    """First `pattern` match in `text` as a whole number, or None.
+
+    Discards every thousands separator rather than trying to detect the
+    locale — the same call this module already makes in
+    `_strip_thousands_separators`, and correct under both es-ES and en
+    because `_NOTICE_INT` only ever captures whole numbers.
+    """
+    match = pattern.search(text)
+    if match is None:
+        return None
+    digits = re.sub(r"[^\d]", "", match.group(1))
+    if not digits:
+        return None
+    try:
+        return Decimal(digits)
+    except InvalidOperation:  # pragma: no cover - unreachable for pure digits
+        return None
+
+
+def _notice_delisting_date(text: str, today: date) -> tuple[date | None, str | None]:
+    """The date the notice says the advertiser withdrew the advert.
+
+    Returns `(date, None)` when a believable date was read, `(None, note)`
+    when the page stated one this function refuses to believe (the note goes
+    into the evidence so the refusal is auditable rather than invisible),
+    and `(None, None)` when the page states no date at all.
+
+    Rejected: a date that does not exist (31/02), one in the FUTURE — a page
+    cannot report a withdrawal that has not happened, so this is a
+    misparse or a differently-ordered locale (MM/DD) — and one older than
+    `_NOTICE_MAX_DELISTING_AGE_DAYS`. Every rejection falls back to the
+    capture time, never to a guess.
+    """
+    match = _NOTICE_DELISTED_RE.search(text)
+    if match is None:
+        return None, None
+    day, month, year = (int(group) for group in match.groups())
+    raw = f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+    try:
+        parsed = date(year, month, day)
+    except ValueError:
+        parsed = None
+    if parsed is None or not (
+        today - timedelta(days=_NOTICE_MAX_DELISTING_AGE_DAYS) <= parsed <= today
+    ):
+        logger.warning(
+            "idealista: retired notice states an implausible delisting date "
+            "%r (today %s) — ignoring it and stamping the withdrawal with "
+            "the capture time instead (D-159)",
+            raw,
+            today.isoformat(),
+        )
+        return None, (
+            f"la fecha de baja declarada ({raw}) no es verosímil y se "
+            "descarta; la retirada se fecha en el momento de la captura"
+        )
+    return parsed, None
 
 
 _REFERENCE_INPUT_RE = re.compile(
@@ -316,15 +468,43 @@ class IdealistaConnector(Connector):
         """Idealista's own "this advert is gone" notice, positively
         identified — or None (issue #690, D-159).
 
-        Returns a short Spanish citation of the sentence the portal rendered,
-        which becomes `listing_status_event.evidence`. The base class
-        contract is deliberately strict about what may return non-None here
-        (see `Connector.retired_page_signature`): only a marker the SITE
-        ITSELF put on the page. This override honours that by matching the
-        notice sentence and nothing else.
+        Returns a short Spanish citation of what the portal rendered, which
+        becomes `listing_status_event.evidence`. The base class contract is
+        deliberately strict about what may return non-None here (see
+        `Connector.retired_page_signature`): only a marker the SITE ITSELF
+        put on the page. This override honours that by matching the notice
+        sentence and nothing else.
 
-        Two independent conditions must BOTH hold, and they are not
-        redundant:
+        Thin wrapper over `retired_notice_facts`, which does the actual
+        recognition — so the two can never disagree about whether a page is
+        a notice. Everything about how the page is identified is documented
+        there.
+
+        **This answers "is this page a retired-advert notice?", NOT "is
+        THIS listing retired?"** It cannot answer the second: nothing here
+        knows which listing the caller has in mind. The corroboration that
+        ties a notice to one specific listing (a printed reference equal to
+        the captured `external_id`) lives in `normalize`, which does know —
+        and `normalize` is the only path by which an Idealista capture can
+        ever withdraw anything. A future caller that withdraws on this
+        method's return value alone would be skipping that check.
+
+        `final_url` is accepted for contract compatibility and unused:
+        Idealista serves the notice at the listing's own URL with a 200 and
+        does not redirect, so there is no URL-shaped signal to read (unlike
+        fotocasa's `?propertyNotFound`).
+        """
+        facts = self.retired_notice_facts(html, final_url)
+        return facts.citation if facts is not None else None
+
+    def retired_notice_facts(
+        self, html: str, final_url: str | None = None
+    ) -> RetiredNoticeFacts | None:
+        """Recognise Idealista's "anuncio retirado" notice and read
+        everything it states (issue #690, D-159; facts added by #691).
+
+        Two independent conditions must BOTH hold before this returns
+        anything at all, and they are not redundant:
 
         1. The notice sentence is present in the page's visible text. This
            is the positive evidence — the only thing that can ever make this
@@ -338,10 +518,14 @@ class IdealistaConnector(Connector):
            price/title/description block, so requiring its absence closes
            that route without ever letting absence alone withdraw anything.
 
-        `final_url` is accepted for contract compatibility and unused:
-        Idealista serves the notice at the listing's own URL with a 200 and
-        does not redirect, so there is no URL-shaped signal to read (unlike
-        fotocasa's `?propertyNotFound`).
+        What the notice STATES (reference, delisting date, headline
+        price/size/rooms) is then parsed out of the same visible text. A
+        field the page does not state comes back None, and callers must
+        read that as "no information" — see `RetiredNoticeFacts`. Parsing
+        none of them does not un-identify the page: a reworded notice that
+        still says the sentence is still a notice, it just carries less
+        evidence, and it is the CALLER that decides whether the evidence it
+        does carry is enough to change a row.
         """
         if not html:
             return None
@@ -349,7 +533,8 @@ class IdealistaConnector(Connector):
         # majority of captures (real adverts) the regex misses and this
         # returns immediately without the markup check.
         soup = BeautifulSoup(html, "html.parser")
-        match = _RETIRED_NOTICE_RE.search(_strip_to_visible_text(soup))
+        text = _strip_to_visible_text(soup)
+        match = _RETIRED_NOTICE_RE.search(text)
         if match is None:
             return None
         if _has_listing_detail_markup(soup):
@@ -362,10 +547,74 @@ class IdealistaConnector(Connector):
                 match.group(0),
             )
             return None
-        return (
-            "Página de anuncio retirado de Idealista: la propia web muestra "
-            f"«{match.group(0)}» y la ficha no existe (sin precio, sin "
-            "descripción, sin galería)"
+
+        phrase = match.group(0)
+        reference_match = _NOTICE_REFERENCE_RE.search(text)
+        reference = reference_match.group(1) if reference_match is not None else None
+
+        # The advert's headline summary sits between the notice sentence and
+        # the reference line. Bounded on BOTH ends (see
+        # _NOTICE_SUMMARY_WINDOW) so no unrelated number on the page can be
+        # recorded as this advert's stated price/size/rooms.
+        summary_end = match.end() + _NOTICE_SUMMARY_WINDOW
+        if reference_match is not None:
+            summary_end = min(summary_end, reference_match.start())
+        summary = text[match.end() : max(summary_end, match.end())]
+
+        stated_m2 = _notice_int(_NOTICE_M2_RE, summary)
+        stated_rooms = _notice_int(_NOTICE_ROOMS_RE, summary)
+        # Read AFTER the m² figure has been taken out of the running: on a
+        # page rendered without the € sign the price pattern could otherwise
+        # latch onto the area. (It cannot as written — the pattern requires
+        # the € — but the ordering keeps that assumption cheap to revisit.)
+        stated_price = _notice_int(_NOTICE_PRICE_RE, summary)
+
+        delisted_on, date_note = _notice_delisting_date(
+            text, datetime.now(timezone.utc).date()
+        )
+
+        parts = [
+            (
+                "Página de anuncio retirado de Idealista: la propia web "
+                f"muestra «{phrase}» y la ficha no existe (sin precio, sin "
+                "descripción, sin galería)"
+            )
+        ]
+        parts.append(
+            f"referencia del anuncio en el aviso: {reference}"
+            if reference is not None
+            else "el aviso no imprime «Referencia del anuncio»"
+        )
+        if delisted_on is not None:
+            parts.append(
+                f"el anunciante lo dio de baja el {delisted_on.strftime('%d/%m/%Y')}"
+            )
+        elif date_note is not None:
+            parts.append(date_note)
+        else:
+            parts.append("el aviso no declara fecha de baja")
+        stated = [
+            f"{value}{unit}"
+            for value, unit in (
+                (stated_price, " €"),
+                (stated_m2, " m²"),
+                (stated_rooms, " hab."),
+            )
+            if value is not None
+        ]
+        parts.append(
+            "datos declarados en el aviso: " + ", ".join(stated)
+            if stated
+            else "el aviso no declara precio, superficie ni habitaciones"
+        )
+
+        return RetiredNoticeFacts(
+            citation="; ".join(parts),
+            reference=reference,
+            delisted_on=delisted_on,
+            stated_price=stated_price,
+            stated_m2=stated_m2,
+            stated_rooms=int(stated_rooms) if stated_rooms is not None else None,
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
@@ -376,12 +625,59 @@ class IdealistaConnector(Connector):
         # own "anuncio retirado" notice rather than a listing? Checked FIRST,
         # because every field below degrades to None on such a page and the
         # result would otherwise be a plausible-looking-but-empty listing —
-        # which is precisely what production was persisting (26 rows, see
-        # D-159). `ListingUnavailableError` is the codebase's established
-        # "the source says this listing is gone" signal (D-049).
-        signature = self.retired_page_signature(html, raw.raw.get("url"))
-        if signature is not None:
-            raise ListingUnavailableError(signature)
+        # which is precisely what production was persisting (26 non-advert
+        # rows, see D-159). `ListingUnavailableError` is the codebase's
+        # established "the source says this listing is gone" signal (D-049).
+        #
+        # Issue #691 adds the corroboration the sentence alone cannot give.
+        # A notice page is generic chrome: the same shell for every dead
+        # advert. On its own the sentence supports "SOME Idealista advert is
+        # gone", and acting on that would let a notice shell served at the
+        # wrong URL withdraw a listing it was never about. The printed
+        # reference is the advert's OWN id — the same digits the URL carries
+        # in /inmueble/<digits>/, which is exactly what `raw.external_id`
+        # holds — so requiring the two to be equal upgrades the claim to
+        # "Idealista says THIS advert is gone".
+        #
+        # Required, not preferred. A notice with no reference, or with
+        # someone else's, withdraws NOTHING: it falls out to the same
+        # `ConnectorError` a bot wall gets — capture recorded `failed`, not
+        # one row touched. Raised right here rather than by falling through
+        # to the zero-substantive-fields guard below, which would reach the
+        # identical outcome for today's notice pages but is not guaranteed
+        # to: the guard counts `og:image` as substantive, and a notice page
+        # rendering the site logo there would sail through it and be
+        # persisted as a listing. Same exception class, same handling in
+        # etl/capture.py, message that names what actually happened.
+        facts = self.retired_notice_facts(html, raw.raw.get("url"))
+        if facts is not None:
+            captured_id = str(raw.external_id).strip()
+            if facts.reference is None:
+                raise ConnectorError(
+                    f"idealista {captured_id}: the captured page IS the "
+                    "portal's 'anuncio retirado' notice, but it prints no "
+                    "«Referencia del anuncio», so there is nothing tying it "
+                    "to this listing rather than to any other dead advert. "
+                    "Refusing to withdraw on an uncorroborated notice "
+                    "(issue #691, D-159); nothing about any listing has been "
+                    f"changed. Notice read as: {facts.citation}"
+                )
+            if facts.reference != captured_id:
+                raise ConnectorError(
+                    f"idealista {captured_id}: the captured page is a "
+                    "'anuncio retirado' notice for a DIFFERENT advert — it "
+                    f"prints «Referencia del anuncio: {facts.reference}» "
+                    f"while this capture is of /inmueble/{captured_id}/. "
+                    "That mismatch means the page and the URL disagree "
+                    "about which listing this is, so nothing may be "
+                    "withdrawn (issue #691, D-159). Nothing about any "
+                    "listing has been changed."
+                )
+            # Corroborated. Size/rooms are checked too, but not here: that
+            # comparison needs the STORED listing, which this method has no
+            # access to and must not acquire — see etl/capture.py's
+            # `_notice_contradicts_stored`.
+            raise ListingUnavailableError(facts.citation)
 
         title_el = soup.select_one(".main-info__title-main")
         title = (
@@ -500,7 +796,9 @@ class IdealistaConnector(Connector):
         # Until this landed, every one of those parsed "successfully" into a
         # listing whose every real field was None, and etl/capture.py
         # persisted it. Measured in production before the fix: 26 idealista
-        # rows, of which 18 were listings CREATED from such a page (no price,
+        # rows whose last capture was a NON-ADVERT page of some kind (the
+        # stored footprint cannot say which kind — see D-159), of which 18
+        # were listings CREATED from such a page (no price,
         # no description, no photos, property_type 'piso' fabricated from the
         # site-wide <title> "Viviendas venta. Viviendas alquiler. Pisos.
         # Chalets — idealista") and 8 were real adverts whose stored photo

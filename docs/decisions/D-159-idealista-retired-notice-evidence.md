@@ -3,7 +3,7 @@ id: D-159
 title: Idealista's "anuncio retirado" notice is withdrawal evidence; any other non-advert page is refused, never persisted
 date: 2026-08-22
 group: Data / connectors
-rule: 'Idealista normalize() raises ListingUnavailableError on the positively-identified retired notice (→ withdrawn + evidence), and ConnectorError when a page has zero substantive fields. Never persist a listing from a non-advert page.'
+rule: 'Withdraw on the Idealista retired notice only if its reference equals the captured external_id and its stated size/rooms do not contradict the stored row; date it from the notice.'
 ---
 
 # D-159: Idealista's "anuncio retirado" notice is withdrawal evidence; any other non-advert page is refused, never persisted
@@ -23,9 +23,10 @@ zero automated requests, because a human was going to open the page anyway.
 
 Measuring what the pipeline did with those pages turned up something worse than
 a missed opportunity. `IdealistaConnector.normalize()` never raised: every
-field is optional and degrades to `None`, so the notice page parsed
-"successfully" into an empty listing and `etl/capture.py` persisted it as
-`status='done'`. Production, 2026-08-22 (issue #690):
+field is optional and degrades to `None`, so a page that is not an advert —
+the notice among them — parsed "successfully" into an empty listing and
+`etl/capture.py` persisted it as `status='done'`. Production, 2026-08-22
+(issue #690):
 
 | signal | real adverts | non-advert pages |
 |--------|-------------:|-----------------:|
@@ -37,6 +38,19 @@ All three surviving fields are structural, not extracted: `url` is handed in,
 `'piso'` by `map_property_type()` reading the word "Pisos" out of Idealista's
 *site-wide* `<title>` ("Viviendas venta. Viviendas alquiler. Pisos. Chalets —
 idealista"), which all 26 rows carry in `raw_extra.title`.
+
+**Those 26 rows are "non-advert pages", and it is not determinable which kind.**
+An earlier draft of this record called them withdrawal notices; they are not
+known to be. All 15 rows examined have a byte-identical stored footprint —
+`fields_extracted = 3`, zero photos, that same site-wide `<title>` — and one of
+them is a confirmed withdrawal while others may equally be anti-bot challenge
+pages, login interstitials or half-rendered captures. **Nothing retained in the
+database can separate the two**: the HTML is discarded once a capture is
+processed, and every distinguishing mark lived in it. The measurement is
+therefore evidence that these pages are not adverts, which is all the refusal
+guard below needs; it is not evidence that they were retired notices, and the
+retro-classification question at the end of this record turns on exactly that
+gap.
 
 Three separate corruptions came out of that:
 
@@ -76,6 +90,83 @@ before any field is trusted, with deliberately different outcomes.
    whose seller-written description quotes the phrase ("si ve que este anuncio
    ya no está publicado, llámenos").
 
+   The match is guarded by requiring the page to carry **none** of the
+   advert's own markup — see above — and, since the owner read a real notice
+   page by hand (2026-08-22), by **corroboration against the listing being
+   captured**. The sentence alone was weaker evidence than it looked: a notice
+   page is generic chrome, near enough the same shell for every dead advert, so
+   "this page says an advert is gone" is not "this page says *your* advert is
+   gone". A real notice does carry the difference, printed in plain text:
+
+   ```
+   Lo sentimos, este anuncio ya no está publicado
+   Piso en venta en <calle>, <barrio>, <ciudad>
+   123.000 € 80 m² 3 hab.
+
+   Referencia del anuncio: 900000001
+
+   El anunciante lo dio de baja el 03/08/2026
+   ```
+
+   **All of the following must hold before a listing is withdrawn**, and any
+   one of them failing produces the *same* outcome the refusal guard below
+   produces — `ConnectorError`, capture recorded `failed`, not one row touched:
+
+   | check | on failure |
+   |-------|------------|
+   | the notice sentence is in the page's visible text | not a notice at all; falls through to the ordinary parse |
+   | the page carries none of the advert's own markup | a live advert quoting the phrase; not retired |
+   | **«Referencia del anuncio» is present** | no withdrawal — an uncorroborated notice is only "some advert is gone" |
+   | **that reference equals the captured `external_id`** | no withdrawal — the page and the URL disagree about which listing this is |
+   | **any m²/room count the notice states agrees with the stored listing** (±1 m², rooms exact) | no withdrawal — the notice describes a different property |
+
+   Two deliberate asymmetries in that table. **Absence is never a mismatch**:
+   a notice that prints no size, or a listing stored without one, yields no
+   disagreement and the reference match stands alone — treating a reworded
+   notice as a contradiction would quietly disable the only evidence channel
+   this portal has. And **price is never corroborated**: cutting the asking
+   price, failing to sell, and pulling the advert is close to the typical story
+   of a dead listing, so a price that moved says nothing about whether the
+   notice is about our advert, and vetoing on it would reject exactly the
+   withdrawals most worth recording.
+
+   **The transition is dated from the notice, not from the capture.**
+   `listing_status_event.observed_at` is stamped with the date the notice says
+   the advertiser took the advert down. In the page the owner read, the advert
+   had already been down for twelve days when the page was captured: twelve
+   days that `NOW()` would have invented, and that every "how long do adverts
+   survive?" question downstream would then get wrong. A missing date falls back to the capture
+   time, and so does an *implausible* one — a date that cannot exist (31/02), a
+   future one (a page cannot report a withdrawal that has not happened; that is
+   a misparse or an `MM/DD` locale), or one older than ten years. A wrong date
+   in `observed_at` is worse than no date, because afterwards it is
+   indistinguishable from a real one; every rejection is recorded in the
+   evidence so the fallback is auditable rather than invisible.
+
+   **Everything the notice states goes into the evidence**: the sentence, the
+   reference, the stated delisting date, and the advert's final stated
+   price/size/rooms. The price in particular is a fact this project has never
+   recorded before — what an advert was actually asking when it died.
+
+   **None of it is written onto the `listing` row.** Those fields hold values
+   from a healthy structured capture; the notice's are a weaker parse (plain
+   rendered text) of the same facts. Overwriting good data on a row being
+   marked dead is all risk and no gain.
+
+   *Where each check lives.* The reference comparison is in the connector
+   (`IdealistaConnector.normalize`), which already holds both the page and the
+   id it was handed. The size/rooms comparison needs the **stored** listing, so
+   it is in `etl/capture.py` (`_notice_contradicts_stored`), which has the
+   database — the connector stays a pure function of HTML and hands over parsed
+   facts instead. That is what `RetiredNoticeFacts` and the optional
+   `Connector.retired_notice_facts()` hook exist for; `retired_page_signature`
+   keeps its exact previous contract (a prose citation or `None`) and every
+   connector that implements only that one — fotocasa, pisos — is untouched.
+   Note that `retired_page_signature` answers "is this page a notice?", *not*
+   "is this listing retired?" — it cannot, since nothing about it knows which
+   listing the caller has in mind. Only `normalize` can withdraw an Idealista
+   listing, and only after the reference check.
+
 2. **Any other page with zero substantive fields → plain `ConnectorError`.**
    If the page yields no price, title, description, address, reference, area,
    room count, coordinates, photos or features block, and is not the recognised
@@ -91,6 +182,25 @@ under a new `extension_capture.status = 'withdrawn'`, and the worklist row is
 retired to `stale` (see below).
 
 **Alternatives rejected**:
+
+- *Ship on the notice sentence alone* (what this decision originally said).
+  It withdraws on "some Idealista advert is gone", which a generic notice
+  shell served at the wrong URL — a redirect, a stale tab, a mis-typed
+  capture, a portal bug — satisfies just as well as a real one. The printed
+  reference costs nothing to check and turns the claim into "Idealista says
+  THIS advert is gone".
+- *Treat the reference as a nice-to-have, withdrawing anyway when it is
+  absent.* That is the sentence-alone rule wearing a hat: whenever it
+  actually matters — the notice that is not about our listing — it is
+  precisely the case where corroboration is unavailable or fails.
+- *Corroborate on price too.* Rejected above: a seller repricing before
+  delisting is ordinary, and price is the one stated figure that legitimately
+  moves.
+- *Pass the parsed facts out through the exception, or give the connector a
+  database handle.* The first widens `ListingUnavailableError`'s shape for
+  every connector that raises it; the second puts SQL in a class whose entire
+  contract is "pure function of a page". `capture.py` re-reads the facts from
+  the same HTML instead — one extra parse, on the rare notice path only.
 
 - *Detect withdrawal from "0 photos and no declared photo total".* This was the
   lead that found the bug, and it correlates perfectly in the data (26/26). It
@@ -145,7 +255,7 @@ the same absence-shaped reasoning this decision rejects. They self-correct the
 next time each URL is captured. Whether to repair them another way is the
 owner's call (issue #690).
 
-**See**: issue #690;
+**See**: issues #690 and #691 (the corroboration/date hardening);
 [D-157](D-157-evidence-not-time-for-withdrawal.md) — time nominates, evidence
 decides, and "mark, don't delete";
 [D-049](D-049-listing-gone-clean-skip.md) — `ListingUnavailableError` as the
