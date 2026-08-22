@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { Card, BarChart, Badge } from "@tremor/react";
+import { failureClassLabel, failureClassSeverity } from "@/lib/activity";
+import type { FailureSeverity } from "@/lib/activity";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -142,36 +144,19 @@ function statusLabel(status: RunStatus | ConnectorStatus): string {
 }
 
 // Issue #242 (D-079): human-readable Spanish labels for the typed
-// failure_classification enum. An operator scanning the monitor should see
-// "Bloqueo temporal" not "soft_block". Unknown values fall through to the raw
-// string so a future taxonomy value is never swallowed.
-const FAILURE_CLASS_LABELS: Record<string, string> = {
-  soft_block: "Bloqueo temporal",
-  network: "Red / conexión",
-  structure_change: "Cambio de estructura",
-  unresolvable: "Geografía no resoluble",
-  uncovered: "Sin cobertura",
-  empty_result: "Sin resultados",
-  other: "Otro",
+// failure_classification enum, and how loudly each should read. Both moved to
+// `lib/activity.ts` when the Actividad feed (#644) needed the same vocabulary
+// — one copy, not two that agree until the day they don't (the same drift
+// D-055's `isConnectorActive` note describes). Only the mapping onto THIS
+// component's Tremor palette stays local.
+const FAILURE_SEVERITY_COLOR: Record<FailureSeverity, BadgeColor> = {
+  warn: "amber",
+  neutral: "gray",
+  bad: "red",
 };
 
-function failureClassLabel(kind: string): string {
-  return FAILURE_CLASS_LABELS[kind] ?? kind;
-}
-
-// Issue #242 (D-079): a soft-block/empty result is a clean-run signal (amber /
-// gray), a genuine break is red — the badge colour must not cry wolf.
 function failureClassColor(kind: string): BadgeColor {
-  switch (kind) {
-    case "soft_block":
-    case "empty_result":
-      return "amber";
-    case "uncovered":
-    case "unresolvable":
-      return "gray";
-    default:
-      return "red";
-  }
+  return FAILURE_SEVERITY_COLOR[failureClassSeverity(kind)];
 }
 
 // Issue #109 (D-079): per-geography outcome labels for the coverage audit.

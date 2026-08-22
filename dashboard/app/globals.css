@@ -1537,3 +1537,335 @@ select.recapture-input {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;
 }
+
+/* ── Actividad — unified ingest chronology (issue #644) ───────────────────
+   Mobile-first per D-121 rung 1: every value that differs below 768px lives
+   here, in a class, never as an inline style on the component — the page's
+   inline styles carry colour only (status dot, emphasised metric), which
+   does not vary by breakpoint, so there is no specificity fight to lose.
+
+   The row is a 3-column grid (glyph / content / time) at every width rather
+   than a flex row that "wraps" on a phone: per D-124 a `flex-wrap` with
+   basis-0 children never actually wraps, and the failure mode is silent
+   (columns squeeze to unreadable instead of stacking). `minmax(0, 1fr)` on
+   the content column is what lets its children ellipsis-truncate instead of
+   pushing the row past the viewport. */
+.act-header {
+  margin-bottom: 16px;
+}
+.act-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 0;
+}
+.act-sub {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+.act-inline-link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.act-degraded {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+  border-left: 3px solid var(--border-strong);
+  padding-left: 10px;
+}
+
+/* Filters -------------------------------------------------------------- */
+.act-filters {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.act-chips {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.act-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* WCAG 2.5.5 / D-124: 44px minimum tap target, on a phone AND on desktop. */
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.act-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+.act-chip-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-subtle);
+  font-size: 12px;
+}
+.act-source-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.act-source-label {
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.act-select {
+  /* `appearance: none` is load-bearing, not cosmetic — the same trap
+     `.recapture-input` above documents: under a mobile UA Chromium renders a
+     `menulist` <select> as a platform control and IGNORES height/padding, so
+     `min-height: 44px` measured 21px on an emulated iPhone 13 until the
+     native appearance was switched off. Pinned by actividad.spec.ts. */
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 44px;
+  max-width: 180px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+/* Day sections --------------------------------------------------------- */
+.act-day {
+  margin-top: 26px;
+}
+.act-day-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 0;
+  text-transform: capitalize;
+}
+.act-day-roll {
+  margin: 2px 0 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.act-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Rows ----------------------------------------------------------------- */
+.act-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: start;
+  padding: 10px 0;
+  min-height: 44px;
+  border-top: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+}
+.act-row-link:hover {
+  background: var(--bg-2);
+}
+.act-glyph {
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+}
+.act-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.act-head {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.act-source {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.act-kind {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.act-status {
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+.act-rollup {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.act-metrics {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  min-width: 0;
+}
+.act-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12px;
+  min-width: 0;
+  /* Keep a label and its number together: the line breaks BETWEEN metrics,
+     never inside one, so "Encontrados → guardados" can't end up orphaned
+     from "179 → 10" on the next line. */
+  white-space: nowrap;
+}
+.act-metric-label {
+  color: var(--fg-subtle);
+}
+.act-metric-value {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.act-codes {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.act-code {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+}
+.act-when {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+/* Load more / empty ---------------------------------------------------- */
+.act-more {
+  margin-top: 22px;
+}
+.act-more-btn {
+  min-height: 44px;
+  width: 100%;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+.act-more-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.act-empty {
+  margin: 18px 0 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+@media (max-width: 767px) {
+  /* The filter row stacks: the chip group and the source picker each get a
+     full line, so neither has to shrink below its content. */
+  .act-filters {
+    flex-direction: column;
+    /* `nowrap` matters here: a wrapping COLUMN flex container may lay its
+       items out in several columns and size each flex line to its own
+       content, which is what let the chip strip below report an 875px width
+       inside a 390px page (the page itself did not overflow — the admin
+       chrome's scroll container did, which is exactly the class of bug
+       `document.documentElement.scrollWidth` alone cannot see). */
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 8px;
+  }
+  /* One scrollable LINE of chips, not a three-row block. Wrapping eight
+     chips at 390px pushed the first event ~700px down the page — on the one
+     surface whose whole job is to show events. The strip scrolls sideways
+     inside its own box, so the page itself still never overflows (asserted
+     in actividad.spec.ts). */
+  .act-chips {
+    flex-wrap: nowrap;
+    /* Belt and braces with the `nowrap` above: pin the strip to the line box
+       so its own horizontal scroll is the ONLY thing that moves. */
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .act-chips::-webkit-scrollbar {
+    display: none;
+  }
+  .act-chip {
+    padding: 0 11px;
+    font-size: 12px;
+  }
+  .act-source-filter {
+    justify-content: space-between;
+  }
+  .act-select {
+    max-width: none;
+    flex: 1 1 auto;
+  }
+  /* A narrower gutter and a smaller time column: at 390px the content
+     column is what has to survive, and "08:20–11:40" is the widest string
+     the time column ever holds. */
+  .act-row {
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    column-gap: 8px;
+  }
+  .act-metric-label {
+    font-size: 11px;
+  }
+  .act-metric-value {
+    font-size: 11px;
+  }
+  .act-when {
+    font-size: 11px;
+  }
+  .act-more-btn {
+    width: 100%;
+  }
+}

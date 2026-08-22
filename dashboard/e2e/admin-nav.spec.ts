@@ -49,6 +49,9 @@ import { adminKey, seedAdminSession } from "./helpers/admin-session";
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
   "Fuentes",
+  // #644 — the unified ingest chronology. Slotted after Fuentes so the
+  // strip already reads in #642's end-state order.
+  "Actividad",
   "Salud de datos",
   "Clasificación",
   "Duplicados",
