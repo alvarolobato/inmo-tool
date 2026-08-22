@@ -47,19 +47,19 @@ describe("middleware — admin UI gating", () => {
       expect(location).toContain("redirect=%2Fadmin%2Fconfig");
     });
 
-    it("redirects unauthenticated /etl to login with redirect=%2Fetl", () => {
-      const res = middleware(makeRequest("/etl"));
+    it("redirects unauthenticated /admin/actividad to login, preserving the path", () => {
+      const res = middleware(makeRequest("/admin/actividad"));
       expect(res.status).toBe(307);
       const location = res.headers.get("location")!;
       expect(location).toContain("/admin/login");
-      expect(location).toContain("redirect=%2Fetl");
+      expect(location).toContain("redirect=%2Fadmin%2Factividad");
     });
 
-    it("redirects unauthenticated /etl/42 to login with redirect=%2Fetl%2F42", () => {
-      const res = middleware(makeRequest("/etl/42"));
+    it("redirects an unauthenticated run drill-down to login, preserving the path", () => {
+      const res = middleware(makeRequest("/admin/actividad/run/42"));
       expect(res.status).toBe(307);
       const location = res.headers.get("location")!;
-      expect(location).toContain("redirect=%2Fetl%2F42");
+      expect(location).toContain("redirect=%2Fadmin%2Factividad%2Frun%2F42");
     });
 
     it("preserves the original query string in the redirect param", () => {
@@ -70,8 +70,8 @@ describe("middleware — admin UI gating", () => {
       expect(location).toContain("redirect=%2Fadmin%2Fusage%3Fperiod%3D7d");
     });
 
-    it("allows authenticated requests to /etl to pass through", () => {
-      const res = middleware(makeRequest("/etl", { cookie: ADMIN_KEY }));
+    it("allows authenticated requests to an admin UI page to pass through", () => {
+      const res = middleware(makeRequest("/admin/actividad", { cookie: ADMIN_KEY }));
       // NextResponse.next() returns status 200 and no location header.
       expect(res.headers.get("location")).toBeNull();
     });
@@ -111,8 +111,8 @@ describe("middleware — admin UI gating", () => {
       expect(res.headers.get("location")).toBeNull();
     });
 
-    it("redirects authenticated /etl request with wrong cookie back to login", () => {
-      const res = middleware(makeRequest("/etl", { cookie: "stale" }));
+    it("redirects authenticated /admin/actividad request with wrong cookie back to login", () => {
+      const res = middleware(makeRequest("/admin/actividad", { cookie: "stale" }));
       expect(res.status).toBe(307);
       expect(res.headers.get("location")).toContain("/admin/login");
     });
@@ -225,12 +225,12 @@ describe("middleware — admin UI gating", () => {
       expect(location).toContain("redirect=%2Fadmin%2Fllm");
     });
 
-    it("redirects /etl to login with error=2 and redirect=%2Fetl", () => {
-      const res = middleware(makeRequest("/etl"));
+    it("redirects an admin UI page to login with error=2, preserving the path", () => {
+      const res = middleware(makeRequest("/admin/actividad"));
       expect(res.status).toBe(307);
       const location = res.headers.get("location")!;
       expect(location).toContain("error=2");
-      expect(location).toContain("redirect=%2Fetl");
+      expect(location).toContain("redirect=%2Fadmin%2Factividad");
     });
 
     it("redirects application pages to login (every page is gated)", () => {

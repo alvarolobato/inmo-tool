@@ -14,7 +14,7 @@
  *     prompt;
  *   - LINKED + outdated (installed version < served version): /captura shows an
  *     "Actualización disponible" prompt with the update link;
- *   - the admin strip no longer lists Extensión, and /etl/extension still
+ *   - the admin strip no longer lists Extensión, and /admin/extension still
  *     renders the setup (routable as the modal's full-page deep link);
  *   - no error surface anywhere (the D-041 bar).
  *
@@ -117,7 +117,7 @@ test("EC-1: unlinked shows the CTA + setup modal on /captura", async ({ page }) 
   await expect(page.getByTestId("extension-api-url")).toBeVisible();
   await expect(page.getByTestId("extension-cta-fullpage")).toHaveAttribute(
     "href",
-    "/etl/extension",
+    "/admin/extension",
   );
 
   // No error surface (D-041 bar).
@@ -174,14 +174,14 @@ test("EC-4: linked + outdated shows the update-available prompt on /captura", as
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
-test("EC-3: the admin strip has no Extensión tab; /etl/extension still renders the setup", async ({
+test("EC-3: the admin strip has no Extensión tab; /admin/extension still renders the setup", async ({
   page,
 }) => {
   await page.goto("/admin");
   const strip = page.locator('nav[aria-label="Administración"]');
   await expect(strip.getByRole("link", { name: "Extensión", exact: true })).toHaveCount(0);
 
-  await page.goto("/etl/extension");
+  await page.goto("/admin/extension");
   await expect(page.getByTestId("extension-setup-page")).toBeVisible();
   await expect(page.getByTestId("extension-setup")).toBeVisible();
   await expect(page.getByTestId("error-display")).toHaveCount(0);

@@ -692,7 +692,7 @@ async function enumerationStopped(portal) {
 // the owner would be starting fresh anyway). The pure state machine
 // (recordBlock/clearBlock/isPortalBlocked) lives in batch.js; this is the
 // storage + response wiring: pause whatever run is active, alert at most once
-// per episode, and report to the dashboard so /etl/salud shows it without the
+// per episode, and report to the dashboard so Estado shows it without the
 // browser open.
 const BLOCK_STATE_KEY = 'inmoBlockState';
 // In-memory (NOT persisted — a worker respawn just means a claim is
@@ -866,9 +866,20 @@ function notifyBlocked(portal, signature) {
 }
 
 /**
- * Clicking a block-episode notification opens /etl/salud (issue #634 review
- * "no onClicked handler — clicking the alert does nothing") so the operator
- * lands straight on the "resuelve el reto" section instead of a dead end.
+ * Clicking a block-episode notification opens the dashboard (issue #634
+ * review: "no onClicked handler — clicking the alert does nothing") so the
+ * operator lands somewhere that shows the block instead of on a dead end.
+ *
+ * Target repointed from /etl/salud to /admin by issue #642 P2, which deleted
+ * the whole /etl tree: an active block is now an aviso chip on the Estado
+ * board (/admin), linking on to that source's Fuentes page where the paused
+ * queue lives. The server keeps a PERMANENT 308 on /etl/salud -> /admin
+ * regardless, and must keep it forever: an extension only picks up this line
+ * when the owner reloads the packaged zip (D-060), so every already-installed
+ * build keeps opening the old path. That redirect is a wire-level one in
+ * next.config.js, not a page-level redirect() — a client-side RSC redirect
+ * would not be a redirect at all to anything that inspects the response.
+ *
  * Guarded like every other chrome.notifications use — a stub/test
  * environment without the API is a silent no-op, not a crash.
  */
@@ -878,7 +889,7 @@ if (typeof chrome !== 'undefined' && chrome.notifications && chrome.notification
     (async () => {
       try {
         const { apiUrl } = await getApiConfig();
-        await chrome.tabs.create({ url: `${apiUrl}/etl/salud` });
+        await chrome.tabs.create({ url: `${apiUrl}/admin` });
       } catch {
         /* best-effort — the notification itself already delivered the alert */
       }
@@ -892,8 +903,8 @@ if (typeof chrome !== 'undefined' && chrome.notifications && chrome.notification
 }
 
 /**
- * Report a NEW block episode to the dashboard (issue #634) so /etl/salud
- * shows it without the browser open — which portal, when, and a SIGNATURE of
+ * Report a NEW block episode to the dashboard (issue #634) so the Estado
+ * board shows it without the browser open — which portal, when, and a SIGNATURE of
  * what was detected (the marker id, e.g. 'captcha_wall'), never page content.
  * Fire-and-forget, mirrors sendHeartbeat's pattern exactly (best-effort,
  * skipped when no API key is configured yet).

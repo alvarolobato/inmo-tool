@@ -1,5 +1,15 @@
 /**
- * E2E: zero-results regression monitor on "Salud de datos" (issue #376, D-041).
+ * E2E: zero-results regression monitor (issue #376, D-092, D-041; repointed by
+ * #642 P2, which deleted `/etl/salud`).
+ *
+ * Two destinations now, and the split is the design, not an accident:
+ *   - the per-scope LIST is on `/admin/fuentes/<connector>` (#676) — that is
+ *     where you look at one source in depth;
+ *   - Estado carries an AVISO chip that counts affected sources and links
+ *     there (#642 P2), because Estado's job is "what is wrong right now",
+ *     and a second copy of the list would be the duplication this whole
+ *     tracker exists to remove.
+ * D-092's location clause is superseded by that move; its semantics are not.
  *
  * Drives a real Next.js server against a real Postgres, seeding several
  * connector_runs + connector_run_results rows whose `geography_scope` JSONB
@@ -11,7 +21,7 @@
  *   - a scope that recovered (later nonzero) is NOT flagged;
  *   - no error surface renders against the real seeded data (the D-041 bar).
  *
- * Admin-gated (middleware.ts `/etl/:path*`), so it sets the `ps_admin` cookie
+ * Admin-gated (middleware.ts gates every UI page), so it sets the `ps_admin` cookie
  * the way /admin/login does. Skips cleanly when Postgres is unreachable or
  * ADMIN_API_KEY is unset, matching the other specs.
  */
@@ -123,8 +133,8 @@ test.beforeEach(async ({ page, baseURL }) => {
 test("flags a scope that stopped returning results after N consecutive zeros", async ({
   page,
 }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
+  await page.goto(`/admin/fuentes/${CONN}`);
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
 
   // The section renders and the drifted scope is flagged with its count.
   const card = page.getByTestId(`zero-result-regression-${CONN}-${DRIFTED_SCOPE}`);
@@ -140,9 +150,8 @@ test("flags a scope that stopped returning results after N consecutive zeros", a
 test("does NOT flag an always-zero (sparse) or a recovered scope", async ({
   page,
 }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
-  await expect(page.getByTestId("zero-result-regressions")).toBeVisible();
+  await page.goto(`/admin/fuentes/${CONN}`);
+  await expect(page.getByTestId("fuente-zero-result-regressions")).toBeVisible();
 
   await expect(
     page.getByTestId(`zero-result-regression-${CONN}-${SPARSE_SCOPE}`),
@@ -152,10 +161,31 @@ test("does NOT flag an always-zero (sparse) or a recovered scope", async ({
   ).toHaveCount(0);
 });
 
+test("an active regression surfaces as an Estado aviso that links to the source", async ({
+  page,
+}) => {
+  // The half #642 P2 owed. #702's hand-off said Fuentes did not cover D-092
+  // and it did; what was genuinely missing was this chip, which is why the
+  // assertion is about the LINK and the COUNT, not about the scope keys —
+  // restating them here would make Estado a second copy of the list above.
+  await page.goto("/admin");
+  const aviso = page.getByTestId(`estado-aviso-zero:${CONN}`);
+  await expect(aviso).toBeVisible();
+  await expect(aviso).toHaveAttribute("href", `/admin/fuentes/${CONN}`);
+  await expect(aviso).toContainText(CONN);
+  // The sparse and recovered scopes are not regressions, so the chip must
+  // speak for exactly one search, in the singular.
+  await expect(aviso).toContainText("una búsqueda");
+
+  await aviso.click();
+  await expect(page).toHaveURL(new RegExp(`/admin/fuentes/${CONN}$`));
+  await expect(page.getByTestId("fuente-zero-result-regressions")).toBeVisible();
+});
+
 test("loads with no error surface (D-041)", async ({ page }) => {
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
-  await expect(page.getByTestId("zero-result-regressions")).toBeVisible();
+  await page.goto(`/admin/fuentes/${CONN}`);
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
+  await expect(page.getByTestId("fuente-zero-result-regressions")).toBeVisible();
 
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
   await expect(page.getByText("Error al cargar")).toHaveCount(0);

@@ -10,6 +10,13 @@ rule: 'Aliseda filter drift is DETECTED server-side from its STATIC, robots-allo
 
 *Decided: 2026-08-06*
 
+**Location clause superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: the ADDED/REMOVED/
+CHANGED drift flag is rendered on `/admin/fuentes/<connector>` (#642 P1), not
+on `/etl/discovery` (retired) or `/etl/salud` (deleted by #642 P2). Detection,
+parsing and the `POST /api/etl/discovery/:connector/refresh` contract are
+unchanged; only the surface moved.
+
 **Context**: D-090 made portal filter discovery a deterministic drift DETECTOR:
 the browser extension enumerates a portal's search-form options and a pure diff
 (`lib/search-url/drift.ts`) flags where the hard-coded per-portal URL map has

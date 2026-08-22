@@ -7,8 +7,14 @@
  * the presence heartbeat (lib/db/extension-status.ts) — reporting a detected
  * block is SERVER-MEDIATED: the extension fire-and-forget POSTs
  * /api/extension/block-episode the instant it detects a CAPTCHA/WAF
- * challenge and pauses its run, and /etl/salud reads the recent history from
+ * challenge and pauses its run, and the dashboard reads the recent history from
  * here so the owner sees it without the browser open.
+ *
+ * Two consumers since #642 P2 deleted /etl/salud, and the split is deliberate:
+ * Estado's Avisos band shows the ACTIVE block (an episode inside
+ * ACTIVE_BLOCK_WINDOW_HOURS) and Fuentes/<portal> repeats it as the state of
+ * that source; Actividad's `bloqueo` rows (#706) are the episode HISTORY.
+ * Neither surface is a copy of the other.
  *
  * `recordBlockEpisode` uses the write pool (@/lib/db-write); never import
  * this from a client component. `getRecentBlockEpisodes` uses the read-only
@@ -19,8 +25,10 @@ import { query } from "@/lib/db";
 import { sql } from "@/lib/db-write";
 import type { ExtensionBlockEpisode } from "@/lib/data-health";
 
-/** How many recent episodes /etl/salud shows — enough history to spot a
- * recurring offender without an unbounded read. */
+/** How many recent episodes this returns — enough history to spot a
+ * recurring offender without an unbounded read. Estado only ever reads the
+ * newest per portal out of it (activeBlocksByPortal); the full chronology is
+ * Actividad's own query, not this one. */
 const RECENT_LIMIT = 20;
 
 /**

@@ -10,6 +10,14 @@ rule: A (connector, resolved scope/filter) is flagged as a zero-results regressi
 
 *Decided: 2026-08-06*
 
+**Location clause superseded (2026-08-22) by
+[D-168](D-168-admin-six-sections-etl-tree-deleted.md)**: `/etl/salud` no longer
+exists. The per-scope list is on `/admin/fuentes/<connector>` (#642 P1) and an
+active regression also raises an aviso chip on Estado that links there (#642
+P2). The detection semantics in the rule above — what counts as a regression,
+what clears it, which outcomes are measurements — are untouched; only the named
+surface changed.
+
 **Context**: Issue #376. The real fingerprint of a filter/URL drift (the "ático"
 failure the owner hit) is portal-agnostic and needs no DOM scraping: a search
 that USED TO return listings now returns 0. ~80% of the plumbing already

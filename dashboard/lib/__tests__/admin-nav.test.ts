@@ -25,13 +25,18 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
   it("contains the renamed + consolidated entries and drops the deleted LLM tabs (#653)", () => {
     const byHref = new Map(ADMIN_NAV.map((i) => [i.href, i]));
 
-    // Renames.
-    expect(byHref.get("/admin/clasificacion")?.label).toBe("Clasificación");
-    // #642 P1: "Conectores" + "Captura (admin)" merged into "Fuentes".
-    expect(byHref.get("/admin/fuentes")?.label).toBe("Fuentes");
+    // #642 P1: "Conectores" + "Captura (admin)" merged into "Fuentes", which
+    // #642 P2 also made the owner of the two off-strip capture deep links.
+    const fuentes = byHref.get("/admin/fuentes");
+    expect(fuentes?.label).toBe("Fuentes");
+    expect(fuentes?.matchPrefixes).toEqual(["/admin/diagnostics", "/admin/extension"]);
 
-    // Duplicados now on the strip.
-    expect(byHref.get("/admin/dedup")?.label).toBe("Duplicados");
+    // #642 P2: Duplicados + Clasificación are ONE "Revisión" tab, landing on
+    // the dedup queue; `<RevisionTabs/>` switches between the two queues.
+    const revision = byHref.get("/admin/dedup");
+    expect(revision?.label).toBe("Revisión");
+    expect(revision?.matchPrefixes).toEqual(["/admin/clasificacion"]);
+    expect(byHref.has("/admin/clasificacion")).toBe(false);
 
     // Old / deleted routes are gone from the nav: the #508 candidatos stub
     // (deleted outright by #653), the two 0-row LLM surfaces (deleted
@@ -47,6 +52,9 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
       "/admin/captured-urls",
       "/etl/connectors",
       "/etl/captura",
+      // #642 P2 deleted the rest of the tree.
+      "/etl",
+      "/etl/salud",
     ]) {
       expect(byHref.has(href)).toBe(false);
     }
@@ -61,7 +69,24 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
   it("has removed the Extensión (#509) and Descubrimiento (#511) tabs", () => {
     const byHref = new Map(ADMIN_NAV.map((i) => [i.href, i]));
     expect(byHref.has("/etl/extension")).toBe(false);
+    expect(byHref.has("/admin/extension")).toBe(false);
     expect(byHref.has("/etl/discovery")).toBe(false);
+    // Diagnósticos (#671) is off-strip too, owned by Fuentes — see above.
+    expect(byHref.has("/admin/diagnostics")).toBe(false);
+  });
+
+  // The #636 end state, in order. This list is the strip's contract with the
+  // issue; `e2e/admin-nav.spec.ts` asserts the same six against the rendered
+  // DOM. Both exist because one is fast and one is real.
+  it("is exactly the six sections #636 specified, in order", () => {
+    expect(ADMIN_NAV.map((i) => i.label)).toEqual([
+      "Estado",
+      "Fuentes",
+      "Actividad",
+      "Revisión",
+      "LLM",
+      "Configuración",
+    ]);
   });
 
   it("the nav strip (AdminChrome) renders from ADMIN_NAV, with no local array", () => {
@@ -86,31 +111,42 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
 
 describe("activeAdminHref — longest-prefix match", () => {
   const cases: Array<[string, string | null]> = [
-    ["/etl", "/etl"],
-    // #642 P1: /etl/connectors and /etl/captura are deleted outright (no
-    // page.tsx — a config-level 301 to Fuentes in next.config.js, so these
-    // pathnames are never actually rendered in practice) — no nav item of
-    // their OWN owns them any more. `activeAdminHref` is pure string
-    // matching though, so as sub-paths of `/etl` they now fall through to
-    // Monitor ETL's own prefix, same longest-prefix logic that used to give
-    // /etl/connectors its own nav item precedence over Monitor ETL. A
-    // deeper /admin/fuentes/* route DOES light up Fuentes (the new
-    // per-source detail page).
-    ["/etl/connectors", "/etl"],
+    // Estado owns a BARE /admin only. `/admin` is a prefix of every other
+    // admin route, so this pair is the one that proves longest-prefix is
+    // doing the work — without it, Estado would swallow the whole strip.
+    ["/admin", "/admin"],
     ["/admin/fuentes", "/admin/fuentes"],
     ["/admin/fuentes/fotocasa", "/admin/fuentes"],
-    ["/etl/captura", "/etl"],
-    ["/admin/clasificacion", "/admin/clasificacion"],
+    // Off-strip deep links Fuentes owns (#642 P2).
+    ["/admin/diagnostics", "/admin/fuentes"],
+    ["/admin/extension", "/admin/fuentes"],
+    ["/admin/actividad", "/admin/actividad"],
+    // The run drill-down moved from /etl/[id] to a child of Actividad (#642
+    // P2) precisely so it keeps the tab it was reached from highlighted.
+    ["/admin/actividad/run/7", "/admin/actividad"],
+    // Revisión: one tab, two queues.
     ["/admin/dedup", "/admin/dedup"],
+    ["/admin/clasificacion", "/admin/dedup"],
     // /admin/usage (a permanent redirect to /admin/llm) highlights the LLM
-    // tab too. The other three ex-sub-routes are deleted (#653) — no nav item
-    // owns them any more, so they highlight nothing.
+    // tab too. The other three ex-sub-routes were deleted outright by #653
+    // and 404; since #642 P2 gave Estado the bare `/admin` prefix they fall
+    // back to it rather than to nothing. That fallback is deliberate and
+    // harmless — a 404 page still renders the strip, and pointing at the
+    // landing is a better answer there than highlighting no tab at all.
     ["/admin/llm", "/admin/llm"],
     ["/admin/usage", "/admin/llm"],
-    ["/admin/slow-queries", null],
-    ["/admin/tool-calls", null],
-    ["/admin/interactions", null],
+    ["/admin/slow-queries", "/admin"],
+    ["/admin/tool-calls", "/admin"],
+    ["/admin/interactions", "/admin"],
     ["/admin/config", "/admin/config"],
+    // #642 P2 deleted every page under /etl, so nothing under it renders a
+    // layout and nothing can highlight a tab. These now match nothing, which
+    // is the honest answer for a path that 308s before it reaches a layout.
+    ["/etl", null],
+    ["/etl/salud", null],
+    ["/etl/connectors", null],
+    ["/etl/captura", null],
+    ["/etl/42", null],
     ["/something-else", null],
   ];
   for (const [pathname, expected] of cases) {
@@ -123,6 +159,14 @@ describe("activeAdminHref — longest-prefix match", () => {
     for (const item of ADMIN_NAV as AdminNavItem[]) {
       const active = activeAdminHref(item.href);
       expect(active).toBe(item.href);
+    }
+  });
+
+  it("every matchPrefix resolves to its own item, not to a shorter one", () => {
+    for (const item of ADMIN_NAV as AdminNavItem[]) {
+      for (const prefix of item.matchPrefixes ?? []) {
+        expect(activeAdminHref(prefix), prefix).toBe(item.href);
+      }
     }
   });
 });

@@ -9,7 +9,9 @@
  *
  * Asserts the D-041 bar (no error surface) plus real content: the API URL, a
  * masked key that reveals to the real value, and a working download affordance.
- * Admin-gated by middleware (`/etl/:path*` UI + `/api/extension/*` API).
+ * Admin-gated by middleware (every UI page + `/api/extension/*`). Route moved
+ * from `/etl/extension` to `/admin/extension` by #642 P2 (the old path keeps a
+ * wire-level 308 — see `e2e/admin-nav.spec.ts`).
  */
 import { test, expect } from "@playwright/test";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
@@ -23,7 +25,7 @@ test("renders URL, a masked-then-revealed key and a download link, no error surf
   page,
   baseURL,
 }) => {
-  await page.goto("/etl/extension");
+  await page.goto("/admin/extension");
   await expect(page.getByTestId("extension-setup-page")).toBeVisible();
 
   // 2. API URL — the origin the operator is on.

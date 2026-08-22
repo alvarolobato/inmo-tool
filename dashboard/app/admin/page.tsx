@@ -25,10 +25,24 @@
  * source's detail is one tap away, satisfying #642's EC-4 ("on a phone,
  * Estado → failing source's detail in one tap"). Previously linked to the
  * now-deleted `/etl/connectors`.
+ *
+ * Issue #642 P2 added the two bands that let `/etl/salud` and `/etl` be
+ * deleted, one above the rows and one below, on purpose:
+ *   - `<AvisoBand/>` (components/estado/AvisoBand.tsx) — ABOVE, because it
+ *     renders only when something is actively wrong (an extension block, a
+ *     search that stopped returning results) and that outranks the roll call.
+ *     When everything is fine it renders nothing and the rows stay at the top,
+ *     which is #638's whole constraint.
+ *   - `<CrawlRollup/>` (components/estado/CrawlRollup.tsx) — BELOW, with the
+ *     queues, for the same reason `<QueueBand/>` is below: a fixed tile band
+ *     above the rows would push "what is broken" off a phone screen.
+ * Both fetch their own endpoint, so neither can delay or blank the rows.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { AvisoBand } from "@/components/estado/AvisoBand";
+import { CrawlRollup } from "@/components/estado/CrawlRollup";
 import { QueueBand } from "@/components/estado/QueueBand";
 import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
 import {
@@ -241,6 +255,10 @@ export default function AdminIndexPage() {
         </p>
       )}
 
+      {/* Avisos (issue #642 P2) — see the file header for why this one sits
+          ABOVE the rows while the two bands below sit under them. */}
+      <AvisoBand />
+
       <div
         data-testid="estado-active-sources"
         style={{ display: "flex", flexDirection: "column", gap: 8 }}
@@ -256,6 +274,10 @@ export default function AdminIndexPage() {
           answer off-screen. The band fetches its own endpoint, so it can be
           slow or fail without touching the rows above. */}
       <QueueBand />
+
+      {/* Rastreo (issue #642 P2) — the three fleet-wide crawl rollups that
+          `/etl`'s KPI row owned and that were not per-run facts. */}
+      <CrawlRollup />
 
       {disabled.length > 0 && (
         <div style={{ marginTop: 20 }} data-testid="estado-disabled-section">

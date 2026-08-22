@@ -17,6 +17,7 @@ import {
   msPer,
   rollupDay,
   matchesFilter,
+  parseActivityFilterQuery,
   sourcesIn,
   ACTIVITY_KINDS,
   KIND_GLYPH,
@@ -293,7 +294,7 @@ describe("typed failure kinds — one copy of the vocabulary", () => {
     const { fileURLToPath } = await import("node:url");
     const here = dirname(fileURLToPath(import.meta.url));
     const runDetail = readFileSync(
-      resolve(here, "..", "..", "components", "etl", "RunDetail.tsx"),
+      resolve(here, "..", "..", "components", "actividad", "RunDetail.tsx"),
       "utf8",
     );
     expect(runDetail).toContain('from "@/lib/activity"');
@@ -364,6 +365,42 @@ describe("the vocabulary is complete", () => {
     for (const s of ["ok", "aviso", "error", "curso", "omitido"] as const) {
       expect(STATUS_LABEL[s]).toBeTruthy();
       expect(STATUS_COLOR[s]).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+  });
+});
+
+describe("parseActivityFilterQuery — deep-linked filters (#642 P2)", () => {
+  it("reads a kind and a source", () => {
+    expect(parseActivityFilterQuery("?tipo=bloqueo&fuente=idealista")).toEqual({
+      kinds: ["bloqueo"],
+      source: "idealista",
+    });
+  });
+
+  it("accepts a comma-separated kind list and de-duplicates it", () => {
+    expect(parseActivityFilterQuery("?tipo=crawl,bloqueo,crawl").kinds).toEqual([
+      "crawl",
+      "bloqueo",
+    ]);
+  });
+
+  it("DROPS an unknown kind rather than rejecting the whole query", () => {
+    // A stale bookmark must show the feed, not an error page.
+    expect(parseActivityFilterQuery("?tipo=nope&fuente=x")).toEqual({
+      kinds: [],
+      source: "x",
+    });
+  });
+
+  it("treats an empty or absent value as no filter", () => {
+    expect(parseActivityFilterQuery("")).toEqual({ kinds: [], source: null });
+    expect(parseActivityFilterQuery("?tipo=&fuente=")).toEqual({ kinds: [], source: null });
+    expect(parseActivityFilterQuery("?fuente=%20%20")).toEqual({ kinds: [], source: null });
+  });
+
+  it("every kind it accepts is one the chips can actually render", () => {
+    for (const kind of ACTIVITY_KINDS) {
+      expect(parseActivityFilterQuery(`?tipo=${kind}`).kinds).toEqual([kind]);
     }
   });
 });

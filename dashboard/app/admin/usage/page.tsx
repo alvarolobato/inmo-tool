@@ -19,7 +19,7 @@ import { permanentRedirect } from "next/navigation";
  * A non-browser client (curl, a bot, a non-browser fetch) sees `200` with no
  * `Location` and must run JS to follow it — worth remembering before relying
  * on this pattern where a non-browser caller needs to follow the redirect
- * (see the #642 note about `/etl/salud`'s planned redirect, which the
+ * (see the #642 note about `/etl/salud`'s redirect — landed in P2 — which the
  * installed browser extension's notification handler needs to actually
  * work — it will need a route-handler-level redirect, not a page-level one).
  */

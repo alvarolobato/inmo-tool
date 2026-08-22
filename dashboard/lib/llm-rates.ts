@@ -3,7 +3,8 @@
  *
  * Before this file, `lib/llm-usage.ts` (estimates `llm_usage.estimated_cost_usd`
  * for openrouter rows) and `lib/llm-health.ts` (rolls up € for the LLM
- * cost/coverage panel, now on `/admin/llm` — moved from `/etl/salud` in
+ * cost/coverage panel, now on `/admin/llm` — moved off the since-deleted
+ * `/etl/salud` in
  * #653) each hard-coded their own model → price map. They had already
  * drifted — a per-flow OpenRouter model configured cheap
  * (`dashboard.llm_model_openrouter_<flow>`) could price as Sonnet-tier in one

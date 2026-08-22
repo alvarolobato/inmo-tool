@@ -10,6 +10,7 @@ import type {
   GeographyOverride,
 } from "@/lib/connectors-schema";
 import { isConnectorActive } from "@/lib/db/source-active";
+import { hasCleanNotice } from "@/lib/data-health";
 
 const cardStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
@@ -751,16 +752,43 @@ export function ConnectorCard({
             {connector.lastRun.started_at
               ? ` · ${new Date(connector.lastRun.started_at).toLocaleString("es-ES")}`
               : ""}
-            {connector.lastRun.error_msg ? ` — ${connector.lastRun.error_msg}` : ""}
           </p>
-        ) : (
+        ) : null}
+        {/* D-047's clean-stop distinction, moved here from the "Conectores —
+            última ejecución" section of `/etl/salud` when #642 P2 deleted
+            that page. It matters, and appending error_msg to the line above
+            (what this card did before) lost it: a connector that stopped
+            because it hit its budget or a soft block reports status='ok' WITH
+            a `nota:` message, and rendering that in the same shape as a real
+            failure is exactly the false-red the whole data-health surface was
+            built to avoid. `hasCleanNotice` is the same pure helper the
+            deleted page used — the semantics moved, they were not
+            reimplemented. */}
+        {connector.lastRun?.error_msg ? (
+          hasCleanNotice(connector.lastRun.status, connector.lastRun.error_msg) ? (
+            <p
+              style={{ fontSize: 12, color: "var(--accent)", margin: "4px 0 0" }}
+              data-testid={`lastrun-notice-${connector.name}`}
+            >
+              {connector.lastRun.error_msg}
+            </p>
+          ) : (
+            <p
+              style={{ fontSize: 12, color: "var(--danger, #b91c1c)", margin: "4px 0 0" }}
+              data-testid={`lastrun-error-${connector.name}`}
+            >
+              {connector.lastRun.error_msg}
+            </p>
+          )
+        ) : null}
+        {!connector.lastRun ? (
           <p
             style={{ fontSize: 12, color: "var(--fg-muted)", margin: "2px 0 0" }}
             data-testid={`lastrun-${connector.name}`}
           >
             Nunca se ha ejecutado.
           </p>
-        )}
+        ) : null}
       </div>
         </div>
       )}

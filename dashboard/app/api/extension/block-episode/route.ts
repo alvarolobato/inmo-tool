@@ -7,7 +7,7 @@
  * /api/extension/heartbeat — reporting a detected CAPTCHA/WAF block is
  * SERVER-MEDIATED: background.js fire-and-forget POSTs here exactly once per
  * NEW block episode (see its handleBlockDetected), after it has already
- * paused the run and fired a local chrome.notifications alert. /etl/salud
+ * paused the run and fired a local chrome.notifications alert. the Estado board
  * reads the recent history via GET /api/etl/data-health.
  *
  * `signature` is a marker id only (e.g. 'captcha_wall', 'cloudflare_challenge')

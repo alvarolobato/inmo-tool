@@ -1,12 +1,16 @@
 /**
- * E2E: portal filter-drift on Salud de datos (issue #511, D-041).
+ * E2E: portal filter-drift on Fuentes/<name> (issue #511, D-041; repointed by
+ * #642 P2, which deleted `/etl/salud`).
  *
- * The Descubrimiento tab was retired; the aliseda static drift check moved to a
- * "Deriva de portales" section on Salud de datos (and a weekly scheduler). This
- * spec seeds a `portal_filter_catalog` row and asserts the section renders the
- * green "sin deriva" state when the catalog matches the code mapping and the red
- * drift report when it diverges — plus that the nav no longer lists
- * Descubrimiento and no error surface renders.
+ * The Descubrimiento tab was retired (#511) and the aliseda static drift check
+ * moved to a "Deriva de portales" section on Salud de datos; #676 moved that
+ * section to the per-source Fuentes detail, and P2 deleted the page it came
+ * from. Same section, same testids, one route further along. This spec seeds a
+ * `portal_filter_catalog` row and asserts the section renders the green "sin
+ * deriva" state when the catalog matches the code mapping and the red drift
+ * report when it diverges — plus that no error surface renders.
+ *
+ * D-093's location clause is superseded by this move; its semantics are not.
  *
  * Admin-gated; the section is fetched independently of the main health payload
  * (a failure just hides the section), so this only needs the seeded catalog +
@@ -93,10 +97,10 @@ test("drift section renders the green 'sin deriva' state from a matching catalog
   page,
 }) => {
   await seedCatalog(MATCHING_AXES);
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("data-health-page")).toBeVisible();
+  await page.goto(`/admin/fuentes/${CONNECTOR}`);
+  await expect(page.getByTestId("fuente-detail-page")).toBeVisible();
 
-  const section = page.getByTestId("portal-drift");
+  const section = page.getByTestId("fuente-drift");
   await expect(section).toBeVisible();
   const drift = page.getByTestId("discovery-drift");
   await expect(drift).toBeVisible();
@@ -112,8 +116,8 @@ test("drift section renders the green 'sin deriva' state from a matching catalog
 
 test("drift section flags drift from a diverging catalog", async ({ page }) => {
   await seedCatalog(DRIFTING_AXES);
-  await page.goto("/etl/salud");
-  await expect(page.getByTestId("portal-drift")).toBeVisible();
+  await page.goto(`/admin/fuentes/${CONNECTOR}`);
+  await expect(page.getByTestId("fuente-drift")).toBeVisible();
 
   const drift = page.getByTestId("discovery-drift");
   await expect(drift).toBeVisible();
@@ -125,7 +129,7 @@ test("drift section flags drift from a diverging catalog", async ({ page }) => {
 });
 
 test("the admin strip no longer lists Descubrimiento", async ({ page }) => {
-  await page.goto("/etl/salud");
+  await page.goto(`/admin/fuentes/${CONNECTOR}`);
   const strip = page.locator('nav[aria-label="Administración"]');
   await expect(strip.getByRole("link", { name: "Descubrimiento", exact: true })).toHaveCount(0);
 });

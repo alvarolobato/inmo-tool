@@ -128,7 +128,7 @@ crawl AS (
          -- (D-157). NEVER error_msg — that is drill-through only (#531).
          ARRAY_REMOVE(ARRAY[rr.failure_classification, rr.verification_alarm], NULL) AS codes,
          'crawl:' || rr.id::text                    AS id,
-         '/etl/' || rr.run_id::text                 AS detail_href,
+         '/admin/actividad/run/' || rr.run_id::text AS detail_href,
          1::bigint                                  AS rolled_up,
          jsonb_build_object(
            'discovered',   rr.discovered_count,
@@ -158,7 +158,7 @@ sweep AS (
          cr.trigger                                 AS note,
          ARRAY[]::text[]                            AS codes,
          'sweep:' || cr.id::text                    AS id,
-         '/etl/' || cr.id::text                     AS detail_href,
+         '/admin/actividad/run/' || cr.id::text     AS detail_href,
          1::bigint                                  AS rolled_up,
          jsonb_build_object(
            'connectors', cr.total_connectors,
@@ -317,7 +317,7 @@ manual AS (
          ARRAY[]::text[]                            AS codes,
          'manual:' || m.id::text                    AS id,
          CASE WHEN m.connector_run_id IS NOT NULL
-              THEN '/etl/' || m.connector_run_id::text END AS detail_href,
+              THEN '/admin/actividad/run/' || m.connector_run_id::text END AS detail_href,
          1::bigint                                  AS rolled_up,
          jsonb_build_object(
            'durationMs', CASE WHEN m.finished_at IS NOT NULL
@@ -407,18 +407,17 @@ bloqueo AS (
          NULL::text                                 AS note,
          ARRAY[e.signature]                         AS codes,
          'bloqueo:' || e.id::text                   AS id,
-         -- NO drill-through, deliberately. This pointed at
-         -- '/admin/fuentes/' || e.portal, but that page renders nothing
-         -- whatsoever about blocks (no extension_block_episode read
-         -- anywhere under app/admin/fuentes/), so the link was a promise to
-         -- a dead end — worse than no link, because it costs a navigation to
-         -- discover there is nothing there. A null detail_href degrades to a
-         -- non-link row, and the episode's signature still renders as its
-         -- code chip, so nothing is hidden. Re-point this the moment a
-         -- surface actually shows block episodes; the owed half is the
-         -- ACTIVE-block chip on Estado, which neither #706 nor #702 built —
-         -- tracked for #642 P2.
-         NULL::text                                 AS detail_href,
+         -- Drill-through restored by #642 P2. #706 nulled this because
+         -- '/admin/fuentes/<portal>' rendered nothing whatsoever about
+         -- blocks, making the link a promise to a dead end. P2 gave the
+         -- block state a home on exactly that page — an ACTIVE-block notice
+         -- (testid fuente-block-active), the actionable half — so the link
+         -- now lands on something. Deliberately NOT a per-source copy of this
+         -- history: the ledger is here, the state is there, and each surface
+         -- keeps one job (the same split the captura / recola / estado rows
+         -- above already use for their own drill-through). NOTE: no
+         -- backticks anywhere in this string — it is a JS template literal.
+         '/admin/fuentes/' || e.portal              AS detail_href,
          1::bigint                                  AS rolled_up,
          jsonb_build_object('rows', 1)              AS counts
     FROM extension_block_episode e

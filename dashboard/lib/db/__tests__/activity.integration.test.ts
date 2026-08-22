@@ -244,7 +244,7 @@ describe.skipIf(!dbAvailable)("getActivityEvents — the merged ingest ledger", 
       fetchMsTotal: 4038,
     });
     expect(fotocasa!.status).toBe("ok");
-    expect(fotocasa!.detailHref).toMatch(/^\/etl\/\d+$/);
+    expect(fotocasa!.detailHref).toMatch(/^\/admin\/actividad\/run\/\d+$/);
 
     // The mass-withdrawal guard fired on pisos: status='ok',
     // verified_gone_count=0 — indistinguishable from a clean run in the
@@ -360,6 +360,9 @@ describe.skipIf(!dbAvailable)("getActivityEvents — the merged ingest ledger", 
     expect(bloqueo.length).toBe(1);
     expect(bloqueo[0].status).toBe("error");
     expect(bloqueo[0].codes).toEqual(["datadome"]);
+    // #642 P2 restored the drill-through #706 had nulled: Fuentes/<portal>
+    // now renders the ACTIVE-block notice, so the link lands on something.
+    expect(bloqueo[0].detailHref).toBe(`/admin/fuentes/${TAG}_idealista`);
   });
 
   it("getPreviousActivityDay finds the newest day strictly before the window", async () => {

@@ -5,7 +5,7 @@
  * Measured with Playwright (iPhone 13 emulation, authenticated, pre-fix
  * `main`): every route overflowed the 390px layout viewport by the same
  * +264px (`document.documentElement.scrollWidth` 654 vs `clientWidth` 390),
- * on `/profiles`, `/inicio`, `/captura`, `/etl` and even a bare 404 page with
+ * on `/profiles`, `/inicio`, `/captura`, an admin page and even a bare 404 with
  * no content — all traced to one non-wrapping header row
  * (`div.flex.items-center.gap-3.px-5`, right edge at 654). Fixing the header
  * alone removes the overflow everywhere, which is what the "does not
@@ -61,10 +61,22 @@ test.afterAll(async () => {
 });
 
 // Routes the owner's measurement covered: the redesigned Perfiles surface
-// (twice — `/profiles` and its `/inicio` alias), Captura, the admin ETL
-// monitor, and a route that renders no page content at all (404) — proving
-// the overflow was the shell, not any page's own content.
-const ROUTES_MEASURED_OVERFLOWING = ["/profiles", "/inicio", "/captura", "/etl", "/route-that-does-not-exist-571"];
+// (twice — `/profiles` and its `/inicio` alias), Captura, an admin page, and a
+// route that renders no page content at all (404) — proving the overflow was
+// the shell, not any page's own content.
+//
+// `/etl` (the ETL monitor) was one of the measured five; #642 P2 deleted it,
+// and it now 308s to `/admin/actividad`. Actividad takes its place in the list
+// rather than the list shrinking: the point of these routes is that they cover
+// DIFFERENT page shapes behind the same shell, and dropping one would quietly
+// narrow that coverage.
+const ROUTES_MEASURED_OVERFLOWING = [
+  "/profiles",
+  "/inicio",
+  "/captura",
+  "/admin/actividad",
+  "/route-that-does-not-exist-571",
+];
 
 /** Real rendered viewport (NOT window.innerWidth — see file header). */
 async function documentOverflowPx(page: Page): Promise<number> {

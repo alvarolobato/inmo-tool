@@ -15,7 +15,7 @@
  * can never structurally disagree.
  *
  * `/api/data-health` and `getConnectorFreshness()` are UNCHANGED by this —
- * they still back `/api/ready`, `/etl/salud` and `/admin/fuentes`'
+ * they still back `/api/ready` and `/admin/fuentes`'
  * per-connector cycle pill, none of which are in #638's scope.
  */
 

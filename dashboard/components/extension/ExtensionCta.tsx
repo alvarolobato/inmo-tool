@@ -229,7 +229,7 @@ export function ExtensionCta({ context }: { context: CtaContext }) {
               Descarga la extensión, cárgala en Chrome y pega la URL y la clave de abajo en sus
               opciones (una sola vez).{" "}
               <Link
-                href="/etl/extension"
+                href="/admin/extension"
                 data-testid="extension-cta-fullpage"
                 style={{ color: "var(--accent)", textDecoration: "none" }}
               >

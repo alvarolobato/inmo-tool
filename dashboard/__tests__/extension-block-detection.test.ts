@@ -690,7 +690,11 @@ describe("a dropped dashboard report is retried, not lost forever (issue #634 re
 });
 
 describe("chrome.notifications.onClicked — the alert is not a dead end (issue #634 review)", () => {
-  it("clicking a block notification opens /etl/salud", async () => {
+  // #642 P2 repointed this from /etl/salud (deleted with the whole /etl tree)
+  // to /admin, where an active block is now an aviso chip. The server keeps a
+  // permanent 308 on the old path for already-installed builds, so this test
+  // pins the NEW target and `e2e/admin-nav.spec.ts` pins the redirect.
+  it("clicking a block notification opens the Estado board", async () => {
     const chrome = makeChromeMock();
     await configureApiKey(chrome);
     const fetchMock = makeFetchMock();
@@ -700,7 +704,7 @@ describe("chrome.notifications.onClicked — the alert is not a dead end (issue 
     await new Promise((r) => setTimeout(r, 0));
 
     expect(chrome.tabs.create).toHaveBeenCalledWith(
-      expect.objectContaining({ url: "http://localhost:4000/etl/salud" }),
+      expect.objectContaining({ url: "http://localhost:4000/admin" }),
     );
   });
 

@@ -1,4 +1,5 @@
 import { PropertyPairQueue } from "@/components/dedup/PropertyPairQueue";
+import { RevisionTabs } from "@/components/admin/RevisionTabs";
 
 export const metadata = {
   title: "Revisión de duplicados — inmo-tool",
@@ -16,6 +17,9 @@ export default function DedupReviewPage() {
     // AdminChrome's own padding layer still applies underneath, so spacing
     // doesn't disappear, it just stops doubling.
     <div className="dedup-page" style={{ maxWidth: 900 }}>
+      {/* #642 P2: Duplicados and Clasificación share one "Revisión" strip
+          tab now, so the other queue has to be reachable from here. */}
+      <RevisionTabs />
       <h1 style={{ fontSize: 20, fontWeight: 700, color: "var(--fg)", marginBottom: 6 }}>
         Revisión de duplicados
       </h1>

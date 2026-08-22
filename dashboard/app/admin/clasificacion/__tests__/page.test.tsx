@@ -22,9 +22,12 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-// The DismissButton (client component) calls useRouter() at render.
+// The DismissButton (client component) calls useRouter() at render, and
+// <RevisionTabs/> (#642 P2, the Duplicados/Clasificación switcher this page
+// now carries) calls usePathname().
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
+  usePathname: () => "/admin/clasificacion",
 }));
 
 import AdminClasificacionPage from "../page";
