@@ -130,6 +130,7 @@
 | [D-164](docs/decisions/D-164-network-capture-armed-lifecycle.md) | Teardown unregisters AND messages the tab to uninstall the injected wrapper; durable state, not a Map; persistAcrossSessions:false, sweep, onRemoved, 5-min expiry. Bodies unsanitised. |
 | [D-165](docs/decisions/D-165-hipoges-render-readiness-and-cdn-harvest.md) | Hipoges detail URLs come from the photo CDN ref, never `a[href]` — its cards are not links. Listing readiness is a COMPLETE harvest, never a selector or a bare settle. |
 | [D-167](docs/decisions/D-167-prospective-site-capture-queue.md) | Prospective-site captures live in `capture_spike_request` (never `failed`), land in `extension_diagnostic`, advance server-side on delivery, refuse connector/local/private hosts. |
+| [D-169](docs/decisions/D-169-block-episode-resolution-derived.md) | A block episode reads as ACTIVE only until a done/withdrawn/listing capture from that portal lands after it — derived at read time from the capture ledger, never a stored column. |
 
 ## Product / candidate feed
 

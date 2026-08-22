@@ -116,7 +116,7 @@ async function widths(page: Page): Promise<{
 
 const BOTH_PROBLEMS = dataHealth({
   extension_blocks: [
-    { portal: BLOCKED_PORTAL, signature: "captcha_wall", detected_at: hoursAgo(2) },
+    { portal: BLOCKED_PORTAL, signature: "captcha_wall", detected_at: hoursAgo(2), resolved_at: null },
   ],
   zero_result_regressions: [
     {
@@ -176,6 +176,43 @@ test("Avisos renders NOTHING when healthy, and nothing when the read fails", asy
   await expect(page.getByTestId("estado-board")).toBeVisible();
   await expect(page.getByTestId("estado-avisos")).toHaveCount(0);
   await expect(page.getByText(/sin avisos/i)).toHaveCount(0);
+});
+
+test("a RESOLVED block raises no aviso, while an unresolved one on another portal still does", async ({
+  page,
+}) => {
+  // Issue #711 / D-169, end to end on the surface the owner screenshotted.
+  // The resolved portal carries the exact live shape: detected ~3 h ago, the
+  // portal serving pages again since minutes later. Before D-169 this rendered
+  // "pausada por bloqueo · hace 3 h" for a full 24 h while the source row
+  // below it showed the same portal ingesting every minute.
+  const RESOLVED_PORTAL = "e2e-avisos-resuelto";
+  await mock(page, {
+    health: dataHealth({
+      extension_blocks: [
+        {
+          portal: RESOLVED_PORTAL,
+          signature: "captcha_wall",
+          detected_at: hoursAgo(3),
+          resolved_at: hoursAgo(2.9),
+        },
+        {
+          portal: BLOCKED_PORTAL,
+          signature: "captcha_wall",
+          detected_at: hoursAgo(2),
+          resolved_at: null,
+        },
+      ],
+    }),
+  });
+  await page.goto("/admin");
+  await expect(page.getByTestId("estado-board")).toBeVisible();
+
+  // The unresolved one is the control: the band renders, so an empty result
+  // for the resolved portal cannot be "the band never loaded".
+  await expect(page.getByTestId(`estado-aviso-bloqueo:${BLOCKED_PORTAL}`)).toBeVisible();
+  await expect(page.getByTestId(`estado-aviso-bloqueo:${RESOLVED_PORTAL}`)).toHaveCount(0);
+  await expect(page.getByTestId("estado-avisos")).not.toContainText(RESOLVED_PORTAL);
 });
 
 test("Rastreo carries the success rate, its outcome split, the download rate and 24h errors", async ({
