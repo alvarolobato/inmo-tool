@@ -3,7 +3,7 @@ id: D-167
 title: "Prospective-site captures ride the auto-driver into extension_diagnostic, in their own queue, and never produce a 'failed'"
 date: 2026-08-22
 group: Data / connectors
-rule: "Prospective-site captures go in `capture_spike_request` (own table, statuses pending/captured/skipped/unreachable — never `failed`) and land in `extension_diagnostic`, never `extension_capture`. Seeding refuses any host that HAS a connector. `purge_extension_diagnostics()` now runs every ETL sweep."
+rule: "Prospective-site captures live in `capture_spike_request` (never `failed`), land in `extension_diagnostic`, advance server-side on delivery, refuse connector/local/private hosts."
 ---
 
 # D-167: Prospective-site captures ride the auto-driver into `extension_diagnostic`, in their own queue, and never produce a "failed"
@@ -42,25 +42,57 @@ the candidate site.
 2. **The HTML lands in `extension_diagnostic`** (D-153's channel), never in
    `extension_capture`, and the extension posts it to the SAME
    `POST /api/extension/diagnostic` route the #675 manual button already uses.
-   Correlation to the queue row is by the canonical `worklistMatchKey`, so no
-   new payload field exists.
-3. **Statuses are `pending` / `captured` / `skipped` / `unreachable`. There is
+3. **The queue advances on a SERVER-SIDE fact, never on a client report.**
+   `attempts` is incremented by the statement that HANDS a row to the driver
+   (`claimSpikeRequestsForDelivery`, inside `GET /api/etl/auto-plan`); there is
+   no extension-facing "I tried and it failed" verb on the API. A landed page
+   closes its row by echoing back the `spikeRequestId` the planner gave it —
+   **not** by URL/match key, which is derived from `window.location.href` and
+   therefore breaks on any redirect. Match-key correlation survives only as the
+   fallback for the #675 manual button, which has no id to echo.
+4. **Statuses are `pending` / `captured` / `skipped` / `unreachable`. There is
    no `failed`, and the CHECK constraint refuses one.** `unreachable` is the
-   give-up state after `MAX_SPIKE_ATTEMPTS` opens that produced no page.
-4. **Seeding is on `/admin/diagnostics`, and refuses any host that HAS a
+   give-up state after `MAX_SPIKE_ATTEMPTS` **deliveries** that produced no
+   page.
+5. **Seeding is on `/admin/diagnostics`, and refuses any host that HAS a
    capture connector** — the exact mirror of `addWorklistUrls` refusing any
-   host that hasn't. A non-empty `site_label` is also required.
-5. **`spike` is a fourth auto unit, planned FIRST**, capped at
-   `SPIKE_UNIT_LIMIT` per unit with the pending queue capped at
-   `MAX_PENDING_SPIKE_REQUESTS`. It never passes through
-   `selectNextPendingUrls`.
-6. **`purge_extension_diagnostics()` is called once per `run_scheduler_loop`
+   host that hasn't — **and any host that is us**: `localhost`, `127.0.0.1`,
+   `::1`, RFC1918/link-local/CGNAT literals, `.local`/`.internal`, and the
+   dashboard's own host as seen on the request. A non-empty `site_label` is
+   also required.
+6. **`spike` is a fourth auto unit, planned FIRST**, capped at
+   `SPIKE_UNIT_LIMIT = 5` per unit with the pending queue capped at
+   `MAX_PENDING_SPIKE_REQUESTS = 50`. Worst-case zero-drain window, stated
+   rather than hand-waved: `ceil(50/5) × 3 = 30` ticks ≈ **30 minutes**. It
+   never passes through `selectNextPendingUrls`.
+7. **`purge_extension_diagnostics()` is called once per `run_scheduler_loop`
    iteration**, retention from `etl.diagnostic_retention_days` (default 30).
-7. **Host permission is granted from the extension POPUP**, per origin, via
-   `optional_host_permissions`. The service worker only ever CHECKS. An
-   ungranted origin is skipped, not failed.
+8. **Host permission is granted from the extension POPUP**, per origin, via
+   `optional_host_permissions`. The service worker only ever CHECKS, and
+   reports the origins it holds to the planner, which delivers **only** rows on
+   one of them. An ungranted origin is therefore never handed out, never
+   charged an attempt, and stays `pending`; the grant prompt is derived from
+   `pending` *and* `unreachable` rows so it cannot vanish just when it is
+   needed.
 
 **Alternatives rejected**:
+
+- **Let the extension report its own failures (`PATCH {attempt:true}`) and
+  correlate successes by match key.** This is what the first implementation
+  did, and its review found two starvation paths of the same shape. A
+  redirecting candidate site — the target population — makes the success
+  correlation match nothing, so the row stays `pending` at `attempts = 0`, the
+  planner hands it back every tick forever, the listing drain never resumes,
+  and a fresh capped-at-10 MB page is stored every 60 s against a 30-day purge.
+  A persistently failing PATCH (rotated admin key, 500, dashboard down while
+  tabs stay open) does the same thing more quietly. Both disappear the moment
+  the counter is owned by the delivery statement. **A queue must not depend on
+  its consumer's cooperation to make progress.**
+- **Charge the attempt at delivery and let the driver "refund" an ungranted
+  origin.** Rejected: a refund is another client report, with the same failure
+  mode one level down. Filtering deliverable rows by the origins the driver
+  reports it holds gets the same result with no correction step — an unknown
+  origin simply isn't delivered.
 
 - **Put spike rows in `capture_worklist` with a `kind` column.** D-156 says
   re-capture must never be "a parallel queue" and that still stands — but it is
@@ -132,5 +164,5 @@ Files: `etl/schema/init.sql` (`capture_spike_request`),
 `dashboard/lib/spike-queue.ts`, `dashboard/lib/db/spike-queue.ts`,
 `dashboard/app/api/etl/spike-queue/`, `dashboard/lib/auto-plan.ts`,
 `dashboard/app/admin/diagnostics/SpikeQueuePanel.tsx`,
-`browser-extension/background.js` (`runAutoSpike`/`captureSpikePage`),
-`etl/orchestrator.py` (`purge_old_diagnostics`).
+`browser-extension/background.js` (`runAutoSpike`/`captureSpikePage`/
+`grantedSpikeOrigins`), `etl/orchestrator.py` (`purge_old_diagnostics`).

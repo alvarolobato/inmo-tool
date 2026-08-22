@@ -54,6 +54,12 @@ export function SpikeQueuePanel({
 }: {
   rows: SpikeRequestRow[];
   summaries: SpikeSiteSummary[];
+  /**
+   * Origins a host grant would unblock — `pending` AND `unreachable` rows
+   * (grantableSpikeOrigins). Deriving it from `pending` alone made the grant
+   * affordance disappear exactly when a batch had been given up on, which is
+   * when it is most needed (issue #705 review F2).
+   */
   pendingOrigins: string[];
 }) {
   const router = useRouter();
@@ -139,11 +145,12 @@ export function SpikeQueuePanel({
             padding: "8px 10px",
           }}
         >
-          Falta el permiso de host para {pendingOrigins.length} origen(es):{" "}
-          {pendingOrigins.join(", ")}. Ábrelo desde el popup de la extensión → &ldquo;Permitir
-          sitios en evaluación&rdquo;. Chrome solo concede ese permiso desde un clic en la
-          extensión, así que hasta entonces esas páginas se quedan en cola (no se marcan como
-          fallidas).
+          {pendingOrigins.length} origen(es) en cola necesitan permiso de host en la extensión:{" "}
+          {pendingOrigins.join(", ")}. Se concede desde el popup → &ldquo;Permitir sitios en
+          evaluación&rdquo; (el botón solo aparece si falta alguno; Chrome solo otorga el permiso
+          con un clic en la extensión). Sin él esas páginas <strong>se quedan en cola</strong>: el
+          planificador ni siquiera se las entrega a la extensión, así que no gastan intentos y no
+          pueden acabar en &ldquo;sin respuesta&rdquo; por no haber abierto el popup a tiempo.
         </p>
       )}
 

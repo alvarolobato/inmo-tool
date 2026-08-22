@@ -10,10 +10,12 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  MAX_PENDING_SPIKE_REQUESTS,
   MAX_SPIKE_ATTEMPTS,
   SPIKE_STATUSES,
   SPIKE_UNIT_LIMIT,
-  pendingSpikeOrigins,
+  grantableSpikeOrigins,
+  spikePermissionOrigin,
   summarizeSpikeRequests,
   validateSpikeUrls,
   type SpikeRequestRow,
@@ -34,6 +36,11 @@ function row(over: Partial<SpikeRequestRow>): SpikeRequestRow {
     created_at: "2026-08-22T10:00:00.000Z",
     updated_at: "2026-08-22T10:00:00.000Z",
     ...over,
+    // Keep `origin` consistent with an overridden `url` unless explicitly set,
+    // the way the INSERT does.
+    origin:
+      over.origin ??
+      (over.url ? spikePermissionOrigin(over.url) : "https://www.servihabitat.com"),
   };
 }
 
@@ -45,6 +52,7 @@ describe("validateSpikeUrls — the mirror image of the worklist validator", () 
     expect(rejected).toEqual([]);
     expect(accepted).toHaveLength(1);
     expect(accepted[0].host).toBe("servihabitat.com");
+    expect(accepted[0].origin).toBe("https://www.servihabitat.com");
     expect(accepted[0].matchKey).toBe("servihabitat.com/es/inmueble/12345");
   });
 
@@ -125,9 +133,9 @@ describe("terminal states", () => {
   });
 });
 
-describe("pendingSpikeOrigins — what the popup asks Chrome to grant", () => {
+describe("grantableSpikeOrigins — what the popup asks Chrome to grant", () => {
   it("returns one distinct origin per pending host, sorted", () => {
-    const origins = pendingSpikeOrigins([
+    const origins = grantableSpikeOrigins([
       row({ id: 1, url: "https://b.example.es/a" }),
       row({ id: 2, url: "https://b.example.es/other" }),
       row({ id: 3, url: "https://a.example.es/x" }),
@@ -135,18 +143,75 @@ describe("pendingSpikeOrigins — what the popup asks Chrome to grant", () => {
     expect(origins).toEqual(["https://a.example.es", "https://b.example.es"]);
   });
 
-  it("ignores rows that are no longer pending — a granted permission is not needed for them", () => {
+  it("KEEPS unreachable rows — the grant button must not vanish exactly when a batch was given up on", () => {
+    // Issue #705 review F2: listing only `pending` rows meant that the moment
+    // a batch burned out, both the popup button and the panel banner
+    // disappeared, leaving no affordance to grant the permission at all.
     expect(
-      pendingSpikeOrigins([
+      grantableSpikeOrigins([
+        row({ id: 1, status: "unreachable", url: "https://gone.example.es/a" }),
+      ]),
+    ).toEqual(["https://gone.example.es"]);
+  });
+
+  it("ignores rows a grant could no longer help — captured and operator-skipped", () => {
+    expect(
+      grantableSpikeOrigins([
         row({ id: 1, status: "captured", url: "https://done.example.es/a" }),
         row({ id: 2, status: "skipped", url: "https://nope.example.es/a" }),
-        row({ id: 3, status: "unreachable", url: "https://gone.example.es/a" }),
       ]),
     ).toEqual([]);
   });
 
+  it("drops the port — a Chrome match pattern has none, and one with a port is rejected", () => {
+    expect(grantableSpikeOrigins([row({ url: "https://x.example.es:8443/a" })])).toEqual([
+      "https://x.example.es",
+    ]);
+  });
+
   it("skips a stored row whose URL no longer parses instead of throwing", () => {
-    expect(pendingSpikeOrigins([row({ url: "::broken::" })])).toEqual([]);
+    expect(grantableSpikeOrigins([row({ url: "::broken::", origin: "" })])).toEqual([]);
+  });
+});
+
+describe("denylist — the queue must not be pointable at our own admin UI (review F3)", () => {
+  it("refuses localhost on any port: manifest.json pre-grants it and match patterns ignore the port", () => {
+    const { accepted, rejected } = validateSpikeUrls([
+      "http://localhost:4000/admin/diagnostics",
+      "http://127.0.0.1:4000/admin/diagnostics",
+      "http://[::1]:4000/admin",
+    ]);
+    expect(accepted).toEqual([]);
+    expect(rejected).toHaveLength(3);
+    expect(rejected[0].reason).toContain("Host no permitido");
+  });
+
+  it("refuses private, link-local and CGNAT ranges — the intranet version of the same mistake", () => {
+    const { accepted } = validateSpikeUrls([
+      "http://10.0.0.5/x",
+      "http://172.16.4.4/x",
+      "http://192.168.1.10/x",
+      "http://169.254.1.1/x",
+      "http://100.64.0.1/x",
+      "http://nas.local/x",
+      "http://build.internal/x",
+    ]);
+    expect(accepted).toEqual([]);
+  });
+
+  it("refuses the dashboard's own host when the route passes it in", () => {
+    const { accepted, rejected } = validateSpikeUrls(["https://panel.example.com/admin/ia"], {
+      deniedHosts: ["panel.example.com:4000"],
+    });
+    expect(accepted).toEqual([]);
+    expect(rejected[0].reason).toContain("Host no permitido");
+  });
+
+  it("still accepts an ordinary public candidate host", () => {
+    const { accepted } = validateSpikeUrls(["https://www.servihabitat.com/inmueble/1"], {
+      deniedHosts: ["panel.example.com"],
+    });
+    expect(accepted).toHaveLength(1);
   });
 });
 
@@ -170,13 +235,23 @@ describe("summarizeSpikeRequests", () => {
   });
 });
 
-describe("bounds", () => {
-  it("keeps the auto unit small enough that it can't stall the listing drain", () => {
+describe("bounds — the stall the spike unit can impose on the listing drain", () => {
+  it("keeps the auto unit small", () => {
     expect(SPIKE_UNIT_LIMIT).toBeLessThanOrEqual(10);
     expect(SPIKE_UNIT_LIMIT).toBeGreaterThan(0);
   });
 
   it("gives a request more than one chance before giving up on it", () => {
     expect(MAX_SPIKE_ATTEMPTS).toBeGreaterThan(1);
+  });
+
+  it("caps the worst-case zero-drain window at 30 ticks (~30 min), not 'a couple'", () => {
+    // Issue #705 review F4: the PR originally claimed "a couple of ticks" while
+    // the real figure with a 200-row cap was 120 ticks ≈ 2 h. Pin the
+    // arithmetic so lifting the cap has to lift this number in the same commit.
+    const worstCaseTicks =
+      Math.ceil(MAX_PENDING_SPIKE_REQUESTS / SPIKE_UNIT_LIMIT) * MAX_SPIKE_ATTEMPTS;
+    expect(worstCaseTicks).toBe(30);
+    expect(worstCaseTicks * 60).toBeLessThanOrEqual(60 * 60); // ≤ 1 h of ticks
   });
 });

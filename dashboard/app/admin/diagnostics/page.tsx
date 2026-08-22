@@ -5,7 +5,7 @@ import {
 } from "@/lib/db/extension-diagnostics";
 import { DeleteDiagnosticButton } from "./DeleteDiagnosticButton";
 import { listSpikeRequests } from "@/lib/db/spike-queue";
-import { pendingSpikeOrigins, summarizeSpikeRequests } from "@/lib/spike-queue";
+import { grantableSpikeOrigins, summarizeSpikeRequests } from "@/lib/spike-queue";
 import { SpikeQueuePanel } from "./SpikeQueuePanel";
 
 export const metadata = {
@@ -217,7 +217,7 @@ export default async function DiagnosticsAdminPage() {
       <SpikeQueuePanel
         rows={spikeRows}
         summaries={summarizeSpikeRequests(spikeRows)}
-        pendingOrigins={pendingSpikeOrigins(spikeRows)}
+        pendingOrigins={grantableSpikeOrigins(spikeRows)}
       />
 
       {diagnostics.length === 0 ? (

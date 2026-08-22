@@ -15,11 +15,16 @@
  * background.js's buffered, already-redacted entries). `diagnostic` and
  * `network` are stored as opaque JSONB; this route does not interpret them.
  *
- * Issue #705 adds ONE step after the insert: correlate the stored page with a
- * pending `capture_spike_request` by the canonical match key. That is why the
- * spike driver needs no extra payload field — the same key
- * `etl/capture.py:_correlate_worklist` uses does the join. Still no ingest:
- * `capture_spike_request` is read by nothing on the listing path either.
+ * Issue #705 adds ONE step after the insert: close the `capture_spike_request`
+ * row this page was queued for. Primarily BY ID — the driver echoes back the
+ * `spikeRequestId` the planner handed it, so the row closes even when the
+ * candidate site redirected the URL somewhere the canonical match key no
+ * longer recognises (review F1: `content-script.js` reports
+ * `window.location.href`, the URL AFTER redirects, and redirect-heavy servicer
+ * portals are exactly the target population). The match-key correlation
+ * remains as the fallback for the #675 manual button, which has no id to
+ * echo. Still no ingest: `capture_spike_request` is read by nothing on the
+ * listing path either.
  *
  * Admin-gated exactly like /api/extension/capture: gate-by-default in
  * middleware AND re-checked in-route (defense in depth).
@@ -33,7 +38,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripNulBytes } from "@/lib/strip-nul-bytes";
 import { insertDiagnostic } from "@/lib/db/extension-diagnostics";
-import { correlateSpikeDiagnostic } from "@/lib/db/spike-queue";
+import { correlateSpikeDiagnostic, markSpikeCaptured } from "@/lib/db/spike-queue";
 import { worklistMatchKey } from "@/lib/worklist";
 import type { DiagnosticDetectionBlock, DiagnosticNetworkCapture } from "@/lib/db/extension-diagnostics";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
@@ -61,6 +66,11 @@ interface DiagnosticBody {
   title?: string;
   diagnostic?: DiagnosticDetectionBlock | null;
   network?: DiagnosticNetworkCapture | null;
+  /**
+   * The `capture_spike_request.id` the auto-planner handed this driver for
+   * this page (issue #705). Absent for every other caller of this route.
+   */
+  spikeRequestId?: number | null;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -80,6 +90,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { url, html, title, diagnostic, network } = body;
+  // A non-integer/absent id simply means "no queue row to close" — never a 400:
+  // the page is the irreplaceable part and must be stored regardless.
+  const spikeId =
+    typeof body.spikeRequestId === "number" && Number.isInteger(body.spikeRequestId) && body.spikeRequestId > 0
+      ? body.spikeRequestId
+      : null;
   if (!url || typeof url !== "string") {
     return NextResponse.json(
       formatApiError("Falta el campo 'url'.", "VALIDATION", undefined, requestId),
@@ -142,14 +158,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       detection: diagnostic ?? null,
       network: network ?? null,
     });
-    // Prospective-site queue correlation (issue #705). Best-effort by
-    // contract: the overwhelmingly common caller is the #675 manual button,
-    // which matches nothing and is a no-op, and a failure here must never fail
-    // the POST — the page is already stored, which is the part that cannot be
-    // reconstructed.
+    // Prospective-site queue closure (issue #705). BY ID when the driver was
+    // handed one — the only form that survives a redirect — and by match key
+    // only as the fallback for the #675 manual button, which has no id.
+    // Best-effort by contract either way: a failure here must never fail the
+    // POST, because the page is already stored and that is the part that
+    // cannot be reconstructed.
     let spikeRequestId: number | null = null;
     try {
-      spikeRequestId = await correlateSpikeDiagnostic(worklistMatchKey(url), id);
+      spikeRequestId = spikeId
+        ? await markSpikeCaptured(spikeId, id)
+        : await correlateSpikeDiagnostic(worklistMatchKey(url), id);
     } catch (err) {
       console.error(`[${requestId}] No se pudo correlacionar el diagnóstico con la cola de evaluación:`, err);
     }

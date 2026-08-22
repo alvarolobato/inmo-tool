@@ -7,10 +7,11 @@
  * diagnostic-no-ingest.integration.test.ts for the real-DB proof that this
  * route never touches `listing`/`capture_worklist`).
  *
- * Issue #705 added one post-insert step — correlating the stored page with a
- * pending prospective-site request — so @/lib/db/spike-queue is mocked here
- * too, and the "a correlation failure must not fail the POST" contract is
- * pinned below.
+ * Issue #705 added one post-insert step — closing the prospective-site request
+ * this page was queued for — so @/lib/db/spike-queue is mocked here too. Two
+ * contracts are pinned below: closure happens BY ID whenever the driver echoes
+ * back the `spikeRequestId` the planner handed it (the only form that survives
+ * a redirect, review F1), and a failure in that step must never fail the POST.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -22,6 +23,7 @@ vi.mock("@/lib/db/extension-diagnostics", () => ({
 
 vi.mock("@/lib/db/spike-queue", () => ({
   correlateSpikeDiagnostic: vi.fn(),
+  markSpikeCaptured: vi.fn(),
 }));
 
 import { POST } from "../diagnostic/route";
@@ -30,6 +32,7 @@ import * as spikeDb from "@/lib/db/spike-queue";
 
 const mockInsert = vi.mocked(db.insertDiagnostic);
 const mockCorrelate = vi.mocked(spikeDb.correlateSpikeDiagnostic);
+const mockMarkCaptured = vi.mocked(spikeDb.markSpikeCaptured);
 
 const ADMIN_KEY = "test-admin-key";
 
@@ -51,6 +54,7 @@ describe("POST /api/extension/diagnostic", () => {
     vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
     vi.clearAllMocks();
     mockCorrelate.mockResolvedValue(null);
+    mockMarkCaptured.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -150,8 +154,51 @@ describe("POST /api/extension/diagnostic", () => {
     expect(mockInsert.mock.calls[0][0].network).toBeNull();
   });
 
-  // ── Prospective-site correlation (issue #705) ──────────────────────────
-  it("correlates the stored page with a pending spike request by canonical match key", async () => {
+  // ── Prospective-site closure (issue #705) ─────────────────────────────
+  it("closes the queue row BY ID when the driver echoes back spikeRequestId — even after a redirect", async () => {
+    // Review F1, the blocker this replaces: the driver reports
+    // window.location.href, i.e. the URL AFTER redirects, and the match key is
+    // host+path — so a locale prefix (/es/) produces a key that matches
+    // nothing, the row stays pending at attempts 0, and the planner hands it
+    // back every tick forever while storing a fresh 10 MB-capped page each
+    // time. The id makes the URL irrelevant.
+    mockInsert.mockResolvedValue(77);
+    mockMarkCaptured.mockResolvedValue(11);
+    const res = await POST(
+      makeRequest(
+        {
+          url: "https://www.ejemplo-portal.test/es/inmueble/7",
+          html: "<html><body>x</body></html>",
+          spikeRequestId: 11,
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, id: 77, spikeRequestId: 11 });
+    expect(mockMarkCaptured).toHaveBeenCalledWith(11, 77);
+    // The URL-derived fallback must not even be consulted when an id is given.
+    expect(mockCorrelate).not.toHaveBeenCalled();
+  });
+
+  it("ignores a malformed spikeRequestId rather than 400ing — the page is what matters", async () => {
+    mockInsert.mockResolvedValue(78);
+    const res = await POST(
+      makeRequest(
+        {
+          url: "https://www.ejemplo-portal.test/inmueble/9",
+          html: "<html></html>",
+          spikeRequestId: "11" as unknown as number,
+        },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(mockMarkCaptured).not.toHaveBeenCalled();
+    expect(mockCorrelate).toHaveBeenCalled(); // falls back to the match key
+  });
+
+  it("falls back to the canonical match key for the #675 manual button, which has no id", async () => {
     mockInsert.mockResolvedValue(99);
     mockCorrelate.mockResolvedValue(12);
     const res = await POST(

@@ -14,8 +14,16 @@
  *   • The page goes to /api/extension/diagnostic, NEVER
  *     /api/extension/capture — no connector could normalise it, so it must
  *     never enter the ingest path.
- *   • Without a granted host permission nothing is opened at all, and the row
- *     is reported as an attempt (→ eventually `unreachable`), never captured.
+ *   • Without a granted host permission nothing is opened at all, and — since
+ *     the review-F2 fix — the driver writes NOTHING to the queue for it: an
+ *     ungranted origin is not the driver's to charge, and the server never
+ *     hands one out in the first place. "The operator hasn't clicked the
+ *     popup yet" must never become `unreachable`, which is meant to be a
+ *     finding about the candidate site.
+ *   • The driver never PATCHes the queue at all (review F1/F5): attempts are
+ *     charged by the delivery statement server-side, and a landed page closes
+ *     its row by echoing `spikeRequestId` on the diagnostic POST — which is
+ *     what makes it survive a redirect.
  *   • The service worker never calls chrome.permissions.request itself (no
  *     user-activation signal — the popup does the asking).
  */
@@ -145,6 +153,14 @@ function makeChromeMock(opts: { hasPermission?: boolean; capturedPage?: unknown 
     permissions: {
       contains: vi.fn(async (_p: { origins: string[] }) => opts.hasPermission !== false),
       request: vi.fn(async () => true),
+      getAll: vi.fn(async () => ({
+        permissions: ["tabs"],
+        origins: [
+          "http://localhost/*",
+          "*://*.idealista.com/*",
+          "https://www.ejemplo.test/*",
+        ],
+      })),
     },
   };
   return chromeMock;
@@ -152,9 +168,10 @@ function makeChromeMock(opts: { hasPermission?: boolean; capturedPage?: unknown 
 
 interface BackgroundModule {
   runAutoSpike: (items: { id: number; url: string }[]) => Promise<void>;
-  captureSpikePage: (url: string) => Promise<boolean>;
+  captureSpikePage: (url: string, spikeRequestId?: number) => Promise<string>;
   hasSpikePermission: (origin: string) => Promise<boolean>;
   spikeOriginsNeedingPermission: () => Promise<string[]>;
+  grantedSpikeOrigins: () => Promise<string[]>;
 }
 
 function loadBackground(
@@ -222,7 +239,7 @@ describe("captureSpikePage — the candidate site is never fetched", () => {
     const fetchMock = okFetch();
     const bg = loadBackground(chrome, fetchMock);
 
-    expect(await bg.captureSpikePage(ITEM.url)).toBe(true);
+    expect(await bg.captureSpikePage(ITEM.url, ITEM.id)).toBe("sent");
 
     // Exactly one HTTP call, and it goes to our own dashboard.
     const urls = drivenUrls(fetchMock);
@@ -240,7 +257,7 @@ describe("captureSpikePage — the candidate site is never fetched", () => {
     const chrome = makeChromeMock({ hasPermission: true, capturedPage: null });
     const bg = loadBackground(chrome, okFetch());
 
-    expect(await bg.captureSpikePage(ITEM.url)).toBe(false);
+    expect(await bg.captureSpikePage(ITEM.url, ITEM.id)).toBe("no-page");
     expect(chrome.tabs.remove).toHaveBeenCalledWith(42);
   });
 
@@ -249,7 +266,10 @@ describe("captureSpikePage — the candidate site is never fetched", () => {
     const fetchMock = okFetch();
     const bg = loadBackground(chrome, fetchMock);
 
-    expect(await bg.captureSpikePage(ITEM.url)).toBe(false);
+    // 'no-permission', NOT 'no-page' — review F2: collapsing the two into one
+    // `false` is what let an ungranted host be filed as a finding about the
+    // candidate site three ticks later.
+    expect(await bg.captureSpikePage(ITEM.url, ITEM.id)).toBe("no-permission");
     expect(chrome.tabs.create).not.toHaveBeenCalled();
     expect(drivenUrls(fetchMock)).toEqual([]);
     // The worker must never ask for the grant itself — Chrome requires a real
@@ -270,7 +290,7 @@ describe("captureSpikePage — the candidate site is never fetched", () => {
     });
     const bg = loadBackground(chrome, okFetch());
 
-    expect(await bg.captureSpikePage(ITEM.url)).toBe(true);
+    expect(await bg.captureSpikePage(ITEM.url, ITEM.id)).toBe("sent");
     expect(chrome.scripting.executeScript).toHaveBeenCalledWith({
       target: { tabId: 42 },
       files: ["detect.js", "diagnostic.js", "content-script.js"],
@@ -278,29 +298,69 @@ describe("captureSpikePage — the candidate site is never fetched", () => {
   });
 });
 
-describe("runAutoSpike — per-item reporting", () => {
-  it("reports an attempt only for items that produced no page", async () => {
+describe("runAutoSpike — the driver never advances the queue by reporting", () => {
+  it("writes NOTHING to the queue for an ungranted host (review F2)", async () => {
+    // The old behaviour PATCHed {attempt:true} here, which burned the whole
+    // batch to `unreachable` in three 60 s ticks and, because the grant
+    // prompt was derived from `pending` rows, removed the only way to grant
+    // the permission at the same moment. An ungranted origin is now simply
+    // never delivered by the planner, and the driver charges it nothing.
     const chrome = makeChromeMock({ hasPermission: false });
     const fetchMock = okFetch();
     const bg = loadBackground(chrome, fetchMock);
 
     await bg.runAutoSpike([ITEM, { id: 4, url: "https://www.otro.test/x" }]);
 
-    const patched = fetchMock.mock.calls.filter((c) => c[1]?.method === "PATCH");
-    expect(patched).toHaveLength(2);
-    expect(String(patched[0][0])).toBe("http://localhost:4000/api/etl/spike-queue/3");
-    expect(JSON.parse(String(patched[0][1]?.body))).toEqual({ attempt: true });
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
+    expect(drivenUrls(fetchMock)).toEqual([]);
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
   });
 
-  it("does NOT report an attempt for a page that landed — the diagnostic route correlates it by match key", async () => {
-    const chrome = makeChromeMock({ hasPermission: true });
+  it("never PATCHes the queue even when a page fails to render (review F1/F5)", async () => {
+    // Attempts are charged by the server when it HANDS the row out, so there
+    // is no failure report to lose to a rotated key, a 500, or a closed lid —
+    // and therefore no way for the client to freeze `attempts` at 0 and starve
+    // the listing drain behind a permanently-replanned spike unit.
+    const chrome = makeChromeMock({ hasPermission: true, capturedPage: null });
     const fetchMock = okFetch();
     const bg = loadBackground(chrome, fetchMock);
 
     await bg.runAutoSpike([ITEM]);
 
-    const patched = fetchMock.mock.calls.filter((c) => c[1]?.method === "PATCH");
-    expect(patched).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
+    expect(drivenUrls(fetchMock)).toEqual([]);
+  });
+
+  it("closes a landed page's row by echoing spikeRequestId — the redirect case (review F1)", async () => {
+    // The page reports a DIFFERENT URL than the one queued (a locale prefix
+    // the candidate site redirected to). The canonical match key derived from
+    // it is `ejemplo.test/es/inmueble/1`, which matches no row — so the id is
+    // the only thing that can close it, and it must be on the wire.
+    const chrome = makeChromeMock({
+      hasPermission: true,
+      capturedPage: {
+        html: "<html><body>ficha</body></html>",
+        url: "https://www.ejemplo.test/es/inmueble/1",
+        title: "Ficha",
+        diagnostic: null,
+      },
+    });
+    const fetchMock = okFetch();
+    const bg = loadBackground(chrome, fetchMock);
+
+    await bg.runAutoSpike([ITEM]);
+
+    const posts = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/extension/diagnostic"),
+    );
+    expect(posts).toHaveLength(1);
+    const sent = JSON.parse(String(posts[0][1]?.body));
+    expect(sent.spikeRequestId).toBe(ITEM.id);
+    // Stored under where it actually landed, which is the honest record...
+    expect(sent.url).toBe("https://www.ejemplo.test/es/inmueble/1");
+    // ...and that is precisely why the id, not the URL, closes the row.
+    expect(sent.url).not.toBe(ITEM.url);
+    expect(fetchMock.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
   });
 
   it("skips a malformed item instead of throwing the whole unit away", async () => {
@@ -310,6 +370,30 @@ describe("runAutoSpike — per-item reporting", () => {
       bg.runAutoSpike([{ id: 1 } as unknown as { id: number; url: string }, ITEM]),
     ).resolves.toBeUndefined();
     expect(chrome._openedTabs).toEqual([ITEM.url]);
+  });
+});
+
+describe("grantedSpikeOrigins — what the planner is told this browser can open", () => {
+  it("reports concrete http(s) origins, port-stripped, and drops wildcard patterns", async () => {
+    const chrome = makeChromeMock();
+    const bg = loadBackground(chrome, okFetch());
+    // `*://*.idealista.com/*` can't be compared to a stored origin (and a host
+    // with a connector can never be in this queue anyway).
+    expect(await bg.grantedSpikeOrigins()).toEqual([
+      "http://localhost",
+      "https://www.ejemplo.test",
+    ]);
+  });
+
+  it("returns [] when the permissions API throws — the planner then delivers no spike work at all", async () => {
+    const chrome = makeChromeMock();
+    chrome.permissions.getAll = vi.fn(async () => {
+      throw new Error("nope");
+    });
+    const bg = loadBackground(chrome, okFetch());
+    // The safe direction: Auto falls straight through to the listing drain
+    // rather than preempting it with work it can't do.
+    expect(await bg.grantedSpikeOrigins()).toEqual([]);
   });
 });
 

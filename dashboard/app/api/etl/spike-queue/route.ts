@@ -4,8 +4,11 @@
  * GET  /api/etl/spike-queue
  *      → { rows, summaries, pendingOrigins, pendingCount }
  *      `pendingOrigins` is what the extension popup feeds
- *      `chrome.permissions.request()`; the rest backs the /admin/diagnostics
- *      panel.
+ *      `chrome.permissions.request()` and what the auto-driver echoes back on
+ *      GET /api/etl/auto-plan as the subset it already holds; the rest backs
+ *      the /admin/diagnostics panel. It covers `unreachable` rows as well as
+ *      `pending` ones, so a batch that was given up on still offers its grant
+ *      button instead of removing the only way to fix it (review F2).
  * POST /api/etl/spike-queue { urls: string[] | string, siteLabel, note? }
  *      → { added, duplicate, invalid, capped? }
  *
@@ -25,7 +28,7 @@ import {
   countPendingSpikeRequests,
   listSpikeRequests,
 } from "@/lib/db/spike-queue";
-import { pendingSpikeOrigins, summarizeSpikeRequests } from "@/lib/spike-queue";
+import { grantableSpikeOrigins, summarizeSpikeRequests } from "@/lib/spike-queue";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 // Far below the worklist route's 5000: this queue is "a handful of pages from
@@ -41,7 +44,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       rows,
       summaries: summarizeSpikeRequests(rows),
-      pendingOrigins: pendingSpikeOrigins(rows),
+      pendingOrigins: grantableSpikeOrigins(rows),
       pendingCount: await countPendingSpikeRequests(),
     });
   } catch (err) {
@@ -134,7 +137,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const result = await addSpikeRequests(urls, siteLabel, body.note ?? null);
+    // The dashboard's OWN host, refused alongside the standing localhost /
+    // private-range denylist (review F3). manifest.json pre-declares
+    // `http://localhost/*` and Chrome match patterns ignore the port, so
+    // `http://localhost:4000/admin/...` would already be granted without a
+    // prompt — the driver would open this very admin UI with the operator's
+    // `ps_admin` cookie and upload the rendered page as a "candidate site
+    // sample". `x-forwarded-host` is included because that is what the host
+    // reads as behind the prod reverse proxy.
+    const selfHosts = [
+      request.nextUrl.hostname,
+      request.headers.get("host") ?? "",
+      request.headers.get("x-forwarded-host") ?? "",
+    ].filter(Boolean);
+    const result = await addSpikeRequests(urls, siteLabel, body.note ?? null, selfHosts);
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     console.error(`[${requestId}] Error al encolar URLs de sitio en evaluación:`, err);

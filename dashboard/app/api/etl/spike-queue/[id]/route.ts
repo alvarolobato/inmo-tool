@@ -3,30 +3,30 @@
  * (issue #705).
  *
  * PATCH { status }          — operator sets skipped / re-queues to pending.
- * PATCH { attempt: true }   — the EXTENSION reporting "I opened this URL and no
- *                             page came back". At MAX_SPIKE_ATTEMPTS the row
- *                             becomes `unreachable` — never `failed`: the
- *                             owner's browser failing to render a candidate
- *                             site's page is a finding ABOUT that site, which
- *                             is the whole point of a feasibility spike, not a
- *                             pipeline fault to surface in data-health.
  * DELETE                    — drop the request.
+ *
+ * There is deliberately NO extension-facing "I tried and it didn't work"
+ * verb here any more (issue #705 review F1/F5). Attempts are charged by the
+ * statement that HANDS a row to the driver (GET /api/etl/auto-plan →
+ * `claimSpikeRequestsForDelivery`), so the queue advances on a server-side
+ * fact. A report the client can silently drop — or that a rotated admin key,
+ * a 500 or a closed laptop can lose — was a second starvation path: with
+ * `attempts` frozen at 0 the same five rows preempt every tick and the real
+ * listing drain never resumes. At MAX_SPIKE_ATTEMPTS deliveries the row
+ * becomes `unreachable`, never `failed`: the owner's browser failing to render
+ * a candidate site's page is a finding ABOUT that site, which is the whole
+ * point of a feasibility spike, not a pipeline fault for data-health.
  *
  * Admin-gated via the `/api/etl/:path*` matcher, like the list/add route.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import {
-  deleteSpikeRequest,
-  recordSpikeAttempt,
-  setSpikeStatus,
-} from "@/lib/db/spike-queue";
+import { deleteSpikeRequest, setSpikeStatus } from "@/lib/db/spike-queue";
 import { SPIKE_STATUSES, type SpikeStatus } from "@/lib/spike-queue";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 interface PatchBody {
   status?: string;
-  attempt?: boolean;
 }
 
 function parseId(raw: string): number | null {
@@ -59,17 +59,6 @@ export async function PATCH(
   }
 
   try {
-    if (body.attempt === true) {
-      const status = await recordSpikeAttempt(id);
-      if (status == null) {
-        return NextResponse.json(
-          formatApiError("Solicitud no encontrada.", "VALIDATION", undefined, requestId),
-          { status: 404 },
-        );
-      }
-      return NextResponse.json({ success: true, status });
-    }
-
     if (!body.status || !SPIKE_STATUSES.includes(body.status as SpikeStatus)) {
       return NextResponse.json(
         formatApiError(

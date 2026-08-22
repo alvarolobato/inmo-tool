@@ -319,6 +319,7 @@ destination:
 | Auto unit | `drain` (or `harvest`) | `spike`, planned FIRST, capped |
 | Lands in | `extension_capture` → `listing` | `extension_diagnostic` (D-153) |
 | Terminal states | `captured`/`failed`/`skipped`/`stale` | `captured`/`skipped`/**`unreachable`** — no `failed` |
+| Advances on | the capture POST | the DELIVERY statement (server-side), + `spikeRequestId` echoed back |
 
 **The two paste boxes are mutually exclusive by host** — the worklist one
 refuses a host without a connector, the spike one refuses a host with one — so
@@ -337,7 +338,37 @@ D-033); keep it that way.
 `optional_host_permissions`, and Chrome grants an origin only from a user
 gesture on an extension PAGE. So the popup's "Permitir sitios en evaluación"
 button asks; `background.js` only ever calls `permissions.contains`. An
-ungranted origin is skipped and stays `pending` — never `unreachable`.
+ungranted origin is skipped and stays `pending` — never `unreachable`, and this
+is enforced where it cannot be forgotten: the driver sends the origins it holds
+(`grantedSpikeOrigins`) on `GET /api/etl/auto-plan`, and the planner only ever
+hands out (and only ever charges) rows on one of them. The grant prompt is
+derived from `pending` **and** `unreachable` rows, so it never disappears at
+the moment it is needed.
+
+**How a row advances — server-side, always.** `attempts` is incremented by the
+statement that DELIVERS the row (`claimSpikeRequestsForDelivery`, inside the
+auto-plan GET), never by anything the extension reports back; there is no
+"I tried and it failed" verb on the API at all. A landed page closes its row by
+echoing the `spikeRequestId` it was handed on the diagnostic POST — **not** by
+match key, which is derived from `window.location.href` and therefore breaks on
+any redirect (locale prefix, canonical slug, consent-wall bounce, SPA
+`pushState`); redirect-heavy servicer portals are the target population. If you
+are tempted to add a client-side report here, read #705's review first: both
+starvation bugs it found were the same shape.
+
+**What a spike unit costs the listing drain**: it preempts harvest and drain, so
+the honest worst case is
+`ceil(MAX_PENDING_SPIKE_REQUESTS / SPIKE_UNIT_LIMIT) × MAX_SPIKE_ATTEMPTS`
+= `ceil(50/5) × 3` = **30 ticks ≈ 30 min** of zero listing drain if nothing
+renders, longer if the pages do render. Bounded and self-clearing, but not
+"a couple of ticks" — raise the cap and you raise that number linearly.
+
+**Never point it at ourselves**: `validateSpikeUrls` refuses `localhost`,
+`127.0.0.1`, private/link-local/CGNAT ranges, `.local`/`.internal`, and the
+dashboard's own host. `manifest.json` pre-declares `http://localhost/*` and
+Chrome match patterns **ignore the port**, so without that denylist
+`http://localhost:4000/admin/...` would be opened with the operator's
+`ps_admin` cookie and the rendered admin page uploaded as a "candidate sample".
 
 **Retention**: `purge_extension_diagnostics()` had no caller anywhere until
 #705; it now runs once per ETL scheduler sweep at
