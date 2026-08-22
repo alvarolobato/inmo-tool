@@ -120,6 +120,7 @@
 | [D-150](docs/decisions/D-150-config-driven-capture-html-retention.md) | `etl.retain_capture_html_for` (CSV connector names, default empty) forces `_process_one` to retain `extension_capture.html` for a named connector regardless of `raw_extra.selectors_calibrated` (D-146's existing rule stays additive/unchanged). Off by default; an operator turns it on/off purely via config, no code change. |
 | [D-153](docs/decisions/D-153-force-capture-diagnostic-channel.md) | Extension diagnostics write ONLY to extension_diagnostic, never extension_capture; the reported isRenderReady verdict is isRenderReadyDetail's own output, never re-derived. |
 | [D-155](docs/decisions/D-155-idealista-fullscreen-gallery-source.md) | Idealista photos come from `fullScreenGalleryPics` (array order, skip `isPlan`), not the 3-item `multimediaCarrousel` preview. Flag `photo_gallery_truncated` under declared total. |
+| [D-156](docs/decisions/D-156-recapture-requeues-worklist-rows.md) | Re-capturing a cohort flips its `capture_worklist` rows from `captured` back to `pending` and stamps `requeued_at`/`requeue_reason`/`requeue_rank` — never a sixth `status` value, never a parallel queue. Only `captured` rows are eligible; `skipped`/`stale`/`failed`/`pending` are left alone. The cohort is a closed predicate enum resolved server-side and re-resolved on write against the confirmed count. |
 
 ## Product / candidate feed
 

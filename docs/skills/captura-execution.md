@@ -214,6 +214,51 @@ D-114); or re-add a per-profile button/select-all pair alongside the global
 one — the owner explicitly rejected having both ("nada que sea global y por
 perfil", D-114).
 
+## Re-capturing listings that already have bad data (issue #677, D-156)
+
+When a parser bug leaves a cohort holding bad data, **do not build a queue for
+it** — the rows are already in `capture_worklist` at `status='captured'`, and
+the extension batch driver already drains `pending`. Re-capture is a requeue:
+
+- **Where**: `/admin/fuentes/<portal>` → Captura → "Marcar un conjunto para
+  recaptura" (`dashboard/components/worklist/RecapturePanel.tsx`). The old
+  `/etl/captura` home was deleted by #676/D-154 and 301s here.
+- **Cohort**: portal + one of a closed predicate enum (`few_photos`,
+  `stale_capture`, `never_requeued`) + "solo candidatos vivos" (default ON).
+  Adding a case means adding a named predicate in `dashboard/lib/recapture.ts`
+  **and** its SQL branch in `dashboard/lib/db/recapture.ts` — never a
+  free-text filter.
+- **Flow**: `Calcular` (GET, read-only) → count + time + storage estimate →
+  reason → two-step armed confirm (D-133/D-135) → POST, which re-resolves the
+  cohort and 409s if the count moved.
+- **Marking**: `requeued_at` / `requeue_reason` / `requeue_rank`, never a new
+  `status`. `status='pending' AND requeued_at IS NULL` is "never captured";
+  `requeued_at IS NOT NULL` is "queued again" — the distinction survives an
+  interrupted pass.
+- **Eligibility**: only `captured` rows. `skipped`/`stale`/`failed`/`pending`
+  are deliberately untouched — enforced twice, by the cohort resolver and
+  again by `AND w.status = 'captured'` on the UPDATE itself, which is what
+  covers the window between resolving a cohort and flipping it.
+- **Source gate**: a portal switched off in Fuentes yields an empty cohort
+  (D-055's shared `activeSourceClause`, same fragment the list and map feeds
+  use), and a portal with `capture_enabled = false` is refused outright by the
+  POST — otherwise the browsing happens and `etl/capture.py` never processes
+  a single row of it.
+
+**Before triggering a bulk pass, read the estimate.** The panel measures both
+costs for real: the Idealista cohort (3,258 rows) is ~14.6 h of continuous
+foreground browsing, and while `ETL_RETAIN_CAPTURE_HTML_FOR` names the portal
+(D-150) it also writes ~1.4 GB raw / ~355 MB on disk. Consider turning
+retention off first.
+
+Only the **manual** batch path ("Capturar todas") drains in `requeue_rank`
+order. Auto mode re-ranks by portal due-ness in `selectNextPendingUrls`, which
+must stay in step with `browser-extension/batch.js selectNextPending`, so a
+requeued cohort drains oldest-first there — correct, but not value-first.
+**Turn Auto off before starting a value-ordered pass**; the panel says so
+next to the estimate, because with Auto on the ordering it just promised is
+moot.
+
 ## Loosened searches (#267 caveat)
 
 Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its

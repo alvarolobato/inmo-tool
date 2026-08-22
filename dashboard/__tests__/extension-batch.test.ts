@@ -12,11 +12,29 @@
 
 import { describe, it, expect } from "vitest";
 import * as mod from "../../browser-extension/batch.js";
+import {
+  estimateBatchSeconds,
+  PACE_BASE_MS,
+  PACE_SPREAD_MS,
+  PACE_STEP_EVERY,
+  PACE_STEP_MS,
+  PACE_MAX_EXTRA_MS,
+} from "@/lib/recapture";
+
+/** The dashboard-side copy of batch.js's pacing dials — see the guard below. */
+const RECAPTURE_PACE = {
+  PACE_BASE_MS,
+  PACE_SPREAD_MS,
+  PACE_STEP_EVERY,
+  PACE_STEP_MS,
+  PACE_MAX_EXTRA_MS,
+};
 
 // batch.js publishes via `module.exports = api`; vite's CJS interop may expose
 // it as the default export or spread the named keys — accept either (same
 // pattern as extension-detect.test.ts).
-const B = (mod as unknown as { default?: Record<string, unknown> }).default ?? mod;
+const B =
+  (mod as unknown as { default?: Record<string, unknown> }).default ?? mod;
 
 interface BatchState {
   urls: string[];
@@ -213,8 +231,16 @@ const {
   ) => string | null;
   // Block/challenge episodes (issue #634)
   BLOCK_EPISODE_TTL_MS: number;
-  isPortalBlocked: (state: BlockState | null, portal: unknown, now?: number) => boolean;
-  blockEntry: (state: BlockState | null, portal: unknown, now?: number) => BlockEntry | null;
+  isPortalBlocked: (
+    state: BlockState | null,
+    portal: unknown,
+    now?: number,
+  ) => boolean;
+  blockEntry: (
+    state: BlockState | null,
+    portal: unknown,
+    now?: number,
+  ) => BlockEntry | null;
   recordBlock: (
     state: BlockState | null,
     portal: unknown,
@@ -430,7 +456,10 @@ describe("launchNext — never exceeds the concurrency cap", () => {
 
   it("at the raised ceiling (N=8) still never exceeds `concurrency` in flight", () => {
     const N = MAX_CONCURRENCY; // 8 (issue #410)
-    const many = Array.from({ length: 30 }, (_, i) => `https://a/inmueble/${i}`);
+    const many = Array.from(
+      { length: 30 },
+      (_, i) => `https://a/inmueble/${i}`,
+    );
     let s = makeBatchState(many, N);
     expect(s.concurrency).toBe(8);
     let maxSeen = 0;
@@ -460,10 +489,20 @@ describe("recordResultAt — out-of-order settle + completion", () => {
     // settle OUT OF ORDER: 2, then 0, then 1
     s = recordResultAt(s, 2, true);
     s = recordResultAt(s, 0, false);
-    expect(progress(s)).toMatchObject({ captured: 1, failed: 1, inflight: 1, done: 2 });
+    expect(progress(s)).toMatchObject({
+      captured: 1,
+      failed: 1,
+      inflight: 1,
+      done: 2,
+    });
     s = recordResultAt(s, 1, true);
     expect(s.status).toBe(STATUSES.DONE);
-    expect(progress(s)).toMatchObject({ captured: 2, failed: 1, inflight: 0, total: 3 });
+    expect(progress(s)).toMatchObject({
+      captured: 2,
+      failed: 1,
+      inflight: 0,
+      total: 3,
+    });
   });
 
   it("flips to done only when nothing is pending AND nothing is in flight", () => {
@@ -584,8 +623,12 @@ describe("progress", () => {
 describe("jitterDelay — jittered launch spacing (never a metronome)", () => {
   it("returns base + a value within [0, spread) using the injected rng", () => {
     expect(jitterDelay(4000, 5000, () => 0)).toBe(4000);
-    expect(jitterDelay(4000, 5000, () => 0.9999)).toBe(4000 + Math.floor(0.9999 * 5000));
-    expect(jitterDelay(4000, 5000, () => 0.5)).toBe(4000 + Math.floor(0.5 * 5000));
+    expect(jitterDelay(4000, 5000, () => 0.9999)).toBe(
+      4000 + Math.floor(0.9999 * 5000),
+    );
+    expect(jitterDelay(4000, 5000, () => 0.5)).toBe(
+      4000 + Math.floor(0.5 * 5000),
+    );
   });
 
   it("clamps negative base/spread to 0", () => {
@@ -602,6 +645,65 @@ describe("jitterDelay — jittered launch spacing (never a metronome)", () => {
     }
     // Randomised, not a fixed interval — many distinct values across draws.
     expect(seen.size).toBeGreaterThan(10);
+  });
+});
+
+describe("the dashboard's copy of the pacing dials (issue #677)", () => {
+  // dashboard/lib/recapture.ts re-implements this pacing model in TypeScript
+  // so the re-capture panel can quote a wall-clock estimate for a cohort of
+  // thousands of listings — an overnight-scale commitment the owner plans an
+  // evening around. It cannot import batch.js (CommonJS, and lib/recapture.ts
+  // is bundled into the client), so it holds a COPY of these five constants.
+  //
+  // This file already imports the REAL batch.js, so the copy is pinned here
+  // rather than merely commented. Nothing else in the estimate matters if
+  // these drift: batch.js moves, the panel keeps quoting the old number, and
+  // the operator commits to a run that is hours longer than they were told.
+  //
+  // Two of the five are exported by batch.js and compared directly. The three
+  // step constants are not exported, so they are re-derived from the shipped
+  // `paceBaseMs()` itself — a stronger check than reading a constant, because
+  // it pins the observable behaviour the estimate actually models.
+
+  it("matches batch.js's exported base and spread defaults", () => {
+    expect(RECAPTURE_PACE.PACE_BASE_MS).toBe(DEFAULT_PACE_BASE_MS);
+    expect(RECAPTURE_PACE.PACE_SPREAD_MS).toBe(DEFAULT_PACE_SPREAD_MS);
+  });
+
+  it("matches the step size, step interval and cap that paceBaseMs actually applies", () => {
+    const base = DEFAULT_PACE_BASE_MS;
+
+    // Step size: the increase applied at the first step boundary.
+    const stepMs = paceBaseMs(RECAPTURE_PACE.PACE_STEP_EVERY) - base;
+    expect(RECAPTURE_PACE.PACE_STEP_MS).toBe(stepMs);
+
+    // Step interval: the smallest processed-count at which the base first
+    // rises above its floor. Scanned rather than assumed, so a change to
+    // PACE_STEP_EVERY in batch.js is caught even if the step size is untouched.
+    let firstStepAt = -1;
+    for (let n = 0; n <= 1000; n++) {
+      if (paceBaseMs(n) > base) {
+        firstStepAt = n;
+        break;
+      }
+    }
+    expect(firstStepAt).toBe(RECAPTURE_PACE.PACE_STEP_EVERY);
+
+    // Cap: the most the base can ever exceed its floor by.
+    expect(paceBaseMs(1_000_000) - base).toBe(RECAPTURE_PACE.PACE_MAX_EXTRA_MS);
+
+    // And the steady-state figure the panel's estimate leans on: once past the
+    // cap every further page costs base + cap + half the jitter spread. Taken
+    // as a MARGINAL cost (the 9,001st..10,000th page), not as the mean over a
+    // whole run — the ramp-up makes the mean lower, and averaging the two
+    // would hide a change in either.
+    const steadyStateMs =
+      base + RECAPTURE_PACE.PACE_MAX_EXTRA_MS + DEFAULT_PACE_SPREAD_MS / 2;
+    expect(steadyStateMs).toBe(16_500);
+    const marginalMs =
+      ((estimateBatchSeconds(10_000) - estimateBatchSeconds(9_000)) / 1000) *
+      1000;
+    expect(marginalMs).toBe(steadyStateMs);
   });
 });
 
@@ -665,11 +767,15 @@ describe("orphanTabsToClose — reconcile the tabs leaked at eviction", () => {
   const running = makeBatchState(URLS);
 
   it("returns every persisted tab id when the run is stranded", () => {
-    expect(orphanTabsToClose(running, false, [42, 43, 44])).toEqual([42, 43, 44]);
+    expect(orphanTabsToClose(running, false, [42, 43, 44])).toEqual([
+      42, 43, 44,
+    ]);
   });
 
   it("filters non-numeric ids defensively", () => {
-    expect(orphanTabsToClose(running, false, [42, "x", null, 43])).toEqual([42, 43]);
+    expect(orphanTabsToClose(running, false, [42, "x", null, 43])).toEqual([
+      42, 43,
+    ]);
   });
 
   it("returns [] when a loop is still alive (never disturb live tabs)", () => {
@@ -828,7 +934,12 @@ describe("clampAutoBatchSize / clampAutoTimeoutSec — bounded, safe defaults", 
 
 describe("makeAutoState — clamped, sane initial shape", () => {
   it("clamps knobs and defaults status/counters", () => {
-    const s = makeAutoState({ enabled: true, portal: "idealista", batchSize: 9999, timeoutSec: 1 });
+    const s = makeAutoState({
+      enabled: true,
+      portal: "idealista",
+      batchSize: 9999,
+      timeoutSec: 1,
+    });
     expect(s.enabled).toBe(true);
     expect(s.portal).toBe("idealista");
     expect(s.batchSize).toBe(MAX_AUTO_BATCH_SIZE);
@@ -865,8 +976,16 @@ describe("shouldContinueAuto — flag on AND pending > 0", () => {
 describe("selectNextPending — cap N, due-priority then oldest", () => {
   const items: PendingItem[] = [
     { url: "u-alt-old", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" },
-    { url: "u-ide-new", portal: "idealista", createdAt: "2026-03-01T00:00:00Z" },
-    { url: "u-ide-old", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" },
+    {
+      url: "u-ide-new",
+      portal: "idealista",
+      createdAt: "2026-03-01T00:00:00Z",
+    },
+    {
+      url: "u-ide-old",
+      portal: "idealista",
+      createdAt: "2026-02-01T00:00:00Z",
+    },
     { url: "u-ali-old", portal: "aliseda", createdAt: "2026-01-15T00:00:00Z" },
   ];
   // idealista due (0), aliseda half-done (1); altamira absent → unknown (last).
@@ -886,7 +1005,9 @@ describe("selectNextPending — cap N, due-priority then oldest", () => {
   });
 
   it("the capped batch takes the most-due first", () => {
-    expect(selectNextPending(items, due, 1).map((x) => x.url)).toEqual(["u-ide-old"]);
+    expect(selectNextPending(items, due, 1).map((x) => x.url)).toEqual([
+      "u-ide-old",
+    ]);
   });
 
   it("with no due map, falls back to pure oldest-first", () => {
@@ -928,8 +1049,16 @@ describe("isPortalDue — due when rank < not-due (issue #434)", () => {
 
 describe("selectNextPending — dueOnly filter vs force (issue #434)", () => {
   const items: PendingItem[] = [
-    { url: "u-ide-old", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" }, // due (0)
-    { url: "u-ide-new", portal: "idealista", createdAt: "2026-03-01T00:00:00Z" }, // due (0)
+    {
+      url: "u-ide-old",
+      portal: "idealista",
+      createdAt: "2026-02-01T00:00:00Z",
+    }, // due (0)
+    {
+      url: "u-ide-new",
+      portal: "idealista",
+      createdAt: "2026-03-01T00:00:00Z",
+    }, // due (0)
     { url: "u-ali-old", portal: "aliseda", createdAt: "2026-01-15T00:00:00Z" }, // half-done (1)
     { url: "u-alt-old", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" }, // not-due (2)
     { url: "u-cim-old", portal: "cimenta2", createdAt: "2026-01-05T00:00:00Z" }, // unknown (absent)
@@ -979,7 +1108,9 @@ describe("makeAutoState — force flag (issue #434)", () => {
   it("defaults force to false and only sets it for an explicit true", () => {
     expect(makeAutoState({ enabled: true }).force).toBe(false);
     expect(makeAutoState({ enabled: true, force: false }).force).toBe(false);
-    expect(makeAutoState({ enabled: true, force: "yes" as unknown }).force).toBe(false);
+    expect(
+      makeAutoState({ enabled: true, force: "yes" as unknown }).force,
+    ).toBe(false);
     expect(makeAutoState({ enabled: true, force: true }).force).toBe(true);
   });
 });
@@ -994,30 +1125,52 @@ describe("nextAutoAction — the alarm-tick decision", () => {
 
   it("defers while any batch is in flight", () => {
     expect(nextAutoAction(base, { batchActive: true })).toBe("defer");
-    expect(nextAutoAction({ ...base, status: AUTO_STATUS.RUNNING }, { batchActive: true })).toBe("defer");
+    expect(
+      nextAutoAction(
+        { ...base, status: AUTO_STATUS.RUNNING },
+        { batchActive: true },
+      ),
+    ).toBe("defer");
   });
 
   it("marks complete when a running batch is no longer active", () => {
     expect(
-      nextAutoAction({ ...base, status: AUTO_STATUS.RUNNING }, { batchActive: false }),
+      nextAutoAction(
+        { ...base, status: AUTO_STATUS.RUNNING },
+        { batchActive: false },
+      ),
     ).toBe("complete");
   });
 
   it("starts immediately when never run", () => {
-    expect(nextAutoAction({ ...base, lastBatchAt: null }, { batchActive: false })).toBe("start");
+    expect(
+      nextAutoAction({ ...base, lastBatchAt: null }, { batchActive: false }),
+    ).toBe("start");
   });
 
   it("waits during the cooldown, starts once the timeout elapsed", () => {
     const now = 1_000_000;
-    const waiting = { ...base, status: AUTO_STATUS.WAITING, lastBatchAt: now - 10_000 };
+    const waiting = {
+      ...base,
+      status: AUTO_STATUS.WAITING,
+      lastBatchAt: now - 10_000,
+    };
     expect(nextAutoAction(waiting, { batchActive: false, now })).toBe("wait");
-    const elapsed = { ...base, status: AUTO_STATUS.WAITING, lastBatchAt: now - 60_000 };
+    const elapsed = {
+      ...base,
+      status: AUTO_STATUS.WAITING,
+      lastBatchAt: now - 60_000,
+    };
     expect(nextAutoAction(elapsed, { batchActive: false, now })).toBe("start");
   });
 
   it("re-checks (start) after the cooldown even when the list was empty", () => {
     const now = 1_000_000;
-    const empty = { ...base, status: AUTO_STATUS.EMPTY, lastBatchAt: now - 61_000 };
+    const empty = {
+      ...base,
+      status: AUTO_STATUS.EMPTY,
+      lastBatchAt: now - 61_000,
+    };
     expect(nextAutoAction(empty, { batchActive: false, now })).toBe("start");
   });
 
@@ -1041,9 +1194,18 @@ describe("nextAutoAction — the alarm-tick decision", () => {
 describe("makeAutoState — harvestTask (issue #516)", () => {
   it("defaults harvestTask to null and preserves an object", () => {
     expect(makeAutoState({ enabled: true }).harvestTask).toBeNull();
-    expect(makeAutoState({ enabled: true, harvestTask: "x" as unknown }).harvestTask).toBeNull();
-    const task = { profileId: 3, taskId: "t", portal: "idealista", url: "https://x/" };
-    expect(makeAutoState({ enabled: true, harvestTask: task }).harvestTask).toEqual(task);
+    expect(
+      makeAutoState({ enabled: true, harvestTask: "x" as unknown }).harvestTask,
+    ).toBeNull();
+    const task = {
+      profileId: 3,
+      taskId: "t",
+      portal: "idealista",
+      url: "https://x/",
+    };
+    expect(
+      makeAutoState({ enabled: true, harvestTask: task }).harvestTask,
+    ).toEqual(task);
   });
 
   it("exposes the PLANNING and HARVESTING status constants", () => {
@@ -1070,18 +1232,32 @@ describe("makeAutoState — harvestTask (issue #516)", () => {
 describe("composeAutoState — durable-intent rehydration (issue #587)", () => {
   it("no intent (never started) → null, same as 'no auto'", () => {
     expect(composeAutoState(null, null, null)).toBeNull();
-    expect(composeAutoState({ enabled: false, portal: null, force: false }, null, null)).toBeNull();
+    expect(
+      composeAutoState(
+        { enabled: false, portal: null, force: false },
+        null,
+        null,
+      ),
+    ).toBeNull();
   });
 
   it("intent present, disabled (stopAuto persisted OFF) → null even with leftover session state", () => {
     const staleSession = { status: AUTO_STATUS.HARVESTING, batchesDone: 3 };
     expect(
-      composeAutoState({ enabled: false, portal: "idealista", force: false }, staleSession, null),
+      composeAutoState(
+        { enabled: false, portal: "idealista", force: false },
+        staleSession,
+        null,
+      ),
     ).toBeNull();
   });
 
   it("intent enabled + EMPTY session (a restart wiped chrome.storage.session) → an enabled state whose nextAutoAction is 'start'", () => {
-    const state = composeAutoState({ enabled: true, portal: "idealista", force: false }, null, null);
+    const state = composeAutoState(
+      { enabled: true, portal: "idealista", force: false },
+      null,
+      null,
+    );
     expect(state).not.toBeNull();
     expect(state!.enabled).toBe(true);
     expect(state!.portal).toBe("idealista");
@@ -1095,14 +1271,23 @@ describe("composeAutoState — durable-intent rehydration (issue #587)", () => {
   it("intent enabled + a live session (worker eviction, not a restart) → the persisted run state wins, so a stranded HARVEST is still visible as HARVESTING", () => {
     const session = {
       status: AUTO_STATUS.HARVESTING,
-      harvestTask: { profileId: 1, taskId: "t1", portal: "idealista", url: "https://x/" },
+      harvestTask: {
+        profileId: 1,
+        taskId: "t1",
+        portal: "idealista",
+        url: "https://x/",
+      },
       batchesDone: 2,
       lastBatchAt: 1000,
       totalPending: 5,
       batchSize: 50,
       timeoutSec: 60,
     };
-    const state = composeAutoState({ enabled: true, portal: "idealista", force: false }, session, null);
+    const state = composeAutoState(
+      { enabled: true, portal: "idealista", force: false },
+      session,
+      null,
+    );
     expect(state!.status).toBe(AUTO_STATUS.HARVESTING);
     expect(state!.harvestTask).toEqual(session.harvestTask);
     expect(state!.batchesDone).toBe(2);
@@ -1130,7 +1315,11 @@ describe("composeAutoState — durable-intent rehydration (issue #587)", () => {
   });
 
   it("portal null (drain every portal) survives rehydration, not just a truthy portal", () => {
-    const state = composeAutoState({ enabled: true, portal: null, force: true }, null, null);
+    const state = composeAutoState(
+      { enabled: true, portal: null, force: true },
+      null,
+      null,
+    );
     expect(state!.portal).toBeNull();
     expect(state!.force).toBe(true);
   });
@@ -1138,9 +1327,20 @@ describe("composeAutoState — durable-intent rehydration (issue #587)", () => {
 
 describe("autoIntentFromState — the durable half persisted by setAutoState (issue #587)", () => {
   it("null / disabled state → the default disabled intent (stopAuto durably clears it — EC-5)", () => {
-    expect(autoIntentFromState(null)).toEqual({ enabled: false, portal: null, force: false });
-    const stopped = { ...makeAutoState({ enabled: true, portal: "idealista" }), enabled: false };
-    expect(autoIntentFromState(stopped)).toEqual({ enabled: false, portal: null, force: false });
+    expect(autoIntentFromState(null)).toEqual({
+      enabled: false,
+      portal: null,
+      force: false,
+    });
+    const stopped = {
+      ...makeAutoState({ enabled: true, portal: "idealista" }),
+      enabled: false,
+    };
+    expect(autoIntentFromState(stopped)).toEqual({
+      enabled: false,
+      portal: null,
+      force: false,
+    });
   });
 
   it("enabled state → just {enabled, portal, force}, dropping every run-state field", () => {
@@ -1151,13 +1351,25 @@ describe("autoIntentFromState — the durable half persisted by setAutoState (is
       status: AUTO_STATUS.HARVESTING,
       batchesDone: 9,
     });
-    expect(autoIntentFromState(state)).toEqual({ enabled: true, portal: "idealista", force: true });
+    expect(autoIntentFromState(state)).toEqual({
+      enabled: true,
+      portal: "idealista",
+      force: true,
+    });
   });
 
   it("round-trips through composeAutoState with an empty session — the exact restart scenario", () => {
-    const original = makeAutoState({ enabled: true, portal: "milanuncios", force: false, timeoutSec: 120 });
+    const original = makeAutoState({
+      enabled: true,
+      portal: "milanuncios",
+      force: false,
+      timeoutSec: 120,
+    });
     const intent = autoIntentFromState(original);
-    const rehydrated = composeAutoState(intent, null, { batchSize: original.batchSize, timeoutSec: original.timeoutSec });
+    const rehydrated = composeAutoState(intent, null, {
+      batchSize: original.batchSize,
+      timeoutSec: original.timeoutSec,
+    });
     expect(rehydrated!.enabled).toBe(true);
     expect(rehydrated!.portal).toBe("milanuncios");
     expect(nextAutoAction(rehydrated, { batchActive: false })).toBe("start");
@@ -1212,8 +1424,16 @@ describe("the clobbering bug — pure state proof (issue #554)", () => {
 
   it("preserves BOTH searches' identities when a third arrives too — never a last-write-wins collapse", () => {
     let queue = makeSearchQueue();
-    queue = enqueueSearch(queue, { portal: "idealista", searchUrl: "https://x/a", urls: ["u1"] });
-    queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://y/b", urls: ["u2"] });
+    queue = enqueueSearch(queue, {
+      portal: "idealista",
+      searchUrl: "https://x/a",
+      urls: ["u1"],
+    });
+    queue = enqueueSearch(queue, {
+      portal: "aliseda",
+      searchUrl: "https://y/b",
+      urls: ["u2"],
+    });
     expect(searchQueueDepth(queue)).toBe(2);
     expect(queue.map((e) => e.portal)).toEqual(["idealista", "aliseda"]);
   });
@@ -1233,12 +1453,19 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
       urls: ["https://x/i1", "https://x/i2"],
     });
     expect(queue).toEqual([
-      { portal: "idealista", searchUrl: "https://x/1", urls: ["https://x/i1", "https://x/i2"] },
+      {
+        portal: "idealista",
+        searchUrl: "https://x/1",
+        urls: ["https://x/i1", "https://x/i2"],
+      },
     ]);
   });
 
   it("drops an entry with no portal (defensive against a malformed message)", () => {
-    const queue = enqueueSearch(makeSearchQueue(), { searchUrl: "https://x/1", urls: [] });
+    const queue = enqueueSearch(makeSearchQueue(), {
+      searchUrl: "https://x/1",
+      urls: [],
+    });
     expect(queue).toEqual([]);
   });
 
@@ -1247,13 +1474,23 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
       portal: "aliseda",
       urls: ["https://x/1", 42, null, ""],
     });
-    expect(queue).toEqual([{ portal: "aliseda", searchUrl: null, urls: ["https://x/1"] }]);
+    expect(queue).toEqual([
+      { portal: "aliseda", searchUrl: null, urls: ["https://x/1"] },
+    ]);
   });
 
   it("dequeues FIFO — the order searches were fired off in", () => {
     let queue = makeSearchQueue();
-    queue = enqueueSearch(queue, { portal: "idealista", searchUrl: "https://x/1", urls: [] });
-    queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/2", urls: [] });
+    queue = enqueueSearch(queue, {
+      portal: "idealista",
+      searchUrl: "https://x/1",
+      urls: [],
+    });
+    queue = enqueueSearch(queue, {
+      portal: "aliseda",
+      searchUrl: "https://x/2",
+      urls: [],
+    });
 
     const first = dequeueSearch(queue);
     expect(first.entry?.portal).toBe("idealista");
@@ -1272,7 +1509,11 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
 
   it("is pure — never mutates the array it was given", () => {
     const queue = makeSearchQueue();
-    const next = enqueueSearch(queue, { portal: "idealista", searchUrl: null, urls: [] });
+    const next = enqueueSearch(queue, {
+      portal: "idealista",
+      searchUrl: null,
+      urls: [],
+    });
     expect(queue).toEqual([]); // original untouched
     expect(next).not.toBe(queue);
   });
@@ -1283,8 +1524,16 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
   describe("dedupe (issue #556 review N3)", () => {
     it("drops an exact (portal, searchUrl) repeat instead of growing the queue", () => {
       let queue = makeSearchQueue();
-      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
-      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
+      queue = enqueueSearch(queue, {
+        portal: "aliseda",
+        searchUrl: "https://x/1",
+        urls: [],
+      });
+      queue = enqueueSearch(queue, {
+        portal: "aliseda",
+        searchUrl: "https://x/1",
+        urls: [],
+      });
       expect(searchQueueDepth(queue)).toBe(1);
     });
 
@@ -1303,8 +1552,16 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
 
     it("does NOT dedupe two DIFFERENT searches on the same portal", () => {
       let queue = makeSearchQueue();
-      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
-      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/2", urls: [] });
+      queue = enqueueSearch(queue, {
+        portal: "aliseda",
+        searchUrl: "https://x/1",
+        urls: [],
+      });
+      queue = enqueueSearch(queue, {
+        portal: "aliseda",
+        searchUrl: "https://x/2",
+        urls: [],
+      });
       expect(searchQueueDepth(queue)).toBe(2);
     });
 
@@ -1368,29 +1625,41 @@ describe("shouldAdvanceQueue — when the watchdog/loop-finally should pop the n
 
   it("treats a non-numeric/garbage depth as empty (defensive)", () => {
     expect(shouldAdvanceQueue(false, "x" as unknown as number)).toBe(false);
-    expect(shouldAdvanceQueue(false, undefined as unknown as number)).toBe(false);
+    expect(shouldAdvanceQueue(false, undefined as unknown as number)).toBe(
+      false,
+    );
   });
 });
 
 describe("shouldRecoverStrandedEnumeration — MV3 eviction recovery for the enumeration phase", () => {
   it("recovers when an enum state is persisted and nothing live is walking it", () => {
-    expect(shouldRecoverStrandedEnumeration(true, false, false, false)).toBe(true);
+    expect(shouldRecoverStrandedEnumeration(true, false, false, false)).toBe(
+      true,
+    );
   });
 
   it("does nothing when there's no enum state to recover", () => {
-    expect(shouldRecoverStrandedEnumeration(false, false, false, false)).toBe(false);
+    expect(shouldRecoverStrandedEnumeration(false, false, false, false)).toBe(
+      false,
+    );
   });
 
   it("does nothing while THIS worker is actively walking it (enumRunning)", () => {
-    expect(shouldRecoverStrandedEnumeration(true, true, false, false)).toBe(false);
+    expect(shouldRecoverStrandedEnumeration(true, true, false, false)).toBe(
+      false,
+    );
   });
 
   it("does nothing while a capture loop is driving (batchLooping)", () => {
-    expect(shouldRecoverStrandedEnumeration(true, false, true, false)).toBe(false);
+    expect(shouldRecoverStrandedEnumeration(true, false, true, false)).toBe(
+      false,
+    );
   });
 
   it("does nothing when a capture queue is already active (already handed off)", () => {
-    expect(shouldRecoverStrandedEnumeration(true, false, false, true)).toBe(false);
+    expect(shouldRecoverStrandedEnumeration(true, false, false, true)).toBe(
+      false,
+    );
   });
 });
 
@@ -1408,7 +1677,9 @@ describe("classifyEmptyCapture / EMPTY_REASON — a clean 'nothing left', never 
   it("classifies an empty queue as no-results when this search discovered nothing at all", () => {
     expect(classifyEmptyCapture(0, 0)).toBe(EMPTY_REASON.NO_RESULTS);
     expect(classifyEmptyCapture(0, undefined)).toBe(EMPTY_REASON.NO_RESULTS);
-    expect(classifyEmptyCapture(0, "x" as unknown as number)).toBe(EMPTY_REASON.NO_RESULTS);
+    expect(classifyEmptyCapture(0, "x" as unknown as number)).toBe(
+      EMPTY_REASON.NO_RESULTS,
+    );
   });
 });
 
@@ -1461,7 +1732,12 @@ describe("same-portal drain end to end — the exit criterion (issue #554)", () 
 
 describe("Block/challenge episodes (issue #634) — recordBlock/clearBlock/isPortalBlocked", () => {
   it("recordBlock on a never-blocked portal creates a NEW episode, unreported", () => {
-    const { state, isNewEpisode } = recordBlock(null, "idealista", "captcha_wall", 1000);
+    const { state, isNewEpisode } = recordBlock(
+      null,
+      "idealista",
+      "captcha_wall",
+      1000,
+    );
     expect(isNewEpisode).toBe(true);
     expect(state.idealista).toEqual({
       active: true,
@@ -1477,7 +1753,12 @@ describe("Block/challenge episodes (issue #634) — recordBlock/clearBlock/isPor
     // A second detection much later, even with a DIFFERENT reported signature
     // (a flaky/second marker on the same still-open episode) — the episode
     // itself doesn't change; only clearBlock ends it.
-    const second = recordBlock(first.state, "idealista", "cloudflare_challenge", 5000);
+    const second = recordBlock(
+      first.state,
+      "idealista",
+      "cloudflare_challenge",
+      5000,
+    );
     expect(second.isNewEpisode).toBe(false);
     expect(second.state).toEqual(first.state); // byte-for-byte unchanged
     expect(second.state.idealista.detectedAt).toBe(1000);
@@ -1514,7 +1795,10 @@ describe("Block/challenge episodes (issue #634) — recordBlock/clearBlock/isPor
     expect(isPortalBlocked({}, "")).toBe(false);
     expect(blockEntry(null, "idealista")).toBeNull();
     expect(
-      blockEntry({ idealista: { active: false, signature: "x", detectedAt: 1 } }, "idealista"),
+      blockEntry(
+        { idealista: { active: false, signature: "x", detectedAt: 1 } },
+        "idealista",
+      ),
     ).toBeNull();
   });
 
@@ -1548,7 +1832,12 @@ describe("Block episode TTL (issue #634 review B4 — a stuck-forever episode mu
   it("a detection AFTER expiry is a brand-new episode (re-alerts), not a silent extension of the old one", () => {
     const first = recordBlock(null, "idealista", "captcha_wall", 1000);
     const pastTtl = 1000 + BLOCK_EPISODE_TTL_MS + 1;
-    const second = recordBlock(first.state, "idealista", "captcha_wall", pastTtl);
+    const second = recordBlock(
+      first.state,
+      "idealista",
+      "captcha_wall",
+      pastTtl,
+    );
     expect(second.isNewEpisode).toBe(true); // re-alerts — the TTL boundary IS the re-alert point
     expect(second.state.idealista.detectedAt).toBe(pastTtl);
     expect(second.state.idealista.reported).toBe(false);
